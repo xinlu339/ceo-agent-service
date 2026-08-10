@@ -891,22 +891,6 @@ def test_setup_dingtalk_cli_uses_configured_installer_and_finishes_when_ready(
     assert event.evidence["channel_state"] == "ready"
 
 
-def test_legacy_setup_mcp_action_fails_closed_without_writing_config(tmp_path: Path):
-    config_path = tmp_path / "config.toml"
-
-    event = run_setup_action(
-        "setup_mcp",
-        repo_root=tmp_path,
-        env={"CODEX_CONFIG_PATH": str(config_path)},
-    )
-
-    assert event.status == "failed"
-    assert "reviewed Friday Memory bridge ships with this service" in event.summary
-    assert "automatic secret setup is disabled" in event.summary
-    assert event.evidence == {"automatic_secret_setup": False}
-    assert not config_path.exists()
-
-
 def test_run_setup_action_dispatches_wechat_connect(monkeypatch, tmp_path: Path):
     from app.wechat.setup import WechatSetupResult
 

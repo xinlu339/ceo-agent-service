@@ -942,8 +942,6 @@ def run_setup_action(
         )
     if action_id == "setup_service_config":
         return _setup_service_config(repo_root, env or {})
-    if action_id == "setup_mcp":
-        return _setup_mcp(repo_root, env or {})
     if action_id == "connect_wechat":
         return _run_wechat_setup_action(action_id)
     if action_id == "run_dry_run":
@@ -1242,25 +1240,6 @@ def _seed_missing_file(path: Path, content: str) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-
-
-def _setup_mcp(
-    repo_root: Path,
-    env: dict[str, str],
-) -> SetupWizardEvent:
-    del repo_root, env
-    return SetupWizardEvent(
-        step_id="mcp",
-        action_id="setup_mcp",
-        status="failed",
-        summary=(
-            "The reviewed Friday Memory bridge ships with this service. Configure "
-            "the Connector URL and API key locally; automatic secret setup is disabled. "
-            "Exa, Xiaoqing, and Lark already use reviewed adapters; complete any local "
-            "OAuth/CLI login outside chat, and install the Nvwa skill from a local source."
-        ),
-        evidence={"automatic_secret_setup": False},
-    )
 
 
 def build_wizard_status(store: AutoReplyStore) -> SetupWizardStatus:
