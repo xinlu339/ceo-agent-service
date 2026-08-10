@@ -570,6 +570,7 @@ def check_setup_step(
             "lark_state": lark.state,
             "nvwa_ready": nvwa.ready,
             "nvwa_state": nvwa.state,
+            "integrations_ready": report.integrations_ready,
         }
         if not memory_bridge.ready:
             return _status(
@@ -579,17 +580,21 @@ def check_setup_step(
                 summary="The reviewed Friday Memory bridge is missing.",
                 evidence=evidence,
             )
-        if not memory_tools.ready:
+        if not report.integrations_ready:
+            missing = ", ".join(
+                capability.label
+                for capability in report.integration_capabilities
+                if not capability.ready
+            )
             return _status(
                 "mcp",
                 title="Pi Reviewed Integrations",
                 status="needs_action",
                 summary=(
-                    "The reviewed Friday Memory bridge is installed. Configure the "
-                    "Memory Connector URL and API key locally. Exa is available "
-                    "through its reviewed read-only bridge; Xiaoqing requires local "
-                    "OAuth, Lark uses its reviewed official CLI adapter, and Nvwa "
-                    "requires a local skill installation."
+                    "The reviewed Friday Memory bridge is installed. Complete the "
+                    f"requested Pi integration set: {missing}. All reviewed adapters "
+                    "remain independently fail-closed until their local configuration "
+                    "or authentication is ready."
                 ),
                 evidence=evidence,
             )

@@ -83,6 +83,10 @@ def test_capability_report_uses_real_reviewed_boundaries_without_echoing_keys(
         "app.pi_capabilities.probe_pi_model_resolution",
         lambda **_kwargs: (True, "Resolved offline"),
     )
+    nvwa = tmp_path / "nvwa" / "SKILL.md"
+    nvwa.parent.mkdir()
+    nvwa.write_text("# Nvwa", encoding="utf-8")
+    monkeypatch.setattr("app.pi_capabilities.nvwa_skill_path", lambda: nvwa)
 
     report = probe_pi_capabilities(
         env_values=env_values,
@@ -103,6 +107,10 @@ def test_capability_report_uses_real_reviewed_boundaries_without_echoing_keys(
     assert report.get("exa").ready is True
     assert report.get("lark").state == "ready"
     assert report.get("lark").ready is True
+    assert report.get("nvwa").ready is True
+    assert report.integrations_ready is True
+    assert report.full_stack_ready is True
+    assert report.as_dict()["full_stack_ready"] is True
     serialized = str(report.as_dict())
     assert "provider-secret" not in serialized
     assert "memory-secret" not in serialized
@@ -146,6 +154,7 @@ def test_capability_report_requires_provider_key_but_not_optional_memory(
     assert report.get("provider_api_key").state == "missing_config"
     assert report.get("memory_bridge").ready is True
     assert report.get("memory_tools").state == "missing_config"
+    assert report.full_stack_ready is False
 
 
 def test_capability_subprocess_environment_strips_all_provider_and_memory_secrets(

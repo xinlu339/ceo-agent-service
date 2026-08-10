@@ -4,7 +4,7 @@
 
 CEO Agent Service 会从钉钉读取私聊、群聊、在线文档、OA 审批、日程邀请和会议权限请求，把需要判断的消息交给同级 `../pi` 项目的 Pi Agent 处理，并把每一次决策、证据、发送结果和错误状态写入本地 SQLite，方便审计、反馈和持续修复。
 
-Pi 运行时要求 Node.js `22.19.0+`。Provider、Model、API protocol、Base URL、API Key、Thinking level、Node binary 和 Pi CLI path 可在 `/config?tab=agent` 配置。API Key 只保存在权限为 `0600` 的 `.env` 中，通过子进程环境变量传递；页面不回显，命令行参数和 Pi `models.json` 也不保存明文。
+Pi 运行时要求 Node.js `22.19.0+`。Provider、Model、API protocol、Base URL、API Key、Thinking level、Node binary 和 Pi CLI path 可在 `/config?tab=agent` 配置。API Key 只保存在权限为 `0600` 的 `.env` 中，通过子进程环境变量传递；页面不回显，命令行参数和 Pi `models.json` 也不保存明文。未填写 Base URL 时，所选 API protocol 必须与 Pi 内置 provider/model 的真实协议一致；自定义协议或自定义模型通常应同时配置可信的 Base URL，保存前会通过 Pi resolver 离线验证最终 provider、model、protocol 和 endpoint。
 
 > 这个项目的目标不是替人“随便自动回复”，而是把企业 IM 中可结构化处理的信息流接入一个可审计、可回滚、可人工接管的本地 agent 工作流。
 

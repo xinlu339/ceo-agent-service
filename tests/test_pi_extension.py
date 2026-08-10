@@ -180,6 +180,29 @@ def _run_tool(
     return json.loads(completed.stdout), log_path
 
 
+def _registered_tools(tmp_path: Path) -> list[str]:
+    request = {
+        "loaderPath": str(
+            pi_cli_path().parent / "core" / "extensions" / "loader.js"
+        ),
+        "extensionPath": str(pi_extension_path()),
+        "cwd": str(tmp_path),
+        "listTools": True,
+    }
+    completed = subprocess.run(
+        [pi_node_binary(), str(HARNESS)],
+        input=json.dumps(request),
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["ok"] is True
+    return payload["tools"]
+
+
 def _metadata(
     cli_path: str,
     effect: str,
@@ -199,6 +222,35 @@ def _lark_metadata(name: str, risk: str, *, danger: bool = False) -> dict:
         "name": name,
         "_meta": {"risk": risk, "danger": danger},
     }
+
+
+def test_extension_registers_all_reviewed_capabilities_together(tmp_path: Path):
+    assert _registered_tools(tmp_path) == sorted(
+        [
+            "document_upload",
+            "download_attachment",
+            "execute_reviewed_lark_read",
+            "execute_reviewed_lark_write",
+            "execute_reviewed_read",
+            "execute_reviewed_write",
+            "get_dashboard_stats",
+            "get_interview_context",
+            "list_candidate_interviews",
+            "memory_get",
+            "memory_recall",
+            "memory_write",
+            "search_candidates",
+            "timeline_get",
+            "upload_interview_result",
+            "user_get",
+            "web_fetch_exa",
+            "web_search_exa",
+            "workspace_list",
+            "workspace_read",
+            "workspace_search",
+            "write_work_profile",
+        ]
+    )
 
 
 def _fake_xiaoqing_bridge(tmp_path: Path) -> tuple[Path, Path]:

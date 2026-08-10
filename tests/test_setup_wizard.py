@@ -714,6 +714,9 @@ def test_check_mcp_reports_reviewed_bridge_configuration_state(
     assert status.evidence["lark_state"] == "missing_cli"
     assert status.evidence["nvwa_ready"] is False
     assert status.evidence["nvwa_state"] == "missing_config"
+    assert status.evidence["integrations_ready"] is False
+    assert "Friday Memory tools" in status.summary
+    assert "Lark CLI tools" in status.summary
 
 
 def test_run_setup_cli_components_runs_bootstrap_script(monkeypatch, tmp_path: Path):

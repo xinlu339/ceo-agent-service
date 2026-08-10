@@ -2602,8 +2602,26 @@ def _render_agent_config(*, saved: bool = False) -> str:
         or os.environ.get(PI_XIAOQING_ACCESS_TOKEN_ENV, "")
     )
     capability_report = probe_pi_capabilities(env_values=env_values)
-    status_label = "Ready" if capability_report.runtime_ready else "Needs configuration"
-    status_class = "ready" if capability_report.runtime_ready else "blocked"
+    if capability_report.full_stack_ready:
+        status_label = "Pi runtime and requested integrations are ready"
+        status_class = "ready"
+    elif capability_report.runtime_ready:
+        status_label = "Pi runtime is ready; integrations need setup"
+        status_class = "blocked"
+    else:
+        status_label = "Pi runtime needs configuration"
+        status_class = "blocked"
+    missing_integrations = [
+        item.label
+        for item in capability_report.integration_capabilities
+        if not item.ready
+    ]
+    integration_summary = (
+        "DWS、Friday Memory、Xiaoqing、Exa、Lark 与 Nvwa 均已就绪，"
+        "各 reviewed adapter 可在同一套 Pi 配置下同时使用。"
+        if not missing_integrations
+        else "仍需配置或认证：" + "、".join(missing_integrations) + "。"
+    )
     saved_html = "<p class=\"muted\">Saved.</p>" if saved else ""
     api_options = "".join(
         f'<option value="{escape(value)}"'
@@ -2702,9 +2720,12 @@ def _render_agent_config(*, saved: bool = False) -> str:
         "<h2>Pi Agent runtime</h2>"
         f'<p><span class="setup-step-status setup-status-{status_class}">'
         f"{escape(status_label)}</span></p>"
+        f'<p class="muted">{escape(integration_summary)}</p>'
         "<p class=\"muted\">API Key 只写入本地 .env，页面永远不回显；"
         "models.json 只保存环境变量引用。自定义 Base URL 会接收该 API Key，"
         "只应配置可信 HTTPS endpoint；HTTP 仅允许本机 loopback。"
+        "未填写 Base URL 时，API protocol 必须与 Pi 内置模型的真实协议一致；"
+        "不一致的配置会在保存前拒绝，避免页面配置与实际请求协议不同。"
         "保存后新启动的 Agent 调用立即使用新配置。</p>"
         f"{saved_html}"
         '<form method="post" action="/config/agent">'

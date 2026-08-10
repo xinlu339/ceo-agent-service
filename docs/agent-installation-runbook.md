@@ -176,7 +176,11 @@ confirmation instead of asking the user to run commands.
 3. Configure provider, model, API protocol, Base URL, API Key, thinking level,
    Node path, Pi CLI path, agent directory, and session directory on
    `/config?tab=agent`. The API Key must stay in the ignored `.env` with mode
-   `0600`; generated `models.json` contains only `$CEO_PI_API_KEY`.
+   `0600`; generated `models.json` contains only `$CEO_PI_API_KEY`. When Base
+   URL is blank, the selected API protocol must match the built-in Pi model's
+   actual protocol. Custom protocols or custom models normally require a
+   trusted Base URL; the save handler verifies the resolved provider, model,
+   protocol, and endpoint offline before writing configuration.
 
 4. Confirm continuity support later through a dry-run worker pass; the service
    resumes local Pi sessions from the configured Pi session directory.

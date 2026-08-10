@@ -70,6 +70,12 @@ def test_pi_agent_config_page_never_renders_existing_api_key(
     assert "Xiaoqing MCP URL" in html
     assert "Xiaoqing OAuth token" in html
     assert "Xiaoqing Interview" in html
+    assert (
+        "Pi runtime is ready; integrations need setup" in html
+        or "Pi runtime needs configuration" in html
+    )
+    assert "仍需配置或认证" in html
+    assert "API protocol 必须与 Pi 内置模型的真实协议一致" in html
     assert "状态会区分缺少本地配置、缺少 OAuth/CLI 登录和工具不可用" in html
     assert "Unsupported" not in html
     assert "Pi bash" not in html
@@ -243,6 +249,28 @@ def test_custom_model_config_uses_pi_conservative_defaults():
 
     model = config["providers"]["custom-provider"]["models"][0]
     assert model == {"id": "custom-model", "name": "custom-model"}
+
+
+def test_pi_agent_config_rejects_api_protocol_that_would_be_silently_ignored(
+    tmp_path: Path,
+    monkeypatch,
+):
+    env_path = tmp_path / ".env"
+    monkeypatch.setenv("CEO_ENV_FILE", str(env_path))
+
+    status, _, html = handle_agent_config_post(
+        _agent_form(
+            tmp_path,
+            pi_api="openai-completions",
+            pi_base_url="",
+            pi_api_key="must-not-be-written",
+        )
+    )
+
+    assert status == 400
+    assert "Requested API openai-completions resolved to" in html
+    assert "must-not-be-written" not in html
+    assert not env_path.exists()
 
 
 def test_pi_agent_config_rejects_insecure_external_exa_url(tmp_path: Path, monkeypatch):

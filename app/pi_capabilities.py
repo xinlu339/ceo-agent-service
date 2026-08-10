@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from app.bounded_process import ProcessOutputLimitError, run_bounded_process
 from app.config import repo_root
+from app.nvwa_review import nvwa_skill_path
 from app.pi_runner import (
     DEFAULT_PI_EXA_MCP_URL,
     DEFAULT_PI_XIAOQING_MCP_URL,
@@ -69,7 +70,7 @@ if (loaded.errors.length > 0 || loaded.extensions.length !== 1) {
 """
 _MODEL_RESOLUTION_PROBE_SCRIPT = r"""
 import { pathToFileURL } from "node:url";
-const [runtimePath, resolverPath, modelsPath, authPath, modelsStorePath, provider, model] = process.argv.slice(1);
+const [runtimePath, resolverPath, modelsPath, authPath, modelsStorePath, provider, model, expectedApi, expectedBaseUrl] = process.argv.slice(1);
 const { ModelRuntime } = await import(pathToFileURL(runtimePath).href);
 const { resolveCliModel } = await import(pathToFileURL(resolverPath).href);
 const runtime = await ModelRuntime.create({
@@ -97,8 +98,31 @@ if (resolved.model.provider.toLowerCase() !== provider.toLowerCase() || resolved
   process.stderr.write(`Requested ${provider}/${model} resolved to ${resolved.model.provider}/${resolved.model.id}`);
   process.exit(1);
 }
-process.stdout.write(JSON.stringify({ provider: resolved.model.provider, model: resolved.model.id }));
+if (resolved.model.api !== expectedApi) {
+  process.stderr.write(`Requested API ${expectedApi} resolved to ${resolved.model.api}`);
+  process.exit(1);
+}
+const actualBaseUrl = String(resolved.model.baseUrl || "").replace(/\/+$/u, "");
+if (expectedBaseUrl && actualBaseUrl !== expectedBaseUrl) {
+  process.stderr.write("Requested Base URL did not resolve to the configured endpoint");
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify({
+  provider: resolved.model.provider,
+  model: resolved.model.id,
+  api: resolved.model.api,
+  baseUrl: actualBaseUrl,
+}));
 """
+
+REQUESTED_PI_INTEGRATION_KEYS = (
+    "dws_reviewed_tools",
+    "memory_tools",
+    "xiaoqing_interview",
+    "exa",
+    "lark",
+    "nvwa",
+)
 
 
 @dataclass(frozen=True)
@@ -122,6 +146,20 @@ class PiCapabilityReport:
     def runtime_ready(self) -> bool:
         return all(item.ready for item in self.capabilities if item.required)
 
+    @property
+    def integration_capabilities(self) -> tuple[PiCapability, ...]:
+        requested = frozenset(REQUESTED_PI_INTEGRATION_KEYS)
+        return tuple(item for item in self.capabilities if item.key in requested)
+
+    @property
+    def integrations_ready(self) -> bool:
+        integrations = self.integration_capabilities
+        return bool(integrations) and all(item.ready for item in integrations)
+
+    @property
+    def full_stack_ready(self) -> bool:
+        return self.runtime_ready and self.integrations_ready
+
     def get(self, key: str) -> PiCapability:
         for item in self.capabilities:
             if item.key == key:
@@ -131,6 +169,8 @@ class PiCapabilityReport:
     def as_dict(self) -> dict[str, object]:
         return {
             "runtime_ready": self.runtime_ready,
+            "integrations_ready": self.integrations_ready,
+            "full_stack_ready": self.full_stack_ready,
             "capabilities": [item.as_dict() for item in self.capabilities],
         }
 
@@ -266,12 +306,7 @@ def probe_pi_capabilities(
         and xiaoqing_token_ready
     )
 
-    nvwa_paths = (
-        Path.home() / ".agents" / "skills" / "nvwa" / "SKILL.md",
-        Path.home() / ".agents" / "skills" / "nuwa" / "SKILL.md",
-        Path.home() / ".agents" / "skills" / "huashu-nuwa" / "SKILL.md",
-    )
-    nvwa_path = next((path for path in nvwa_paths if path.is_file()), None)
+    nvwa_path = nvwa_skill_path()
 
     capabilities = (
         PiCapability(
@@ -511,6 +546,8 @@ def _probe_pi_model_resolution_cached(
                     str(root / "models-store.json"),
                     provider,
                     model,
+                    api,
+                    base_url,
                 ],
                 timeout=15,
                 env=env,
@@ -530,7 +567,11 @@ def _probe_pi_model_resolution_cached(
         return False, "Pi model resolution returned invalid JSON"
     if not isinstance(payload, dict):
         return False, "Pi model resolution returned invalid output"
-    return True, f"Resolved offline: {provider}/{model}"
+    return (
+        True,
+        f"Resolved offline: {provider}/{model} · {api} · "
+        f"{base_url or 'provider default endpoint'}",
+    )
 
 
 def _configured_value(
