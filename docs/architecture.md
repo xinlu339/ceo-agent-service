@@ -4,14 +4,14 @@
 
 ## 目标
 
-CEO Agent Service 是本地优先的企业消息处理服务。它发现需要 Derek 处理的消息和审批，将原始触发、可用上下文和工具入口交给 Direct Agent，并保存结构化终态和原生 Codex session 审计指针。
+CEO Agent Service 是本地优先的企业消息处理服务。它发现需要 Derek 处理的消息和审批，将原始触发、可用上下文和工具入口交给基于 Pi 的 Direct Agent，并保存结构化终态和原生 Pi session 审计指针。
 
 核心原则：
 
 - Producer 只发现触发并入队，不做业务判断。
-- Direct Agent 自行读取材料、判断任务并直接调用获准的 CLI/MCP 工具。
+- Direct Agent 自行读取材料、判断任务并只调用仓库内 reviewed Pi tools：受限本地读取、按 schema 校验的 DWS read/write，以及配置可用时的 Friday Memory tools。
 - Service 只负责依赖 gate、队列生命周期、对话 session ID 复用、结果映射和精确重复投递幂等。
-- 已开始但结果不确定的写操作不自动重放，只进入只读 reconciliation。
+- Pi 的工具 start/end 事件会实时分类并持久化；已开始但结果不确定的写操作不自动重放。受控 reconciliation 只暴露 reviewed read tools，并要求可信 operation/target/result digest 与唯一 proof；证据不足时继续保留 `side_effect_state=unknown`。
 - 诊断不是完成；该规则由 Direct Agent 执行并通过严格 AgentResult 返回，service 不再复制工具事件后二次判断。
 
 ## 运行形态
@@ -40,22 +40,23 @@ reply_tasks queue
       v
 One Direct Agent run
       |
-      +--> live CLI/MCP reads
-      +--> approved CLI/MCP writes
+      +--> reviewed local read tools
+      +--> reviewed DWS reads and approved writes
+      +--> reviewed Friday Memory tools when configured
       |
       v
-Append-only tool events and receipts
+Pi JSON events and session transcript
       |
       v
 Terminal result mapping
       |
       +--> delivery / completed / skipped / needs_human / failed
-      +--> unknown write -> read-only reconciliation
+      +--> unknown write -> read-only reconciliation / retained unknown
 ```
 
 Direct Agent 的输入包括原始 trigger、已有对话事实、材料引用、process/task ID、链接和精确读取命令。已有事实必须复用，不能再次追问。OA 详情、当前任务归属、表单、评论和附件由 agent 通过 live DWS read 获取；service 不按申请人或标题猜目标，不预读正文，也不搜索同名材料作为替代。
 
-Direct Agent 使用本机 Codex 原生配置暴露的 MCP、plugin、App、shell、skill 和 DWS/Lark CLI。Service 不维护第二套 MCP registry、effect 分类器、工具事件副本或写操作回执。认证由 channel gate 管理；Agent 不执行 login/reset/logout。
+Direct Agent 通过同级 `../pi/packages/coding-agent/dist/cli.js` 运行，要求 Node 22.19+。Pi 使用独立的 agent/session 目录，配置由 `CEO_PI_*` 环境变量和安全生成的 `models.json` 提供。启动参数禁用 builtin tools 和其他 extensions，只加载 `pi_extensions/ceo_agent_tools.ts`。DWS 与 Lark 通过 reviewed CLI argv adapter 使用；Friday Memory、Exa 和 Xiaoqing 通过受控 Python MCP bridge 使用。认证由 channel gate、本地 OAuth 或 Connector 配置管理；Agent 不执行 login/reset/logout。
 
 ## 模块边界
 
@@ -64,8 +65,13 @@ Direct Agent 使用本机 Codex 原生配置暴露的 MCP、plugin、App、shell
 | `app.channel_gate` | 在 agent 启动前检查 DWS/Lark 等通道可用性并协调一次性登录请求 |
 | `app.worker.DingTalkAutoReplyWorker` | 发现、入队、领取、结果映射和恢复调度 |
 | `app.agent_context` | 向 Direct Agent 提供原始事实、材料引用和明确命令 |
-| `app.agent_runner.DirectAgentRunner` | 复用仍存在的对话 Codex session；若持久化指针对应的本地 session 已缺失，则清理旧指针并从新 session 继续，避免 `codex exec resume` 在任务启动前失败 |
-| `app.native_cli_metadata` | 为已审阅 CLI/MCP 能力提供结构化 effect metadata |
+| `app.pi_runner.PiRunner` | 发现 Node 22.19+、生成隔离的 Pi 命令和环境、以环境变量传递 API Key，并生成不含明文凭据的 `models.json` |
+| `app.pi_capabilities` | 统一探测 Node、Pi CLI、reviewed extension、Provider、DWS、Friday Memory、Exa、Xiaoqing、Lark 与 Nvwa 状态 |
+| `app.pi_memory_bridge` | 使用官方 MCP client 调用 Friday Memory，执行参数白名单、ACL scope 禁止项和写回执校验 |
+| `pi_extensions/ceo_agent_tools.ts` | 注册 reviewed local/DWS/Memory tools，隔离子进程凭证并生成可信 effect receipt |
+| `app.agent_runner.DirectAgentRunner` | 复用仍存在的对话 Pi session；若持久化指针对应的本地 session 已缺失，则清理旧指针并从新 session 继续 |
+| `app.pi_events` / `app.pi_history` | 解析 Pi JSON 事件、session ID、assistant text、工具审计事件和本地 session JSONL |
+| `app.native_cli_metadata` | 为历史审计和已审阅 CLI 能力提供结构化 effect metadata |
 | `app.store.AutoReplyStore` | 持久化任务、agent run、append-only events、attempt、delivery 和回执 |
 | `app.quality_gate` | 对所有必需持久化队列做 fail-closed 覆盖检查，区分须恢复的 violation 与正常进行中的 attention |
 | `app.audit_web` | 本地审计、人工核对和受保护的 mutation API |
@@ -75,7 +81,9 @@ Service 不替 agent 阅读业务文档、选择业务材料、恢复 OA target�
 
 ## 凭证规则
 
-- DWS 和 Lark CLI 复用当前 macOS 用户正常登录后保存在各 CLI 标准位置的凭证。
+- DWS 与 Lark 复用当前 macOS 用户正常登录后保存在 CLI 标准位置的凭证；Pi 仅通过 reviewed adapter 调用，不读取或复制凭证。
+- Pi Provider API Key 只保存在权限为 `0600` 的 `.env`，通过 `CEO_PI_API_KEY` 子进程环境变量传递；不得放入命令参数、日志、页面回显或 `models.json` 明文。
+- Base URL 只接受绝对 HTTP(S) URL，且不能携带用户名、密码、query 或 fragment。
 - Service 不导出、导入、复制或恢复认证 archive，也不维护第二套 token。
 - Agent 永远不得执行 auth login/reset/logout，不能自行弹出授权页面。
 - Channel gate 使用结构化 status 和一次 live authenticated probe 判断 `ready`、`needs_login`、`blocked` 或 `unavailable`。
@@ -91,7 +99,7 @@ Service 不替 agent 阅读业务文档、选择业务材料、恢复 OA target�
 
 ## 终态与恢复
 
-`agent_runs` 保存一次 Direct Agent generation 的状态和最终 result；`agent_run_events` 按 sequence 追加 CLI/MCP 开始、完成和回执事件。
+`agent_runs` 保存一次 Direct Agent generation 的状态和最终 result。Pi session JSONL 是模型与工具过程的主要运行审计；业务库保留兼容 session 字段和 transcript 行范围。
 
 | 状态 | 含义 |
 | --- | --- |
@@ -100,7 +108,7 @@ Service 不替 agent 阅读业务文档、选择业务材料、恢复 OA target�
 | `failed` | 已确认失败，按任务策略决定是否生成新 generation |
 | `unknown` | 写操作可能发生但没有可靠回执，只允许只读核对 |
 
-当 result 声称 `completed + confirmed` 且任务要求外部动作时，必须存在持久化的 completed effectful event 或执行回执。只有诊断而没有动作时不能标 completed。Reconciliation 只能查询已有操作结果；确认未执行后，后续修正必须创建新的明确 generation，不能重放结果未知的调用。
+只有诊断而没有动作时不能标 completed。结果未知的外部写操作不能重放；服务在同一会话锁下运行只读 reconciliation，且只有唯一匹配的可信 read receipt 和 proof 才能收敛为 confirmed 或 absent。Provider、进程、lifecycle 或证据暂时失败时保持 unknown 并退避重试；出现 reconciliation 写工具则以 `reconciliation_write_forbidden` 拒绝。
 
 ## 投递一致性
 
@@ -134,7 +142,7 @@ Direct Agent 按 OA skill 工作：
 | 反馈 | `feedback_events`、`service_bugfix_candidates` |
 | 会议 | `meeting_alignment_jobs`、`meeting_alignment_runs` |
 | 工作事项 | `work_summary_inputs`、`work_projects`、`work_todos`、`work_updates`、`follow_up_drafts` |
-| 服务状态 | `service_state`、`codex_session_locks` |
+| 服务状态 | `service_state`、`codex_session_locks`（兼容表名，当前锁定 Pi session） |
 
 外部可见动作必须留下本地事件或回执。Recoverable failed/blocked 不能伪装成完成；不可恢复原因必须明确落库，避免每轮重复处理。
 
@@ -149,8 +157,9 @@ DingTalk/Lark channel gate；结果写入本地机器可读状态文件。
 排队或恢复进行中。回复 attempt 以 `channel + conversation_id + trigger_message_id`
 取最新行，避免已经由后续 `sent` 或 `skipped` 收敛的旧 `blocked` 持续报警。
 
-巡检只发现并保留证据，不直接重放外部写入。写入结果未知时由只读 reconciliation
-核对；确认未发生后，才允许创建新的 generation。完整的事实源矩阵、阈值、JSON
+巡检只发现并保留证据，不直接重放外部写入。受控只读 reconciliation 只能查询外部状态，
+不能重放原动作；证据无法唯一证明 confirmed/absent 时继续保持 unknown 并等待下一次退避核对。
+完整的事实源矩阵、阈值、JSON
 契约、测试不变量和待实现的 72 小时/增量检查见
 [docs/quality-inspection.md](quality-inspection.md)。
 
@@ -159,7 +168,7 @@ DingTalk/Lark channel gate；结果写入本地机器可读状态文件。
 - 会议对齐使用 `meeting_alignment_jobs` 和 `meeting_alignment_runs` 独立排队。
 - 工作事项由 scanners、task agent、project/TODO store 和 follow-up 流程处理。
 - 微信 reader/producer/consumer/sender 使用独立组件，但复用 generation、审计和投递幂等原则。
-- Memory Connector、DWS、Lark 和其他 MCP/CLI 调用必须出现在 agent event 审计中。
+- reviewed DWS、Lark、Friday Memory、Exa 与 Xiaoqing 工具调用应出现在 Pi session 审计中；任意未注册工具不得出现为成功。Memory/Xiaoqing/Lark/DWS 写入只有 Extension 回执与预期 operation/target/result proof 完全一致时才可确认。
 - Task maintenance loop 每轮做本地周报到期检查；管理者 OKR 周报默认周日 18:00 后执行一次，失败按 `CEO_WEEKLY_OKR_RETRY_SECONDS` 重试。只有实时 OKR 获取、文档创建回读和群消息发送都确认后，才记录当周完成。
 
 ## 安全边界

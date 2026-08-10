@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import timedelta
 from pathlib import Path
@@ -36,7 +37,7 @@ def read_env_file(path: Path | None = None) -> dict[str, str]:
         key = key.strip()
         if not key:
             continue
-        values[key] = _decode_env_value(value.strip())
+        values[key] = _decode_env_value(key, value.strip())
     return values
 
 
@@ -61,21 +62,52 @@ def write_env_values(updates: dict[str, str], path: Path | None = None) -> Path:
         lines.append(f"{key}={_encode_env_value(value)}")
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    try:
+        env_path.chmod(0o600)
+    except OSError:
+        pass
     for key, value in updates.items():
         os.environ[key] = value
     return env_path
 
 
-def _decode_env_value(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        value = value[1:-1]
-    return os.path.expandvars(value)
+def _decode_env_value(key: str, value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = value[1:-1]
+    elif len(value) >= 2 and value[0] == value[-1] == "'":
+        decoded = value[1:-1]
+    else:
+        decoded = value
+    if _literal_env_value(key):
+        return decoded
+    return os.path.expandvars(decoded)
 
 
 def _encode_env_value(value: str) -> str:
-    if not value or any(character.isspace() for character in value):
-        return '"' + value.replace('"', '\\"') + '"'
+    if not value or any(character.isspace() for character in value) or any(
+        character in value for character in ('"', "'", "\\", "#", "$")
+    ):
+        return json.dumps(value, ensure_ascii=False)
     return value
+
+
+def _literal_env_value(key: str) -> bool:
+    normalized = key.upper()
+    return any(
+        marker in normalized
+        for marker in (
+            "API_KEY",
+            "ACCESS_TOKEN",
+            "AUTHORIZATION",
+            "BEARER_TOKEN",
+            "CLIENT_SECRET",
+            "PRIVATE_KEY",
+            "PASSWORD",
+        )
+    )
 
 
 load_env_file()
@@ -315,7 +347,7 @@ def _env_truthy(name: str) -> bool:
 
 
 def feishu_cli_binary() -> str:
-    return os.getenv("CEO_FEISHU_CLI_BINARY", "lark").strip() or "lark"
+    return os.getenv("CEO_FEISHU_CLI_BINARY", "lark-cli").strip() or "lark-cli"
 
 
 def feishu_live_send_enabled() -> bool:
@@ -401,7 +433,7 @@ def wechat_send_mode() -> str:
 
 
 def wechat_fetch_articles() -> bool:
-    """Fetch shared-article bodies to enrich Codex context (default on)."""
+    """Fetch shared-article bodies to enrich Pi context (default on)."""
     return os.getenv("CEO_WECHAT_FETCH_ARTICLES", "1").strip().lower() in ("1", "true", "yes", "on")
 
 

@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 
+from app.agent_result import EffectKind
 from app.agent_runner import DirectAgentRunner
 from app.channel_gate import ChannelGateResult, ChannelGateState
 from app.dingtalk_models import DingTalkMessage
@@ -12,6 +13,7 @@ from app.meeting_alignment import (
     produce_meeting_alignment_jobs,
 )
 from app.meeting_alignment_models import MeetingAlignmentDecision
+from app.native_cli_metadata import NativeCliMetadataClassifier
 from app.process_runner import ProcessRunResult
 from app.worker import DingTalkAutoReplyWorker
 
@@ -259,7 +261,14 @@ def _direct_agent_pipeline(
         store=store,
         workspace=tmp_path,
         executor=CapturedJsonlExecutor(
-            Path(__file__).parents[1] / "fixtures" / "codex_exec" / fixture_name
+            Path(__file__).parents[1] / "fixtures" / "pi_exec" / fixture_name
+        ),
+        native_cli_classifier=NativeCliMetadataClassifier(
+            reviewed_effects={
+                ("dws", "chat message send"): EffectKind.EFFECTFUL,
+                ("dws", "chat message add-text-emotion"): EffectKind.EFFECTFUL,
+                ("dws", "ding message send"): EffectKind.EFFECTFUL,
+            }
         ),
         owner="local-pipeline-agent",
     )
@@ -277,7 +286,7 @@ def _direct_agent_pipeline(
     return worker, store
 
 
-def test_direct_agent_local_pipeline_send_uses_codex_session_audit(tmp_path):
+def test_direct_agent_local_pipeline_send_uses_confirmed_pi_receipt(tmp_path):
     worker, store = _direct_agent_pipeline(
         tmp_path,
         fixture_name="dingtalk_send.jsonl",
@@ -288,11 +297,20 @@ def test_direct_agent_local_pipeline_send_uses_codex_session_audit(tmp_path):
     task = store.get_reply_task_for_message("cid-1", "msg-1")
     run = store.get_agent_run_for_task_generation(task.id, "g1")
     assert task.status == "done"
-    assert store.list_agent_execution_receipts(run.id) == []
+    receipts = store.list_agent_execution_receipts(run.id)
+    assert len(receipts) == 1
+    assert receipts[0].cli == "dws"
+    assert receipts[0].command_path == "chat message send"
+    assert receipts[0].safe_to_confirm is True
+    assert run.side_effect_state == "confirmed"
+    assert [event["type"] for event in run.tool_events] == [
+        "item.started",
+        "item.completed",
+    ]
     assert run.codex_session_id
 
 
-def test_direct_agent_local_pipeline_handoff_uses_codex_session_audit(
+def test_direct_agent_local_pipeline_handoff_uses_confirmed_pi_receipts(
     tmp_path,
 ):
     worker, store = _direct_agent_pipeline(
@@ -305,5 +323,17 @@ def test_direct_agent_local_pipeline_handoff_uses_codex_session_audit(
     task = store.get_reply_task_for_message("cid-1", "msg-1")
     run = store.get_agent_run_for_task_generation(task.id, "g1")
     assert task.status == "done"
-    assert store.list_agent_execution_receipts(run.id) == []
+    receipts = store.list_agent_execution_receipts(run.id)
+    assert [receipt.command_path for receipt in receipts] == [
+        "chat message add-text-emotion",
+        "ding message send",
+    ]
+    assert all(receipt.safe_to_confirm for receipt in receipts)
+    assert run.side_effect_state == "confirmed"
+    assert [event["type"] for event in run.tool_events] == [
+        "item.started",
+        "item.completed",
+        "item.started",
+        "item.completed",
+    ]
     assert run.codex_session_id

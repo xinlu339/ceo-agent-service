@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from os import PathLike
 
 
 MAX_PROCESS_OUTPUT_BYTES = 2 * 1024 * 1024
@@ -16,9 +17,19 @@ class ProcessOutputLimitError(RuntimeError):
 
 
 def run_bounded_process(
-    argv: Sequence[str], *, timeout: int
+    argv: Sequence[str],
+    *,
+    timeout: int,
+    env: Mapping[str, str] | None = None,
+    cwd: str | PathLike[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=cwd,
+    )
     streams: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     exceeded = threading.Event()
 

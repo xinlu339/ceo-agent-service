@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from app.codex_decision import _subprocess_failure_reason
-from app.codex_runner import CodexRunner, _config_string
+from app.pi_runner import PiRunner, pi_process_failure_reason
 from app.process_runner import run_process_with_idle_timeout
 from app.store import AutoReplyStore
 from app.wechat.codex_safety import completed_mcp_tool_calls, completed_tool_events
@@ -50,14 +50,15 @@ def run_codex_memory_write(
     idle_timeout_seconds: int = 900,
 ) -> MemoryWriteResult:
     del source_description
-    runner = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+    runner = PiRunner(
+        workspace=workspace,
+        node_binary=None if codex_bin == "codex" else codex_bin,
+    )
     prompt = (
-        "如果 memory_write 未直接可用，先调用 tool_search 查询并加载 "
-        "memory_connector memory_write；tool_search 只能用于这次工具发现。"
-        "随后必须且只能调用一次 memory_write MCP 工具。"
+        "必须且只能调用一次已注册的 memory_write 工具。"
         "arguments 必须严格等于输入 JSON 中的 data、type、created_at 三个字段；"
         "不得传 user_id、graph_id、graph_ids、source_description、额外证据或任何其他字段。"
-        "除 tool_search 和这一次 memory_write 外不得调用其他工具。"
+        "不得调用其他工具。"
         "只有 memory_write 调用完成后才能输出 {\"status\":\"attempted\"}。\n"
         + json.dumps(
             {"data": data, "type": type, "created_at": created_at},
@@ -68,34 +69,15 @@ def run_codex_memory_write(
         prompt,
         None,
         output_schema_path=WRITE_SCHEMA_PATH,
+        use_output_schema=False,
         ignore_user_config=False,
+        approval_policy="untrusted",
     )
-    _remove_config_option(command, "developer_instructions=")
-    command[-1:-1] = [
-        "-c",
-        _config_string(
-            "developer_instructions",
-            (
-                "You are executing a service-owned Memory write. "
-                "If memory_write is deferred or not directly available, use "
-                "tool_search only to discover and load "
-                "memory_connector.memory_write. "
-                "Call exactly one memory_connector.memory_write tool with "
-                "the exact user-provided data, type, and created_at fields. "
-                "Do not call any tool other than tool_search for discovery "
-                "and that one memory_write. Do not add user_id, graph_id, "
-                "graph_ids, source_description, evidence, or any extra field. "
-                "Do not report attempted unless memory_write completed. "
-                'After the tool call, output exactly {"status":"attempted"}.'
-            ),
-        ),
-        "-c",
-        'mcp_servers.memory_connector.enabled_tools=["memory_write"]',
-        "-c",
-        'mcp_servers.memory_connector.disabled_tools=["memory_recall"]',
-    ]
+    from app.wechat.codex_safety import _set_pi_tools
+
+    _set_pi_tools(command, ("memory_write",))
     last_error: CodexMemoryWriteOutcomeUnknown | None = None
-    max_attempts = 1 if executor is not None else 3
+    max_attempts = 1
     for _attempt in range(max_attempts):
         if executor is not None:
             raw = executor(command, prompt)
@@ -120,6 +102,14 @@ def run_codex_memory_write(
                     raise CodexMemoryWriteAuthorizationRequired(reason)
                 raise CodexMemoryWriteOutcomeUnknown(
                     f"memory write outcome unknown: {reason}"
+                )
+            pi_failure = pi_process_failure_reason(
+                completed.stdout,
+                completed.stderr,
+            )
+            if pi_failure:
+                raise CodexMemoryWriteOutcomeUnknown(
+                    f"memory write outcome unknown: {pi_failure}"
                 )
             raw = completed.stdout
         try:
@@ -186,6 +176,18 @@ def memory_result_from_codex_audit(
     if output is None:
         raise CodexMemoryWriteOutcomeUnknown(
             "memory write outcome unknown: missing tool result"
+        )
+    from app.wechat.codex_safety import confirmed_pi_memory_write_receipt
+
+    pi_receipt = confirmed_pi_memory_write_receipt(
+        output,
+        arguments=arguments,
+    )
+    if pi_receipt is not None:
+        return MemoryWriteResult(
+            episode_uuid=pi_receipt["episode_uuid"],
+            processing_status=pi_receipt["processing_status"],
+            duplicate=False,
         )
     output_text = (
         output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
@@ -260,12 +262,3 @@ def _looks_like_memory_authorization_error(reason: str) -> bool:
             "login",
         )
     )
-
-
-def _remove_config_option(command: list[str], prefix: str) -> None:
-    index = 0
-    while index < len(command) - 1:
-        if command[index] == "-c" and command[index + 1].startswith(prefix):
-            del command[index : index + 2]
-            continue
-        index += 1

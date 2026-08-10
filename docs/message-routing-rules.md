@@ -8,7 +8,7 @@
 
 - `skip_before_agent`：不调用 agent，直接记录为 `no_reply/skipped`。
 - `agent_review`：交给 agent，根据上下文判断是否回复、追问、跳过或交给本人。
-- `oa_review`：交给统一 Codex 结构化 runner，并注入 `dingtalk-oa-approval` skill。OA handler 仍负责读取审批详情、校验任务归属、执行审批动作或评论，并在既有 attempt 记录中保存 OA 审批动作、留言、URL 和执行结果。
+- `oa_review`：交给结构化 Pi runner，并注入 reviewed `dingtalk-oa-approval` skill。OA handler 仍负责读取审批详情、校验任务归属、执行审批动作或评论，并在既有 attempt 记录中保存 OA 审批动作、留言、URL 和执行结果。
 - `handoff_or_material_check`：交给 agent，但回复前必须检查材料完整性，或交给本人处理。
 - `candidate_rule`：候选规则，尚未实现；需要真实样本和测试后再落代码。
 
@@ -245,7 +245,7 @@ https://github.com/alchaincyf/darwin-skill @Alex Chen 这个达尔文 skill 挺�
 
 ### 审批/OA 链接例外
 
-当前行为：`oa_review`。OA 不再使用独立 Codex runner；服务使用统一结构化 runner 输出 `AgentEnvelope(kind="oa_approval")`，再由 OA handler 执行审批动作或评论。
+当前行为：`oa_review`。OA 不再使用独立模型 runner；服务使用结构化 Pi runner 输出 `AgentEnvelope(kind="oa_approval")`，再由 OA handler 执行审批动作或评论。
 
 当前代码用以下正则识别审批/OA 链接：
 
@@ -265,10 +265,10 @@ aflow\.dingtalk\.com|dinghash(?:=|%3D)approval|swfrom(?:=|%3D)oa
 路由要求：
 
 - 不在 agent 前跳过。
-- OA 审阅使用统一 Codex 结构化 runner；OA handler 注入 `dingtalk-oa-approval` skill 并处理审批详情、任务归属和执行结果。
+- OA 审阅使用结构化 Pi runner；OA handler 注入 reviewed `dingtalk-oa-approval` skill 并处理审批详情、任务归属和执行结果。
 - OA 审阅最终记录的动作只能是 `通过`、`拒绝`、`退回`。其中 `通过` 和 `拒绝` 执行审批动作；`退回` 不静默映射成 `拒绝`，而是把 `oa_remark` 作为审批单评论提交，提醒申请人补充材料或修改后再处理。
 - Agent 完成 OA 审阅后，必须从审批详情识别实际发起人，并向该申请人发送一条结果消息；不得把仅转发催办的人当作申请人。未通过、拒绝或退回时，要说明审批仍待处理、具体缺少的材料或事实原因和下一步；不能只在 OA 评论或群聊中留信息。消息发送失败或无法识别发起人时，最终审计会明确记录该异常，不能伪造已送达。
-- 服务在既有 `reply_attempts` 审计记录中保存审批 URL、审批动作、审批留言、执行结果、Codex session 和工具事件。
+- 服务在既有 `reply_attempts` 审计记录中保存审批 URL、审批动作、审批留言、执行结果、Pi session 和工具事件。
 - 不新增 OA 页面；从既有 attempt detail 查看处理过程。
 - DWS 详情不完整时，OA handler 可使用已授权的钉钉 OA API 补读详情，但不得记录 token、AppKey、AppSecret、cookie、OAuth code 或签名 URL。
 

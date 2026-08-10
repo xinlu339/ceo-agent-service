@@ -58,7 +58,8 @@ def test_send_reply_creates_ready_delivery(fake_codex, consumer, store):
     attempt = store.get_reply_attempt(1)
     assert attempt is not None
     assert attempt.send_status == "pending"
-    assert "memory_recall" in fake_codex.prompts[0]
+    assert "This invocation exposes no tools" in fake_codex.prompts[0]
+    assert "do not call or claim to call Friday Memory" in fake_codex.prompts[0]
 
 
 def test_no_reply_completes_without_delivery(fake_codex, consumer, store):

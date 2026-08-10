@@ -498,8 +498,12 @@ class LarkChannelGate:
 
 
 def default_channel_gates(
-    *, dws_binary: str = "dws", lark_binary: str = "lark-cli"
+    *, dws_binary: str = "dws", lark_binary: str | None = None
 ) -> dict[str, ChannelGate]:
+    if lark_binary is None:
+        from app.config import feishu_cli_binary
+
+        lark_binary = feishu_cli_binary()
     gates: tuple[ChannelGate, ...] = (
         DwsChannelGate(binary=dws_binary),
         LarkChannelGate(binary=lark_binary),
@@ -507,7 +511,11 @@ def default_channel_gates(
     return {gate.channel_name: gate for gate in gates}
 
 
-def start_lark_auth_login(binary: str = "lark-cli") -> subprocess.Popen[str]:
+def start_lark_auth_login(binary: str | None = None) -> subprocess.Popen[str]:
+    if binary is None:
+        from app.config import feishu_cli_binary
+
+        binary = feishu_cli_binary()
     return subprocess.Popen(
         [binary, "auth", "login"],
         text=True,

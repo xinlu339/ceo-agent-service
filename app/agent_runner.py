@@ -2,7 +2,6 @@ import json
 import hashlib
 import os
 import shlex
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -23,8 +22,6 @@ from app.agent_result import (
     ToolEffectEvent,
     parse_agent_result,
 )
-from app.codex_runner import CodexRunner
-from app.codex_history import count_codex_session_lines, find_codex_session_path
 from app.channel_gate import ChannelGateState
 from app.dws_client import DwsClient
 from app.history import safe_observability_error
@@ -38,19 +35,14 @@ from app.native_cli_metadata import (
     structured_target_identifiers,
 )
 from app.process_runner import ProcessRunResult, run_process_with_idle_timeout
+from app.pi_events import assistant_text_candidates, pi_session_id_from_payload
+from app.pi_history import count_pi_session_lines, find_pi_session_path
+from app.pi_runner import PiRunner, pi_process_failure_reason
 from app.store import AgentRun, AgentRunLeaseLostError, AutoReplyStore, ReplyTask
-from app.wechat.codex_safety import (
-    make_read_only_with_reviewed_tools,
-)
 
 
 AGENT_RESULT_SCHEMA_PATH = (
     Path(__file__).resolve().parent / "schemas" / "agent_result.schema.json"
-)
-AGENT_RECONCILIATION_SCHEMA_PATH = (
-    Path(__file__).resolve().parent
-    / "schemas"
-    / "agent_reconciliation_result.schema.json"
 )
 DEFAULT_MCP_EFFECTS_PATH = (
     Path(__file__).resolve().parent.parent / "config" / "mcp-tool-effects.json"
@@ -64,18 +56,18 @@ DIRECT_AGENT_DEVELOPER_INSTRUCTIONS = """You are the Direct Agent for one queued
 
 - The Agent owns evidence reads, business judgment, direct execution and verification.
 - Use raw identifiers, references, exact read commands, and live tool results. Do not rely on service-side target assumptions.
-- Complete authorized work directly with available CLI and MCP tools. Do not produce plans, action arrays, or requests for service execution.
+- Complete authorized work only through the installed reviewed Pi tools. Use workspace_read/workspace_search/workspace_list for local evidence, execute_reviewed_read/execute_reviewed_write for reviewed DWS operations, execute_reviewed_lark_read/execute_reviewed_lark_write for reviewed Lark operations, the explicitly registered Memory tools for Friday Memory, Exa for public web reads, and Xiaoqing tools for reviewed interview operations when configured. Arbitrary bash, edit, write, authentication, package installation, destructive commands, and unregistered MCP capabilities are unavailable. Do not produce plans, action arrays, or requests for service execution.
 - Return only one JSON result with outcome, summary, and error. The outcome is completed, no_action, needs_human, or failed; summary is a nonempty factual description; error is always an object with code, retryable, and authorization_required, using an empty code and false flags when there is no error.
 - Never run authentication login, reset, or logout commands. Authentication readiness belongs to the service gate.
 - Never expose credentials, tokens, cookies, authorization codes, signed URLs, or local credential paths.
-- Use the configured MCP tools and installed DWS/Lark CLIs directly. Read an applicable installed SKILL.md before using a business capability.
+- Read an applicable installed SKILL.md through workspace_read before using a business capability. The reviewed Memory tools are user_get, memory_recall, memory_get, timeline_get, memory_write, and document_upload when configured. Never pass user_id, graph_id, or graph_ids; authenticated ACL owns scope. Exa is read-only. Xiaoqing exposes five reads plus upload_interview_result; put native Xiaoqing MCP fields inside its arguments object, use dry_run=true when only validating, and never claim a real upload without a completed result-record receipt. Lark uses official lark-cli risk metadata: read and ordinary write are available, high-risk-write and auth/config/update commands are always rejected.
 - When an OA action is performed, include oa_action_receipt with the exact process_instance_id, task_id, action, remark, and put the live read-back result in oa_action_receipt.result. Use null when no OA action was performed.
 - After any confirmed OA action (approve, reject, return, or comment), identify the OA originator from the approval detail and notify that applicant through DingTalk before returning AgentResult. State the actual action and, when relevant, the next node or material needed. Use the real originator identifier; do not notify someone merely because they forwarded the request. Verify the send was accepted. If the originator cannot be resolved or notification fails, report that concrete exception in the final summary; do not invent delivery.
 - After an OA review that does not approve, reject, or return the approval, notify that same applicant through DingTalk before returning AgentResult. Say that the approval remains pending, give the concrete missing material or other factual reason, and state the next action needed. Verify the send was accepted; do not silently rely on an OA comment or a group reminder as notice to the applicant.
 - Use the original conversation context and live tool results to decide and execute the task. Report the actual outcome without inventing success."""
 READ_ONLY_DEVELOPER_INSTRUCTION = (
-    "This invocation is read-only. Use configured MCP tools and installed CLIs "
-    "only for reads. Do not perform any external write, send, approval, comment, "
+    "This invocation is read-only. Use the permitted Pi read tools only. "
+    "Do not perform any external write, send, approval, comment, "
     "reaction, edit, login, reset, logout, or other state-changing action."
 )
 _NATIVE_READ_ONLY_ITEM_TYPES = frozenset(
@@ -88,6 +80,44 @@ _NATIVE_CLASSIFIABLE_ITEM_TYPES = frozenset(
         "function_call",
         "mcp_tool_call",
         "tool_call",
+    }
+)
+_PI_READ_ONLY_TOOL_NAMES = frozenset(
+    {
+        "workspace_read",
+        "workspace_search",
+        "workspace_list",
+        "execute_reviewed_read",
+        "execute_reviewed_lark_read",
+        "user_get",
+        "memory_recall",
+        "memory_get",
+        "timeline_get",
+        "web_search_exa",
+        "web_fetch_exa",
+        "search_candidates",
+        "get_dashboard_stats",
+        "get_interview_context",
+        "download_attachment",
+        "list_candidate_interviews",
+    }
+)
+_PI_EFFECTFUL_TOOL_NAMES = frozenset(
+    {
+        "execute_reviewed_write",
+        "execute_reviewed_lark_write",
+        "memory_write",
+        "document_upload",
+        "upload_interview_result",
+    }
+)
+_PI_XIAOQING_READ_TOOLS = frozenset(
+    {
+        "search_candidates",
+        "get_dashboard_stats",
+        "get_interview_context",
+        "download_attachment",
+        "list_candidate_interviews",
     }
 )
 
@@ -145,8 +175,6 @@ _MAX_MCP_RESULT_DEPTH = 32
 _MAX_MCP_RESULT_NODES = 2048
 _MAX_MCP_RESULT_JSON_STRINGS = 64
 _MAX_MCP_RESULT_JSON_BYTES = 256 * 1024
-_MAX_RECONCILIATION_EVENT_BYTES = 256 * 1024
-_MAX_RECONCILIATION_EVENTS = 256
 
 
 class AgentRunUnavailableError(RuntimeError):
@@ -154,11 +182,11 @@ class AgentRunUnavailableError(RuntimeError):
 
 
 class AgentConversationLockedError(RuntimeError):
-    """Another Direct Agent invocation owns this conversation's Codex session."""
+    """Another Direct Agent invocation owns this conversation's Pi session."""
 
     def __init__(self, conversation_id: str) -> None:
         self.conversation_id = conversation_id
-        super().__init__("codex_session_locked")
+        super().__init__("pi_session_locked")
 
 
 class AgentStreamError(RuntimeError):
@@ -375,7 +403,11 @@ class DirectAgentRunner:
         codex_session_exists: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
-        self.codex = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+        self.pi = PiRunner(
+            workspace=workspace,
+            node_binary=None if codex_bin == "codex" else codex_bin,
+        )
+        self.codex = self.pi
         self.executor = executor or run_process_with_idle_timeout
         self.owner = owner or f"direct-agent-{uuid4().hex}"
         self.native_cli_classifier = (
@@ -383,7 +415,7 @@ class DirectAgentRunner:
         )
         self.mcp_effect_registry = mcp_effect_registry or McpToolEffectRegistry.default()
         self.codex_session_exists = codex_session_exists or (
-            lambda session_id: find_codex_session_path(session_id) is not None
+            lambda session_id: find_pi_session_path(session_id) is not None
         )
 
     def run(
@@ -419,7 +451,7 @@ class DirectAgentRunner:
                 lock_owner,
             )
             if not released and not run_failed:
-                raise RuntimeError("codex session lock release failed")
+                raise RuntimeError("Pi session lock release failed")
 
     def _run_with_session_lock(
         self,
@@ -449,7 +481,7 @@ class DirectAgentRunner:
         if session_id and not self.codex_session_exists(session_id):
             self.store.clear_codex_session(task.conversation_id)
             session_id = None
-        transcript_start_line = count_codex_session_lines(session_id) if session_id else 0
+        transcript_start_line = count_pi_session_lines(session_id) if session_id else 0
         prompt = context.render()
         developer_instructions = direct_agent_developer_instructions()
         approval_policy = "untrusted"
@@ -473,6 +505,7 @@ class DirectAgentRunner:
         )
         saw_json = False
         stream_line_count = 0
+        pi_tool_metadata: dict[str, dict[str, object]] = {}
 
         def persist_line(line: str) -> None:
             nonlocal saw_json, stream_line_count
@@ -482,11 +515,11 @@ class DirectAgentRunner:
                 payload = json.loads(line)
             except json.JSONDecodeError as exc:
                 if saw_json:
-                    raise AgentStreamError("codex_stream_invalid") from exc
+                    raise AgentStreamError("pi_stream_invalid") from exc
                 return
             saw_json = True
             if not isinstance(payload, dict):
-                raise AgentStreamError("codex_stream_invalid")
+                raise AgentStreamError("pi_stream_invalid")
             stream_line_count += 1
             self.store.renew_agent_run_lease(
                 run.id,
@@ -509,6 +542,25 @@ class DirectAgentRunner:
                     task.single_chat,
                     session_id,
                 )
+            evidence = _pi_tool_evidence_event(
+                payload,
+                classifier=self.native_cli_classifier,
+                active_metadata=pi_tool_metadata,
+            )
+            if evidence is not None:
+                self.store.append_agent_run_event(
+                    run.id,
+                    evidence,
+                    owner=self.owner,
+                    now=now,
+                )
+                _persist_pi_execution_receipt(
+                    self.store,
+                    run_id=run.id,
+                    event=evidence,
+                    owner=self.owner,
+                    now=now,
+                )
 
         try:
             process = self.executor(
@@ -527,42 +579,54 @@ class DirectAgentRunner:
         except AgentStreamError as exc:
             self._record_failure(
                 run.id,
-                "codex_stream_invalid",
+                "pi_stream_invalid",
                 now=now,
             )
             if self.store.get_agent_run(run.id).status == "unknown":
-                raise AgentRunUnknownError("codex_stream_invalid", run.id) from exc
-            raise RuntimeError("codex_stream_invalid") from exc
+                raise AgentRunUnknownError("pi_stream_invalid", run.id) from exc
+            raise RuntimeError("pi_stream_invalid") from exc
         except Exception as exc:
             self._record_failure(
                 run.id,
-                "codex_process_failed",
+                "pi_process_failed",
                 detail=safe_observability_error(str(exc)),
                 now=now,
             )
             if self.store.get_agent_run(run.id).status == "unknown":
-                raise AgentRunUnknownError("codex_process_failed", run.id) from exc
-            raise RuntimeError("codex_process_failed") from exc
+                raise AgentRunUnknownError("pi_process_failed", run.id) from exc
+            raise RuntimeError("pi_process_failed") from exc
 
         if process.timed_out:
             self._record_failure(
                 run.id,
-                "codex_process_timeout",
+                "pi_process_timeout",
                 now=now,
             )
             if self.store.get_agent_run(run.id).status == "unknown":
-                raise AgentRunUnknownError("codex_process_timeout", run.id)
-            raise RuntimeError("codex_process_timeout")
+                raise AgentRunUnknownError("pi_process_timeout", run.id)
+            raise RuntimeError("pi_process_timeout")
         if process.returncode != 0:
             self._record_failure(
                 run.id,
-                "codex_process_failed",
+                "pi_process_failed",
                 detail=_process_failure_detail(process.stderr),
                 now=now,
             )
             if self.store.get_agent_run(run.id).status == "unknown":
-                raise AgentRunUnknownError("codex_process_failed", run.id)
-            raise RuntimeError("codex_process_failed")
+                raise AgentRunUnknownError("pi_process_failed", run.id)
+            raise RuntimeError("pi_process_failed")
+        pi_failure = pi_process_failure_reason(process.stdout, process.stderr)
+        if pi_failure:
+            code = pi_failure.partition(":")[0]
+            self._record_failure(
+                run.id,
+                code,
+                detail=pi_failure,
+                now=now,
+            )
+            if self.store.get_agent_run(run.id).status == "unknown":
+                raise AgentRunUnknownError(code, run.id)
+            raise RuntimeError(code)
         persisted = self.store.get_agent_run(run.id)
         if persisted is None:
             raise RuntimeError("agent run was not persisted")
@@ -571,28 +635,52 @@ class DirectAgentRunner:
         except (ResultParseError, ValueError) as exc:
             self._record_failure(
                 run.id,
-                "codex_result_invalid",
+                "pi_result_invalid",
                 now=now,
             )
             if self.store.get_agent_run(run.id).status == "unknown":
                 raise AgentRunUnknownError(
-                    "codex_result_invalid", run.id
+                    "pi_result_invalid", run.id
                 ) from exc
-            raise RuntimeError("codex_result_invalid") from exc
+            raise RuntimeError("pi_result_invalid") from exc
 
         persisted_session_id = self.store.get_agent_run(run.id).codex_session_id
         transcript_end_line = max(
             transcript_start_line + stream_line_count,
-            count_codex_session_lines(persisted_session_id)
+            count_pi_session_lines(persisted_session_id)
             if persisted_session_id
             else 0,
         )
+        persisted = self.store.get_agent_run(run.id)
+        if persisted is None:
+            raise RuntimeError("agent run was not persisted")
+        if persisted.side_effect_state == SideEffectState.UNKNOWN.value:
+            self.store.mark_agent_run_unknown(
+                run.id,
+                {"code": "pi_unreviewed_tool_effect", "retryable": False},
+                owner=self.owner,
+                transcript_end_line=transcript_end_line,
+                now=now,
+            )
+            raise AgentRunUnknownError("pi_unreviewed_tool_effect", run.id)
+        if (
+            result.outcome is AgentOutcome.FAILED
+            and persisted.side_effect_state == SideEffectState.CONFIRMED.value
+        ):
+            self.store.mark_agent_run_unknown(
+                run.id,
+                {"code": "pi_result_failed_after_effect", "retryable": False},
+                owner=self.owner,
+                transcript_end_line=transcript_end_line,
+                now=now,
+            )
+            raise AgentRunUnknownError("pi_result_failed_after_effect", run.id)
         if result.outcome is AgentOutcome.FAILED:
             self.store.fail_agent_run(
                 run.id,
                 result.error.model_dump(mode="json"),
                 owner=self.owner,
-                side_effect_state=SideEffectState.NONE.value,
+                side_effect_state=persisted.side_effect_state,
                 transcript_end_line=transcript_end_line,
                 now=now,
             )
@@ -601,7 +689,7 @@ class DirectAgentRunner:
                 run.id,
                 result.model_dump(mode="json"),
                 owner=self.owner,
-                side_effect_state=SideEffectState.NONE.value,
+                side_effect_state=persisted.side_effect_state,
                 transcript_end_line=transcript_end_line,
                 now=now,
             )
@@ -613,8 +701,8 @@ class DirectAgentRunner:
             result=result,
             transcript_start_line=transcript_start_line,
             transcript_end_line=completed_run.transcript_end_line,
-            events=(),
-            receipts=(),
+            events=tuple(completed_run.tool_events),
+            receipts=_execution_receipts_for_run(self.store, run.id),
         )
 
     def reconcile(
@@ -628,6 +716,38 @@ class DirectAgentRunner:
             raise ValueError("reconciliation requires an unknown agent run")
         if context.task_id != existing_run.reply_task_id:
             raise ValueError("agent context does not match unknown run")
+        task = self.store.get_reply_task(existing_run.reply_task_id)
+        if task is None:
+            raise ValueError("reconciliation task does not exist")
+        lock_owner = (
+            f"direct-agent-reconcile:{task.id}:{existing_run.execution_generation}"
+        )
+        if not self.store.acquire_codex_session_lock(
+            task.conversation_id,
+            lock_owner,
+        ):
+            raise AgentConversationLockedError(task.conversation_id)
+        run_failed = False
+        try:
+            return self._reconcile_with_session_lock(existing_run, context, now=now)
+        except BaseException:
+            run_failed = True
+            raise
+        finally:
+            released = self.store.release_codex_session_lock(
+                task.conversation_id,
+                lock_owner,
+            )
+            if not released and not run_failed:
+                raise RuntimeError("Pi reconciliation session lock release failed")
+
+    def _reconcile_with_session_lock(
+        self,
+        existing_run: AgentRun,
+        context: AgentTaskContext,
+        *,
+        now: str | None,
+    ) -> AgentReconciliationRunResult:
         claim = self.store.claim_unknown_agent_run(
             existing_run.id,
             owner=self.owner,
@@ -641,59 +761,59 @@ class DirectAgentRunner:
         run = claim.run
         original = unknown_effect_reference(run.tool_events)
         prompt = _reconciliation_prompt(context, original)
+        developer_instructions = (
+            direct_agent_developer_instructions()
+            + "\n\n"
+            + READ_ONLY_DEVELOPER_INSTRUCTION
+            + " Return only one ReconciliationResult JSON object with outcome, "
+            "summary, proof, and error. When live read evidence cannot prove presence "
+            "or absence, return needs_human with a retryable error; never guess."
+        )
+        session_id = run.codex_session_id or None
+        if session_id and not self.codex_session_exists(session_id):
+            session_id = None
         command = self.codex.build_command(
             prompt=prompt,
-            session_id=None,
-            output_schema_path=AGENT_RECONCILIATION_SCHEMA_PATH,
+            session_id=session_id,
             use_output_schema=False,
             approval_policy="never",
-            developer_instructions=(
-                direct_agent_developer_instructions()
-                + "\n\n"
-                + READ_ONLY_DEVELOPER_INSTRUCTION
-            ),
+            developer_instructions=developer_instructions,
             use_approval_bypass=False,
             ignore_user_config=True,
         )
-        make_read_only_with_reviewed_tools(
-            command,
-            reviewed_mcp_tools=self.mcp_effect_registry.reviewed_read_tools(),
-            controlled_cli_command=sys.executable,
-            controlled_cli_args=("-m", "app.reconciliation_cli"),
-            controlled_cli_cwd=str(SERVICE_ROOT),
-        )
-        self.native_cli_classifier.prewarm()
-        appended_events: list[dict[str, object]] = []
+        active_metadata: dict[str, dict[str, object]] = {}
+        events: list[dict[str, object]] = []
         saw_json = False
 
         def persist_line(line: str) -> None:
             nonlocal saw_json
             if not line.strip():
                 return
-            if len(line.encode("utf-8")) > _MAX_RECONCILIATION_EVENT_BYTES:
-                raise AgentStreamError("reconciliation_event_too_large")
-            if len(appended_events) >= _MAX_RECONCILIATION_EVENTS:
-                raise AgentStreamError("reconciliation_event_limit_exceeded")
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError as exc:
                 if saw_json:
-                    raise AgentStreamError("codex_stream_invalid") from exc
+                    raise AgentStreamError("pi_stream_invalid") from exc
+                return
+            if not isinstance(payload, dict):
+                if saw_json:
+                    raise AgentStreamError("pi_stream_invalid")
                 return
             saw_json = True
-            if not isinstance(payload, dict):
-                raise AgentStreamError("codex_stream_invalid")
-            safe_event = self._read_only_safe_event(payload)
-            appended_events.append(safe_event)
+            evidence = _pi_reconciliation_evidence_event(
+                payload,
+                classifier=self.native_cli_classifier,
+                active_metadata=active_metadata,
+            )
+            if evidence is None:
+                return
             self.store.append_unknown_agent_run_event(
                 run.id,
-                safe_event,
+                evidence,
                 owner=self.owner,
                 now=now,
             )
-            dependency_error = _reconciliation_dependency_error(safe_event)
-            if dependency_error is not None:
-                raise dependency_error
+            events.append(evidence)
 
         try:
             process = self.executor(
@@ -704,22 +824,21 @@ class DirectAgentRunner:
                 idle_timeout_seconds=IDLE_TIMEOUT_SECONDS,
                 on_stdout_line=persist_line,
             )
-        except AgentReadOnlyViolationError:
-            raise
-        except ReconciliationDependencyError:
-            raise
-        except AgentRunLeaseLostError:
+        except (AgentReadOnlyViolationError, AgentRunLeaseLostError):
             raise
         except AgentStreamError as exc:
-            raise RuntimeError("codex_stream_invalid") from exc
+            raise RuntimeError("pi_stream_invalid") from exc
         except Exception as exc:
-            raise RuntimeError("codex_process_failed") from exc
+            raise RuntimeError("pi_process_failed") from exc
         if process.timed_out:
-            raise RuntimeError("codex_process_timeout")
+            raise RuntimeError("pi_process_timeout")
         if process.returncode != 0:
-            raise RuntimeError("codex_process_failed")
+            raise RuntimeError("pi_process_failed")
+        pi_failure = pi_process_failure_reason(process.stdout, process.stderr)
+        if pi_failure:
+            raise RuntimeError(pi_failure.partition(":")[0])
         result = _parse_reconciliation_result(process.stdout)
-        _validate_reconciliation_proof(result, original, appended_events)
+        _validate_reconciliation_proof(result, original, events)
         persisted = self.store.get_agent_run(run.id)
         if persisted is None:
             raise RuntimeError("agent run was not persisted")
@@ -728,7 +847,7 @@ class DirectAgentRunner:
             result=result,
             transcript_start_line=run.transcript_end_line,
             transcript_end_line=persisted.transcript_end_line,
-            events=tuple(appended_events),
+            events=tuple(events),
         )
 
     def _read_only_safe_event(
@@ -824,14 +943,23 @@ class DirectAgentRunner:
         error: dict[str, object] = {"code": code, "retryable": True}
         if detail:
             error["detail"] = safe_observability_error(detail)
-        self.store.fail_agent_run(
-            run_id,
-            error,
-            owner=self.owner,
-            transcript_end_line=persisted.transcript_end_line,
-            side_effect_state=SideEffectState.NONE.value,
-            now=now,
-        )
+        if persisted.side_effect_state != SideEffectState.NONE.value:
+            self.store.mark_agent_run_unknown(
+                run_id,
+                error,
+                owner=self.owner,
+                transcript_end_line=persisted.transcript_end_line,
+                now=now,
+            )
+        else:
+            self.store.fail_agent_run(
+                run_id,
+                error,
+                owner=self.owner,
+                transcript_end_line=persisted.transcript_end_line,
+                side_effect_state=SideEffectState.NONE.value,
+                now=now,
+            )
 
     def _persist_deferred_execution_evidence(
         self,
@@ -996,9 +1124,10 @@ def _reconciliation_prompt(
     }
     return (
         "Read-only unknown side-effect reconciliation. Never replay the original "
-        "operation. Run exact DWS/Lark read commands only through the "
-        "reconciliation_cli execute_reviewed_read tool; direct shell execution is "
-        "disabled. Query live state with reviewed read-only tools. Return completed "
+        "operation. Run one exact reviewed read through execute_reviewed_read for "
+        "DWS or execute_reviewed_lark_read for Lark; "
+        "direct shell execution and every write tool are disabled. Query live state "
+        "with reviewed read-only tools. Return completed "
         "only when the effect is present, no_action only when its absence is confirmed, "
         "and set proof.observed_state to effect_present or effect_absent. The service "
         "binds the unique matching completed live read receipt; do not reproduce "
@@ -1022,6 +1151,12 @@ def _parse_reconciliation_result(raw: str) -> ReconciliationResult:
         if isinstance(payload, dict):
             payloads.append(payload)
     for payload in reversed(payloads):
+        pi_candidates = assistant_text_candidates(payload)
+        if pi_candidates:
+            try:
+                return ReconciliationResult.model_validate_json(pi_candidates[-1])
+            except ValidationError as exc:
+                raise RuntimeError("reconciliation_result_invalid") from exc
         item = payload.get("item")
         if not isinstance(item, dict) or item.get("type") != "agent_message":
             continue
@@ -1067,13 +1202,18 @@ def _is_matching_reconciliation_read_event(
     if event.get("type") != "item.completed":
         return False
     item = event.get("item")
-    if not isinstance(item, dict) or item.get("type") != "mcp_tool_call":
+    if not isinstance(item, dict):
         return False
     metadata = item.get("metadata")
     if not isinstance(metadata, dict) or metadata.get("effect") != "read_only":
         return False
     server = item.get("server")
     tool = item.get("tool")
+    pi_reviewed_cli = (
+        item.get("type") == "command_execution"
+        and metadata.get("reviewed_pi_read") is True
+        and metadata.get("native_cli") in {"dws", "lark-cli"}
+    )
     controlled_cli = (
         server == "reconciliation_cli"
         and tool == "execute_reviewed_read"
@@ -1092,7 +1232,7 @@ def _is_matching_reconciliation_read_event(
     )
     call_id = item.get("call_id") or item.get("id")
     if (
-        not (controlled_cli or reviewed_mcp)
+        not (pi_reviewed_cli or controlled_cli or reviewed_mcp)
         or not isinstance(call_id, str)
         or not call_id
         or not isinstance(operation_digest, str)
@@ -1254,6 +1394,9 @@ def _validated_reconciliation_error(error: dict[str, object]) -> dict[str, objec
 
 
 def _session_id(payload: dict[str, object]) -> str:
+    pi_session_id = pi_session_id_from_payload(payload)
+    if pi_session_id:
+        return pi_session_id
     if payload.get("type") not in {"thread.started", "thread_started"}:
         return ""
     for key in ("thread_id", "session_id"):
@@ -1261,6 +1404,642 @@ def _session_id(payload: dict[str, object]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _pi_tool_evidence_event(
+    payload: dict[str, object],
+    *,
+    classifier: NativeCliMetadataClassifier,
+    active_metadata: dict[str, dict[str, object]],
+) -> dict[str, object] | None:
+    event_type = str(payload.get("type") or "")
+    if event_type not in {"tool_execution_start", "tool_execution_end"}:
+        return None
+    call_id = str(payload.get("toolCallId") or "").strip()
+    if not call_id:
+        return None
+    tool_name = str(payload.get("toolName") or "tool").strip().casefold()
+    if event_type == "tool_execution_start":
+        metadata = _pi_tool_effect_metadata(
+            tool_name,
+            payload.get("args"),
+            classifier=classifier,
+        )
+        active_metadata[call_id] = metadata
+        return {
+            "type": "item.started",
+            "item": {
+                "id": call_id,
+                "type": "command_execution",
+                "metadata": metadata,
+            },
+        }
+
+    metadata = dict(
+        active_metadata.pop(call_id, None)
+        or _unreviewed_pi_tool_metadata(tool_name, payload.get("result"))
+    )
+    is_error = payload.get("isError") is True
+    if is_error and metadata.get("effect") == EffectKind.EFFECTFUL.value:
+        metadata["effect"] = EffectKind.UNREVIEWED.value
+        metadata["uncertain_after_error"] = True
+    elif metadata.get("effect") == EffectKind.EFFECTFUL.value:
+        if tool_name == "execute_reviewed_write":
+            confirmation, issue = _pi_reviewed_write_confirmation(
+                payload.get("result"),
+                metadata=metadata,
+            )
+        elif tool_name in {"memory_write", "document_upload"}:
+            confirmation, issue = _pi_memory_write_confirmation(
+                payload.get("result"),
+                metadata=metadata,
+                tool_name=tool_name,
+            )
+        elif tool_name == "upload_interview_result":
+            confirmation, issue = _pi_xiaoqing_write_confirmation(
+                payload.get("result"),
+                metadata=metadata,
+            )
+        elif tool_name == "execute_reviewed_lark_write":
+            confirmation, issue = _pi_lark_write_confirmation(
+                payload.get("result"),
+                metadata=metadata,
+            )
+        else:
+            confirmation, issue = None, "pi_write_tool_unreviewed"
+        if confirmation is None:
+            metadata["effect"] = EffectKind.UNREVIEWED.value
+            metadata["uncertain_after_unverified_result"] = True
+            metadata["confirmation_issue"] = issue
+        else:
+            metadata["reviewed_confirmation"] = confirmation
+    return {
+        "type": "item.failed" if is_error else "item.completed",
+        "item": {
+            "id": call_id,
+            "type": "command_execution",
+            "status": "failed" if is_error else "completed",
+            "exit_code": 1 if is_error else 0,
+            "metadata": metadata,
+        },
+    }
+
+
+def _pi_reconciliation_evidence_event(
+    payload: dict[str, object],
+    *,
+    classifier: NativeCliMetadataClassifier,
+    active_metadata: dict[str, dict[str, object]],
+) -> dict[str, object] | None:
+    event_type = str(payload.get("type") or "")
+    if event_type not in {"tool_execution_start", "tool_execution_end"}:
+        return None
+    call_id = str(payload.get("toolCallId") or "").strip()
+    if not call_id:
+        raise AgentReadOnlyViolationError("reconciliation_tool_call_id_missing")
+    tool_name = str(payload.get("toolName") or "").strip().casefold()
+    if tool_name in {"workspace_read", "workspace_search", "workspace_list"}:
+        return None
+    if tool_name not in {"execute_reviewed_read", "execute_reviewed_lark_read"}:
+        raise AgentReadOnlyViolationError("reconciliation_write_forbidden")
+    if event_type == "tool_execution_start":
+        metadata = _pi_tool_effect_metadata(
+            tool_name,
+            payload.get("args"),
+            classifier=classifier,
+        )
+        if metadata.get("effect") != EffectKind.READ_ONLY.value:
+            raise AgentReadOnlyViolationError("reconciliation_command_unreviewed")
+        metadata["reviewed_pi_read"] = True
+        active_metadata[call_id] = metadata
+        return {
+            "type": "item.started",
+            "item": {
+                "id": call_id,
+                "type": "command_execution",
+                "metadata": metadata,
+            },
+        }
+
+    metadata = active_metadata.pop(call_id, None)
+    if not isinstance(metadata, dict):
+        raise AgentReadOnlyViolationError("reconciliation_tool_start_missing")
+    is_error = payload.get("isError") is True
+    if is_error:
+        return {
+            "type": "item.failed",
+            "item": {
+                "id": call_id,
+                "type": "command_execution",
+                "status": "failed",
+                "exit_code": 1,
+                "metadata": metadata,
+            },
+        }
+    confirmation, issue = _pi_reviewed_read_confirmation(
+        payload.get("result"),
+        metadata=metadata,
+    )
+    if confirmation is None:
+        raise AgentReadOnlyViolationError(issue)
+    metadata["result_digest"] = confirmation["result_digest"]
+    return {
+        "type": "item.completed",
+        "item": {
+            "id": call_id,
+            "type": "command_execution",
+            "status": "completed",
+            "exit_code": 0,
+            "metadata": metadata,
+        },
+    }
+
+
+def _pi_tool_effect_metadata(
+    tool_name: str,
+    arguments: object,
+    *,
+    classifier: NativeCliMetadataClassifier,
+) -> dict[str, object]:
+    if tool_name in _PI_XIAOQING_READ_TOOLS | {"upload_interview_result"}:
+        normalized_arguments = _pi_nested_tool_arguments(arguments)
+        dry_run = (
+            tool_name == "upload_interview_result"
+            and isinstance(normalized_arguments, dict)
+            and normalized_arguments.get("dry_run") is True
+        )
+        effect = (
+            EffectKind.READ_ONLY
+            if tool_name in _PI_XIAOQING_READ_TOOLS or dry_run
+            else EffectKind.EFFECTFUL
+        )
+        canonical = json.dumps(
+            {"tool": tool_name, "arguments": normalized_arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return {
+            "effect": effect.value,
+            "native_cli": "xiaoqing_interview",
+            "operation": tool_name,
+            "command_digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "target_identifiers": structured_target_identifiers(
+                normalized_arguments
+            ),
+        }
+    if tool_name in {
+        "user_get",
+        "memory_recall",
+        "memory_get",
+        "timeline_get",
+        "memory_write",
+        "document_upload",
+    }:
+        effect = (
+            EffectKind.EFFECTFUL
+            if tool_name in {"memory_write", "document_upload"}
+            else EffectKind.READ_ONLY
+        )
+        canonical = json.dumps(
+            {"tool": tool_name, "arguments": arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return {
+            "effect": effect.value,
+            "native_cli": "memory_connector",
+            "operation": tool_name,
+            "command_digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "target_identifiers": structured_target_identifiers(arguments),
+        }
+    if tool_name in {
+        "bash",
+        "execute_reviewed_read",
+        "execute_reviewed_write",
+        "execute_reviewed_lark_read",
+        "execute_reviewed_lark_write",
+    }:
+        command = ""
+        argv: object = None
+        if isinstance(arguments, dict):
+            value = arguments.get("command") or arguments.get("cmd")
+            if isinstance(value, str):
+                command = value
+            argv = arguments.get("argv")
+        native_command = None
+        if command or argv:
+            try:
+                native_command = classifier.classify(
+                    {
+                        "type": "command_execution",
+                        "command": command,
+                        "argv": argv,
+                    }
+                )
+            except NativeCliMetadataUnavailableError:
+                native_command = None
+        if native_command is not None and native_command.effect is not None:
+            expected_effect = (
+                EffectKind.READ_ONLY
+                if tool_name in {"execute_reviewed_read", "execute_reviewed_lark_read"}
+                else EffectKind.EFFECTFUL
+                if tool_name in {"execute_reviewed_write", "execute_reviewed_lark_write"}
+                else native_command.effect
+            )
+            if native_command.effect is not expected_effect:
+                return _unreviewed_pi_tool_metadata(tool_name, arguments)
+            return {
+                "effect": native_command.effect.value,
+                "native_cli": native_command.cli,
+                "operation": native_command.command_path,
+                "command_digest": native_command.command_digest,
+                "target_identifiers": native_command.target_identifiers,
+                "reviewed_execution_digest": _pi_reviewed_execution_digest(argv),
+            }
+        return _unreviewed_pi_tool_metadata(tool_name, arguments)
+
+    effect = (
+        EffectKind.READ_ONLY
+        if tool_name in _PI_READ_ONLY_TOOL_NAMES
+        else EffectKind.EFFECTFUL
+        if tool_name in _PI_EFFECTFUL_TOOL_NAMES
+        else EffectKind.UNREVIEWED
+    )
+    canonical = json.dumps(
+        {"tool": tool_name, "arguments": arguments},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return {
+        "effect": effect.value,
+        "native_cli": "pi",
+        "operation": f"pi_tool:{tool_name}",
+        "command_digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "target_identifiers": structured_target_identifiers(arguments),
+    }
+
+
+def _pi_nested_tool_arguments(arguments: object) -> object:
+    if isinstance(arguments, dict) and set(arguments) == {"arguments"}:
+        nested = arguments.get("arguments")
+        if isinstance(nested, dict):
+            return nested
+    return arguments
+
+
+def _unreviewed_pi_tool_metadata(
+    tool_name: str,
+    arguments: object,
+) -> dict[str, object]:
+    canonical = json.dumps(
+        {"tool": tool_name, "arguments": arguments},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return {
+        "effect": EffectKind.UNREVIEWED.value,
+        "native_cli": "pi",
+        "operation": f"pi_tool:{tool_name}",
+        "command_digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "target_identifiers": structured_target_identifiers(arguments),
+    }
+
+
+def _persist_pi_execution_receipt(
+    store: AutoReplyStore,
+    *,
+    run_id: int,
+    event: dict[str, object],
+    owner: str,
+    now: str | None,
+) -> None:
+    if event.get("type") != "item.completed":
+        return
+    item = event.get("item")
+    if not isinstance(item, dict) or item.get("exit_code") != 0:
+        return
+    metadata = item.get("metadata")
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("effect") != EffectKind.EFFECTFUL.value
+    ):
+        return
+    call_id = str(item.get("id") or "").strip()
+    cli = str(metadata.get("native_cli") or "").strip()
+    operation = str(metadata.get("operation") or "").strip()
+    digest = str(metadata.get("command_digest") or "").strip()
+    targets = metadata.get("target_identifiers")
+    confirmation = metadata.get("reviewed_confirmation")
+    if (
+        not all((call_id, cli, operation, digest))
+        or not isinstance(targets, dict)
+        or not isinstance(confirmation, dict)
+        or confirmation.get("completed") is not True
+        or confirmation.get("safe_to_confirm") is not True
+    ):
+        return
+    store.record_agent_execution_receipt(
+        run_id,
+        receipt_id=f"pi-tool:{run_id}:{call_id}",
+        operation_id=call_id,
+        cli=cli,
+        command_path=operation,
+        command_digest=digest,
+        target_identifiers={
+            str(key): value
+            for key, value in targets.items()
+            if isinstance(value, str)
+        },
+        exit_code=0,
+        owner=owner,
+        now=now,
+    )
+
+
+def _pi_reviewed_execution_digest(argv: object) -> str:
+    if not isinstance(argv, list) or not argv or not all(
+        isinstance(item, str) for item in argv
+    ):
+        return ""
+    serialized = json.dumps(
+        argv,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _pi_reviewed_write_confirmation(
+    result: object,
+    *,
+    metadata: dict[str, object],
+) -> tuple[dict[str, object] | None, str]:
+    details = result.get("details") if isinstance(result, dict) else None
+    if not isinstance(details, dict):
+        return None, "pi_write_details_missing"
+    if details.get("protocolVersion") != 1:
+        return None, "pi_write_receipt_protocol_invalid"
+    if details.get("cli") != "dws" or details.get("effect") != "write":
+        return None, "pi_write_receipt_effect_invalid"
+    if details.get("operation") != metadata.get("operation"):
+        return None, "pi_write_receipt_operation_mismatch"
+    expected_execution_digest = metadata.get("reviewed_execution_digest")
+    if (
+        not isinstance(expected_execution_digest, str)
+        or not expected_execution_digest
+        or details.get("operationDigest") != expected_execution_digest
+    ):
+        return None, "pi_write_receipt_digest_mismatch"
+    expected_targets = metadata.get("target_identifiers")
+    targets = details.get("targetIdentifiers")
+    if not isinstance(expected_targets, dict) or targets != expected_targets:
+        return None, "pi_write_receipt_targets_mismatch"
+    exit_code = details.get("exitCode")
+    if isinstance(exit_code, bool) or exit_code != 0:
+        return None, "pi_write_receipt_exit_invalid"
+    if details.get("completed") is not True:
+        return None, "pi_write_receipt_incomplete"
+    if details.get("safeToConfirm") is not True:
+        return None, "pi_write_receipt_not_confirmable"
+    return (
+        {
+            "protocol_version": 1,
+            "operation": details["operation"],
+            "operation_digest": details["operationDigest"],
+            "target_identifiers": targets,
+            "completed": True,
+            "safe_to_confirm": True,
+        },
+        "",
+    )
+
+
+def _pi_lark_write_confirmation(
+    result: object,
+    *,
+    metadata: dict[str, object],
+) -> tuple[dict[str, object] | None, str]:
+    details = result.get("details") if isinstance(result, dict) else None
+    if not isinstance(details, dict):
+        return None, "pi_lark_receipt_missing"
+    if details.get("protocolVersion") != 1:
+        return None, "pi_lark_receipt_protocol_invalid"
+    if details.get("cli") != "lark-cli" or details.get("effect") != "write":
+        return None, "pi_lark_receipt_effect_invalid"
+    if details.get("operation") != metadata.get("operation"):
+        return None, "pi_lark_receipt_operation_mismatch"
+    expected_execution_digest = metadata.get("reviewed_execution_digest")
+    if (
+        not isinstance(expected_execution_digest, str)
+        or not expected_execution_digest
+        or details.get("operationDigest") != expected_execution_digest
+    ):
+        return None, "pi_lark_receipt_digest_mismatch"
+    expected_targets = metadata.get("target_identifiers")
+    if not isinstance(expected_targets, dict) or details.get(
+        "targetIdentifiers"
+    ) != expected_targets:
+        return None, "pi_lark_receipt_targets_mismatch"
+    exit_code = details.get("exitCode")
+    if isinstance(exit_code, bool) or exit_code != 0:
+        return None, "pi_lark_receipt_exit_invalid"
+    if details.get("completed") is not True or details.get("safeToConfirm") is not True:
+        return None, "pi_lark_receipt_not_confirmable"
+    receipt = details.get("receipt")
+    if not isinstance(receipt, dict) or receipt.get("processingStatus") != "completed":
+        return None, "pi_lark_receipt_missing"
+    result_identifiers = receipt.get("resultIdentifiers")
+    if not isinstance(result_identifiers, dict) or not result_identifiers:
+        return None, "pi_lark_receipt_identity_invalid"
+    reviewed_identifiers = {
+        str(key): value.strip()
+        for key, value in result_identifiers.items()
+        if isinstance(key, str) and isinstance(value, str) and value.strip()
+    }
+    if not reviewed_identifiers:
+        return None, "pi_lark_receipt_identity_invalid"
+    return (
+        {
+            "protocol_version": 1,
+            "operation": details["operation"],
+            "operation_digest": details["operationDigest"],
+            "target_identifiers": details["targetIdentifiers"],
+            "completed": True,
+            "safe_to_confirm": True,
+            "receipt": {
+                "processing_status": "completed",
+                **reviewed_identifiers,
+            },
+        },
+        "",
+    )
+
+
+def _pi_reviewed_read_confirmation(
+    result: object,
+    *,
+    metadata: dict[str, object],
+) -> tuple[dict[str, object] | None, str]:
+    details = result.get("details") if isinstance(result, dict) else None
+    if not isinstance(details, dict):
+        return None, "reconciliation_query_receipt_invalid"
+    if details.get("protocolVersion") != 1:
+        return None, "reconciliation_query_receipt_invalid"
+    expected_cli = metadata.get("native_cli")
+    if (
+        expected_cli not in {"dws", "lark-cli"}
+        or details.get("cli") != expected_cli
+        or details.get("effect") != "read"
+    ):
+        return None, "reconciliation_query_receipt_invalid"
+    if details.get("operation") != metadata.get("operation"):
+        return None, "reconciliation_query_receipt_invalid"
+    expected_execution_digest = metadata.get("reviewed_execution_digest")
+    if (
+        not isinstance(expected_execution_digest, str)
+        or not expected_execution_digest
+        or details.get("operationDigest") != expected_execution_digest
+    ):
+        return None, "reconciliation_query_receipt_invalid"
+    if details.get("targetIdentifiers") != metadata.get("target_identifiers"):
+        return None, "reconciliation_query_receipt_invalid"
+    exit_code = details.get("exitCode")
+    if isinstance(exit_code, bool) or exit_code != 0:
+        return None, "reconciliation_query_receipt_invalid"
+    result_digest = details.get("resultDigest")
+    if not isinstance(result_digest, str) or len(result_digest) != 64:
+        return None, "reconciliation_query_receipt_invalid"
+    if (
+        details.get("completed") is not True
+        or details.get("safeToConfirm") is not False
+    ):
+        return None, "reconciliation_query_receipt_invalid"
+    return {"result_digest": result_digest}, ""
+
+
+def _pi_memory_write_confirmation(
+    result: object,
+    *,
+    metadata: dict[str, object],
+    tool_name: str,
+) -> tuple[dict[str, object] | None, str]:
+    details = result.get("details") if isinstance(result, dict) else None
+    if not isinstance(details, dict):
+        return None, "pi_memory_receipt_missing"
+    if details.get("protocolVersion") != 1:
+        return None, "pi_memory_receipt_protocol_invalid"
+    if (
+        details.get("bridge") != "memory_connector"
+        or details.get("effect") != "write"
+        or details.get("operation") != tool_name
+        or details.get("operation") != metadata.get("operation")
+    ):
+        return None, "pi_memory_receipt_operation_invalid"
+    if details.get("operationDigest") != metadata.get("command_digest"):
+        return None, "pi_memory_receipt_digest_mismatch"
+    if details.get("targetIdentifiers") != metadata.get("target_identifiers"):
+        return None, "pi_memory_receipt_targets_mismatch"
+    exit_code = details.get("exitCode")
+    if isinstance(exit_code, bool) or exit_code != 0:
+        return None, "pi_memory_receipt_exit_invalid"
+    if details.get("completed") is not True or details.get("safeToConfirm") is not True:
+        return None, "pi_memory_receipt_not_confirmable"
+    receipt = details.get("receipt")
+    if not isinstance(receipt, dict):
+        return None, "pi_memory_receipt_missing"
+    if tool_name == "memory_write":
+        identifier = receipt.get("episode_uuid")
+        if (
+            not isinstance(identifier, str)
+            or not identifier.strip()
+            or receipt.get("processing_status") != "completed"
+        ):
+            return None, "pi_memory_receipt_identity_invalid"
+    else:
+        identifier = receipt.get("document_id")
+        if (
+            not isinstance(identifier, str)
+            or not identifier.strip()
+            or receipt.get("processing_status") != "completed"
+        ):
+            return None, "pi_memory_receipt_identity_invalid"
+    return (
+        {
+            "protocol_version": 1,
+            "operation": tool_name,
+            "operation_digest": details["operationDigest"],
+            "target_identifiers": details["targetIdentifiers"],
+            "completed": True,
+            "safe_to_confirm": True,
+            "receipt": {
+                str(key): value
+                for key, value in receipt.items()
+                if isinstance(value, str)
+            },
+        },
+        "",
+    )
+
+
+def _pi_xiaoqing_write_confirmation(
+    result: object,
+    *,
+    metadata: dict[str, object],
+) -> tuple[dict[str, object] | None, str]:
+    details = result.get("details") if isinstance(result, dict) else None
+    if not isinstance(details, dict):
+        return None, "pi_xiaoqing_receipt_missing"
+    if details.get("protocolVersion") != 1:
+        return None, "pi_xiaoqing_receipt_protocol_invalid"
+    if (
+        details.get("bridge") != "xiaoqing_interview"
+        or details.get("effect") != "write"
+        or details.get("operation") != "upload_interview_result"
+        or details.get("operation") != metadata.get("operation")
+    ):
+        return None, "pi_xiaoqing_receipt_operation_invalid"
+    if details.get("operationDigest") != metadata.get("command_digest"):
+        return None, "pi_xiaoqing_receipt_digest_mismatch"
+    if details.get("targetIdentifiers") != metadata.get("target_identifiers"):
+        return None, "pi_xiaoqing_receipt_targets_mismatch"
+    exit_code = details.get("exitCode")
+    if isinstance(exit_code, bool) or exit_code != 0:
+        return None, "pi_xiaoqing_receipt_exit_invalid"
+    if details.get("completed") is not True or details.get("safeToConfirm") is not True:
+        return None, "pi_xiaoqing_receipt_not_confirmable"
+    receipt = details.get("receipt")
+    if not isinstance(receipt, dict):
+        return None, "pi_xiaoqing_receipt_missing"
+    record_id = receipt.get("result_record_id")
+    if (
+        not isinstance(record_id, str)
+        or not record_id.strip()
+        or receipt.get("processing_status") != "completed"
+    ):
+        return None, "pi_xiaoqing_receipt_identity_invalid"
+    return (
+        {
+            "protocol_version": 1,
+            "operation": "upload_interview_result",
+            "operation_digest": details["operationDigest"],
+            "target_identifiers": details["targetIdentifiers"],
+            "completed": True,
+            "safe_to_confirm": True,
+            "receipt": {
+                "result_record_id": record_id.strip(),
+                "processing_status": "completed",
+            },
+        },
+        "",
+    )
 
 
 def _native_cli_command(
@@ -1506,6 +2285,10 @@ def _execution_receipts_for_run(
             completed=receipt.completed,
             persisted=receipt.persisted,
             safe_to_confirm=receipt.safe_to_confirm,
+            cli=receipt.cli,
+            operation=receipt.command_path,
+            operation_digest=receipt.command_digest,
+            target_identifiers=receipt.target_identifiers,
         )
         for receipt in store.list_agent_execution_receipts(run_id)
     )
@@ -1798,7 +2581,7 @@ def _process_failure_detail(stderr: str) -> str:
         candidate = line.strip()
         if candidate and " WARN " not in f" {candidate} ":
             return safe_observability_error(candidate, limit=500)
-    return "codex process exited without an error message"
+    return "Pi process exited without an error message"
 
 
 def _effect_event(payload: dict[str, object]) -> ToolEffectEvent | None:

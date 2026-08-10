@@ -1,0 +1,9 @@
+{"type":"session","version":3,"id":"captured-handoff-session"}
+{"type":"agent_start"}
+{"type":"tool_execution_start","toolCallId":"effect-1","toolName":"execute_reviewed_write","args":{"argv":["dws","chat","message","add-text-emotion","--group","cid-1","--message-id","msg-1","--text","calling","--yes"]}}
+{"type":"tool_execution_end","toolCallId":"effect-1","toolName":"execute_reviewed_write","isError":false,"result":{"content":[{"type":"text","text":"{\"success\":true}"}],"details":{"protocolVersion":1,"cli":"dws","effect":"write","operation":"chat message add-text-emotion","operationDigest":"6885e3eeb1dbb81d21122386bd95703a2641ceabb3f581dde1f512e72edb179b","targetIdentifiers":{"group":"cid-1","message-id":"msg-1"},"exitCode":0,"completed":true,"safeToConfirm":true}}}
+{"type":"tool_execution_start","toolCallId":"effect-2","toolName":"execute_reviewed_write","args":{"argv":["dws","ding","message","send","--user-id","principal","--text","manual review required","--yes"]}}
+{"type":"tool_execution_end","toolCallId":"effect-2","toolName":"execute_reviewed_write","isError":false,"result":{"content":[{"type":"text","text":"{\"success\":true}"}],"details":{"protocolVersion":1,"cli":"dws","effect":"write","operation":"ding message send","operationDigest":"f8ea7b1f1d1efa9c8dddb88c604686bdbffab811b3332690762447e96980c0e1","targetIdentifiers":{"user-id":"principal"},"exitCode":0,"completed":true,"safeToConfirm":true}}}
+{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"{\"outcome\":\"completed\",\"summary\":\"Agent completed and verified the handoff.\",\"error\":{\"code\":\"\",\"retryable\":false,\"authorization_required\":false}}"}]}}
+{"type":"agent_end","willRetry":false}
+{"type":"agent_settled"}

@@ -11,12 +11,13 @@ def test_local_service_script_runs_single_main_service():
     content = script.read_text(encoding="utf-8")
 
     assert '${HOME}/.local/bin' in content
-    assert 'export CODEX_HOME="${CODEX_HOME:-${HOME}/.codex}"' in content
-    assert 'export CEO_CODEX_MODEL="${CEO_CODEX_MODEL:-gpt-5.5}"' in content
-    assert (
-        'export CEO_CODEX_MODEL_REASONING_EFFORT="${CEO_CODEX_MODEL_REASONING_EFFORT:-medium}"'
-        in content
-    )
+    assert 'export CEO_PI_CLI_PATH="${CEO_PI_CLI_PATH:-${repo_root}/../pi/' in content
+    assert 'export CEO_PI_PROVIDER="${CEO_PI_PROVIDER:-openai}"' in content
+    assert 'export CEO_PI_MODEL="${CEO_PI_MODEL:-gpt-5.5}"' in content
+    assert 'export CEO_PI_API="${CEO_PI_API:-openai-responses}"' in content
+    assert 'export CEO_PI_THINKING_LEVEL="${CEO_PI_THINKING_LEVEL:-medium}"' in content
+    assert "CEO_PI_API_KEY" not in content
+    assert "CODEX_HOME" not in content
     assert 'export HOME="${CEO_SERVICE_HOME:-${HOME}}"' in content
     assert 'export PYTHONPATH="${PYTHONPATH:-.}"' in content
     assert 'export CEO_WORKSPACE="${CEO_WORKSPACE:-${HOME}/Documents/memory}"' in content
@@ -74,11 +75,12 @@ def test_main_launch_agent_runs_single_keepalive_service():
     assert "CEO_NOT_SEND_MESSAGE=0" in command[2]
     assert "CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1" in command[2]
     assert "CEO_OKR_LIVE_SOURCE_COMMAND" in command[2]
-    assert 'CEO_CODEX_MODEL="${CEO_CODEX_MODEL:-gpt-5.5}"' in command[2]
-    assert (
-        'CEO_CODEX_MODEL_REASONING_EFFORT="${CEO_CODEX_MODEL_REASONING_EFFORT:-medium}"'
-        in command[2]
-    )
+    assert 'CEO_PI_PROVIDER="${CEO_PI_PROVIDER:-openai}"' in command[2]
+    assert 'CEO_PI_MODEL="${CEO_PI_MODEL:-gpt-5.5}"' in command[2]
+    assert 'CEO_PI_API="${CEO_PI_API:-openai-responses}"' in command[2]
+    assert 'CEO_PI_THINKING_LEVEL="${CEO_PI_THINKING_LEVEL:-medium}"' in command[2]
+    assert "CEO_PI_API_KEY" not in command[2]
+    assert "CEO_CODEX_MODEL" not in command[2]
     assert "dingteam_okr_browser_source.py fetch --user-id {user_id} --period-label {period_label}" in command[2]
     env = plist["EnvironmentVariables"]
     assert "HOME" not in env
@@ -119,7 +121,19 @@ def test_hourly_dry_run_install_script_installs_and_kickstarts_launch_agent():
     assert "launchctl bootout" in content
     assert "launchctl bootstrap" in content
     assert "launchctl kickstart -k" in content
+    assert "EnvironmentVariables.CEO_SERVICE_ROOT" in content
+    assert 'plutil -lint "${target_plist}"' in content
     assert "mkdir -p" in content
+
+
+def test_component_bootstrap_keeps_optional_nvwa_out_of_runtime_blockers():
+    script = REPO_ROOT / "scripts" / "bootstrap-local-components.sh"
+    content = script.read_text(encoding="utf-8")
+
+    assert 'local target="${HOME}/.agents/skills/nvwa"' in content
+    assert '${HOME}/.agents/skills/nvwa/SKILL.md' in content
+    assert 'record "nvwa-skill" "optional_missing"' in content
+    assert 'record "nvwa-skill" "failed" "Missing Nvwa skill' not in content
 
 
 def test_dws_auth_env_probe_reproduces_file_keychain_boundary_without_native_keychain():

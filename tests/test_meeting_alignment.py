@@ -735,7 +735,7 @@ def test_consumer_injects_similar_codex_sessions_into_meeting_prompt(tmp_path):
     ) == 1
 
     [prompt] = runner.prompts
-    assert "相似历史 Codex sessions" in prompt
+    assert "相似历史 Pi sessions" in prompt
     assert "session-risk-budget" in prompt
     assert "历史相似会议：上线范围和风险预算" in prompt
 

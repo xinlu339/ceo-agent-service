@@ -208,7 +208,7 @@ def test_render_attempt_list_shows_history_rows(tmp_path: Path):
     assert f"/attempts/{attempt_id}" in html
     assert "查看/反馈" in html
     assert ">Codex</a>" not in html
-    assert "/codex/session-1" not in html
+    assert "/pi/session-1" not in html
 
 
 def test_history_hides_runtime_internals_and_shows_agent_outcome(tmp_path: Path):
@@ -615,7 +615,7 @@ def test_meeting_history_uses_reply_card_and_detail_contract(tmp_path: Path):
     assert "rg 上线范围 /Users/principal/Documents/memory" in detail.text
     assert "memory.md:1:上线范围需要先确认风险预算" in detail.text
     assert "Mention resolution" in detail.text
-    assert "/codex/meeting-session-history-1" in detail.text
+    assert "/pi/meeting-session-history-1" in detail.text
 
     chart = audit_web_module._history_chart_payload(store)
     assert chart["total"] == 1
@@ -677,7 +677,7 @@ def test_meeting_attempt_detail_keeps_ready_run_sent_after_later_run(tmp_path: P
     assert '<div class="attempt-detail-value">failed</div>' not in response.text
 
 
-def test_history_search_shows_similar_codex_sessions(tmp_path: Path):
+def test_history_search_shows_similar_pi_sessions(tmp_path: Path):
     store = AutoReplyStore(tmp_path / "worker.sqlite3")
     run_id = seed_meeting_attempt(store)
     store.upsert_codex_session_search_index(
@@ -696,10 +696,10 @@ def test_history_search_shows_similar_codex_sessions(tmp_path: Path):
         query_embedding=[1.0, 0.0],
     )
 
-    assert "相似 Codex sessions" in html
+    assert "相似 Pi sessions" in html
     assert "历史上线范围对齐" in html
     assert "历史相似会议：上线范围、风险预算、故障面。" in html
-    assert "/codex/meeting-session-history-1" in html
+    assert "/pi/meeting-session-history-1" in html
     assert f"/meeting-attempts/{run_id}" in html
 
 
@@ -777,7 +777,7 @@ def test_history_search_object_type_checkboxes_control_results(tmp_path: Path):
     assert "Approval Search Group" in default_html
     assert "Agent Approval Search Group" in default_html
     assert "Task Search Group" in default_html
-    assert "相似 Codex sessions" in default_html
+    assert "相似 Pi sessions" in default_html
 
     replay_only_html = render_attempt_list(
         store,
@@ -788,7 +788,7 @@ def test_history_search_object_type_checkboxes_control_results(tmp_path: Path):
     assert "History Search Group" in replay_only_html
     assert "Approval Search Group" not in replay_only_html
     assert "Task Search Group" not in replay_only_html
-    assert "相似 Codex sessions" not in replay_only_html
+    assert "相似 Pi sessions" not in replay_only_html
 
     approval_only_html = render_attempt_list(
         store,
@@ -800,7 +800,7 @@ def test_history_search_object_type_checkboxes_control_results(tmp_path: Path):
     assert "Agent Approval Search Group" in approval_only_html
     assert "History Search Group" not in approval_only_html
     assert "Task Search Group" not in approval_only_html
-    assert "相似 Codex sessions" not in approval_only_html
+    assert "相似 Pi sessions" not in approval_only_html
 
     meeting_only_html = render_attempt_list(
         store,
@@ -810,7 +810,7 @@ def test_history_search_object_type_checkboxes_control_results(tmp_path: Path):
     )
     assert "History Search Group" not in meeting_only_html
     assert "Task Search Group" not in meeting_only_html
-    assert "相似 Codex sessions" in meeting_only_html
+    assert "相似 Pi sessions" in meeting_only_html
     assert f"/meeting-attempts/{run_id}" in meeting_only_html
 
     task_only_html = render_attempt_list(
@@ -821,7 +821,7 @@ def test_history_search_object_type_checkboxes_control_results(tmp_path: Path):
     )
     assert "History Search Group" not in task_only_html
     assert "Task Search Group" in task_only_html
-    assert "相似 Codex sessions" not in task_only_html
+    assert "相似 Pi sessions" not in task_only_html
 
     object_type_html = render_attempt_list(
         store,
@@ -1643,8 +1643,8 @@ def test_top_nav_highlights_current_page_and_disables_current_link(
     assert '<span class="nav-item active" aria-current="page">Config</span>' in config_html
     assert '<a class="nav-item" href="/config">Config</a>' not in config_html
 
-    assert '<span class="nav-item active" aria-current="page">Codex Sessions</span>' in codex_html
-    assert '<a class="nav-item" href="/codex">Codex Sessions</a>' not in codex_html
+    assert '<span class="nav-item active" aria-current="page">Pi Sessions</span>' in codex_html
+    assert '<a class="nav-item" href="/pi">Pi Sessions</a>' not in codex_html
 
     assert '<span class="nav-item active" aria-current="page">Logs</span>' in errors_html
     assert '<a class="nav-item" href="/logs">Logs</a>' not in errors_html
@@ -1897,12 +1897,7 @@ def test_tutorial_run_route_rejects_blocked_action(tmp_path: Path):
     assert response.status_code == 409
 
 
-def test_tutorial_run_route_persists_failed_action_status(
-    monkeypatch,
-    tmp_path: Path,
-):
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
-    monkeypatch.setenv("CLAUDE_CONFIG_PATH", str(tmp_path / "claude.json"))
+def test_tutorial_run_route_rejects_removed_mcp_setup_action(tmp_path: Path):
     db_path = tmp_path / "worker.sqlite3"
     store = AutoReplyStore(db_path)
     store.upsert_setup_wizard_step(step_id="preflight", status="done", summary="ok")
@@ -1915,12 +1910,8 @@ def test_tutorial_run_route_persists_failed_action_status(
 
     response = client.post("/tutorial/run/setup_mcp")
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "failed"
-    row = AutoReplyStore(db_path).get_setup_wizard_step("mcp")
-    assert row is not None
-    assert row["status"] == "failed"
-    assert row["summary"] == "MEMORY_CONNECTOR_URL is missing."
+    assert response.status_code == 404
+    assert AutoReplyStore(db_path).get_setup_wizard_step("mcp") is None
 
 
 def test_tutorial_confirm_route_accepts_form_submission(tmp_path: Path):
@@ -2979,7 +2970,7 @@ def test_render_config_page_shows_system_config_tab_with_descriptions():
     assert "FAST_PATH_UNREAD_BACKOFF" in html
     assert "快路径扫描到未读会话后等待多久再读取" in html
     assert "MESSAGE_RECOVERY_INTERVAL" in html
-    assert "MEMORY_CONNECTOR_USER_ID" in html
+    assert "MEMORY_CONNECTOR_USER_ID" not in html
     assert "CEO_MENTION_ALIASES" in html
     assert "群聊/消息触发时识别点名" in html
     assert "每次慢路径兜底扫描之间至少间隔多久" in html
@@ -3723,8 +3714,8 @@ def test_render_attempt_list_uses_attempt_codex_session_over_conversation(tmp_pa
     status, detail = render_attempt_detail(store, attempt_id)
 
     assert status == 200
-    assert "/codex/session-1" in detail
-    assert "/codex/new-session" not in detail
+    assert "/pi/session-1" in detail
+    assert "/pi/new-session" not in detail
     assert "agent 执行记录" in detail
 
 
@@ -3751,7 +3742,7 @@ def test_render_attempt_detail_shows_quality_warnings(tmp_path: Path):
     assert "missing audit_summary" in html
     assert "missing codex_session_id" not in html
     assert (
-        "No Codex session is linked; review this attempt using the stored audit fields only."
+        "No Pi session is linked; review this attempt using the stored audit fields only."
         in html
     )
     assert "send_reply has no audit documents" not in html
@@ -4176,7 +4167,7 @@ def test_render_attempt_list_shows_missing_codex_session_info_icon_instead_of_wa
     assert "missing codex_session_id" not in html
     assert 'class="attempt-info"' in html
     assert (
-        "No Codex session is linked; review this attempt using the stored audit fields only."
+        "No Pi session is linked; review this attempt using the stored audit fields only."
         in html
     )
 
@@ -4255,13 +4246,13 @@ def test_render_attempt_detail_shows_full_decision_and_feedback_form(tmp_path: P
     assert 'class="compact-button open-dingtalk-action"' in html
     assert '<button class="rerun" type="submit">重跑</button>' in html
     assert html.index("群名") < html.index("内部反馈/建议修改")
-    assert html.index('class="agent-log-button" href="/codex/session-1"') < html.index(
+    assert html.index('class="agent-log-button" href="/pi/session-1"') < html.index(
         "内部反馈/建议修改"
     )
     assert html.index("attempt-banner-actions") < html.index("trigger message id")
     assert html.index("Trigger") < html.index("生成回复")
     assert html.index("Trigger") < html.index("先按A方案走（by明哥分身）")
-    assert html.index("Codex reason") < html.index("生成回复")
+    assert html.index("Pi reason") < html.index("生成回复")
     assert html.index("direct ask") < html.index("生成回复")
     assert "review-grid" in html
     assert "reply-pre" in html
@@ -4279,15 +4270,15 @@ def test_render_attempt_detail_shows_full_decision_and_feedback_form(tmp_path: P
     assert "audit-tool-args" in html
     assert "\n  " in html
     assert "先按A方案走" in html
-    assert "Draft reply (raw Codex reply)" in html
+    assert "Draft reply (raw Pi reply)" in html
     assert "permission" in html
     assert "内部反馈/建议修改" in html
     assert "反馈意见" in html
     assert "建议回复" in html
     assert f'action="/attempts/{attempt_id}/feedback"' in html
     assert "textarea" in html
-    assert "/codex/session-1" in html
-    assert "Codex local history" not in html
+    assert "/pi/session-1" in html
+    assert "Pi local history" not in html
     assert "Final reply (send-ready text)" not in html
 
 
@@ -4655,10 +4646,10 @@ def test_render_codex_session_list_shows_conversation_sessions(tmp_path: Path):
 
     html = render_codex_session_list(store)
 
-    assert "Codex Sessions" in html
+    assert "Pi Sessions" in html
     assert "技术部" in html
     assert "cid-1" in html
-    assert "/codex/session-1" in html
+    assert "/pi/session-1" in html
     assert "History" in html
     assert f"/attempts/{attempt_id}" in html
     assert "💬 Sent" in html
@@ -4704,13 +4695,13 @@ def test_render_codex_session_detail_uses_local_rendered_history(
     )
 
     assert status == 200
-    assert "Codex Session session-1" in html
+    assert "Pi Session session-1" in html
     assert str(session_path) in html
     assert "已查看岗位画像" in html
     assert "Related history" in html
     assert f"/attempts/{attempt_id}" in html
-    assert f'action="/attempts/{attempt_id}/rerun?return_to=/codex/session-1"' in html
-    assert f'action="/attempts/{attempt_id}/recall?return_to=/codex/session-1"' in html
+    assert f'action="/attempts/{attempt_id}/rerun?return_to=/pi/session-1"' in html
+    assert f'action="/attempts/{attempt_id}/recall?return_to=/pi/session-1"' in html
     assert "/open-dingtalk-popup?conversation_id=cid-1" in html
     assert "查看钉钉消息" in html
     assert "@Alex Chen 这个怎么处理？" in html
@@ -4723,7 +4714,7 @@ def test_render_codex_session_detail_returns_404_when_missing(tmp_path: Path):
     status, html = render_codex_session_detail("missing", codex_home=tmp_path)
 
     assert status == 404
-    assert "Codex session not found" in html
+    assert "Pi session not found" in html
 
 
 def test_render_codex_session_detail_shows_related_history_when_file_missing(
@@ -4750,9 +4741,9 @@ def test_render_codex_session_detail_shows_related_history_when_file_missing(
     )
 
     assert status == 200
-    assert "Codex session unavailable" in html
-    assert "Codex session not found" not in html
-    assert "The local Codex transcript file for this session is no longer available" in html
+    assert "Pi session unavailable" in html
+    assert "Pi session not found" not in html
+    assert "The local Pi transcript file for this session is no longer available" in html
     assert "Related history" in html
     assert f"/attempts/{attempt_id}" in html
     assert "明哥，这个怎么处理？" in html

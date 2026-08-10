@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.agent_envelope import AgentEnvelope
+from app.pi_runner import READ_ONLY_PI_TOOLS
 from app.process_runner import ProcessRunResult
 from app.store import AutoReplyStore
 from app.structured_agent import (
@@ -207,8 +208,8 @@ def test_structured_runner_uses_conversation_session_lock_and_persists_session(
 
     assert isinstance(result.envelope, AgentEnvelope)
     assert store.get_codex_session_id("cid-1") == "session-2"
-    assert calls[0][0][:3] == ["codex", "exec", "resume"]
-    assert "session-1" in calls[0][0]
+    assert calls[0][0][calls[0][0].index("--session-id") + 1] == "session-1"
+    assert calls[0][0][calls[0][0].index("--mode") + 1] == "json"
 
 
 def test_structured_runner_clears_missing_local_session_before_exec(tmp_path):
@@ -267,8 +268,8 @@ def test_structured_runner_clears_missing_local_session_before_exec(tmp_path):
         owner="reply:msg-1",
     )
 
-    assert calls[0][0][:2] == ["codex", "exec"]
-    assert calls[0][0][2] != "resume"
+    assert calls[0][0][1].endswith("/pi/packages/coding-agent/dist/cli.js")
+    assert "--session-id" not in calls[0][0]
     assert "missing-session" not in calls[0][0]
     assert store.get_codex_session_id("cid-1") == "session-2"
 
@@ -338,8 +339,10 @@ def test_structured_runner_resumes_session_to_repair_invalid_json(tmp_path):
 
     assert result.envelope.user_response.text == "ok"
     assert len(calls) == 2
-    assert calls[1][0][:3] == ["codex", "exec", "resume"]
-    assert "session-1" in calls[1][0]
+    assert calls[1][0][calls[1][0].index("--session-id") + 1] == "session-1"
+    assert calls[1][0][calls[1][0].index("--tools") + 1] == ",".join(
+        READ_ONLY_PI_TOOLS
+    )
     assert "重新输出合法 AgentEnvelope JSON" in calls[1][1]
 
 
@@ -471,28 +474,34 @@ def test_structured_runner_reads_audit_events_from_session_transcript(
     skill.write_text("# Skill", encoding="utf-8")
     store = AutoReplyStore(tmp_path / "worker.sqlite3")
     session_id = "019eb102-dc3e-7620-b0e9-16bcc2cb7038"
-    session_path = (
-        tmp_path
-        / "sessions"
-        / "2026"
-        / "06"
-        / "10"
-        / f"rollout-2026-06-10T03-10-15-{session_id}.jsonl"
-    )
+    session_dir = tmp_path / "pi-sessions"
+    session_path = session_dir / f"{session_id}.jsonl"
     session_path.parent.mkdir(parents=True)
     command = 'dws doc search --query "Friday PMF Claire" --format json'
     session_path.write_text(
         "\n".join(
             [
-                json.dumps({"type": "session_meta", "payload": {"id": session_id}}),
                 json.dumps(
                     {
-                        "type": "response_item",
-                        "payload": {
-                            "type": "function_call",
-                            "name": "exec_command",
-                            "call_id": "call-dws-search",
-                            "arguments": json.dumps({"cmd": command}),
+                        "type": "session",
+                        "version": 3,
+                        "id": session_id,
+                        "cwd": str(tmp_path),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "toolCall",
+                                    "name": "bash",
+                                    "id": "call-dws-search",
+                                    "arguments": {"command": command},
+                                }
+                            ],
                         },
                     },
                     ensure_ascii=False,
@@ -502,7 +511,7 @@ def test_structured_runner_reads_audit_events_from_session_transcript(
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("app.structured_agent._codex_home", lambda: tmp_path)
+    monkeypatch.setattr("app.pi_history.pi_session_dir", lambda: session_dir)
 
     def executor(command_args, prompt, env):
         return "\n".join(
@@ -547,10 +556,12 @@ def test_structured_runner_reads_audit_events_from_session_transcript(
     assert result.transcript_end_line == 2
     assert result.audit_tool_events == [
         {
-            "event_type": "response_item",
-            "tool": "exec_command",
+            "event_type": "message",
+            "tool": "bash",
             "call_id": "call-dws-search",
-            "input": json.dumps({"cmd": command}, ensure_ascii=False, indent=2),
+            "input": json.dumps(
+                {"command": command}, ensure_ascii=False, separators=(",", ":")
+            ),
             "command": command,
         }
     ]
@@ -616,11 +627,12 @@ def test_structured_runner_default_executor_uses_process_runner_signature(tmp_pa
     assert kwargs["env"] == runner.runner.build_env()
     assert kwargs["total_timeout_seconds"] == 7
     assert kwargs["idle_timeout_seconds"] == 3
-    assert command[command.index("--disable") + 1] == "hooks"
+    assert "--offline" in command
+    assert "--no-context-files" in command
     assert "--output-schema" not in command
 
 
-def test_structured_runner_uses_explicit_output_schema_when_configured(tmp_path):
+def test_structured_runner_embeds_explicit_output_schema_when_configured(tmp_path):
     schema = tmp_path / "schema.json"
     schema.write_text("{}", encoding="utf-8")
     output_schema = tmp_path / "output.schema.json"
@@ -678,8 +690,10 @@ def test_structured_runner_uses_explicit_output_schema_when_configured(tmp_path)
 
     runner.run("cid-1", "Friday", True, "hello", owner="reply:msg-1")
 
-    schema_index = calls[0].index("--output-schema") + 1
-    assert calls[0][schema_index] == str(output_schema)
+    assert "--output-schema" not in calls[0]
+    system_prompt = calls[0][calls[0].index("--system-prompt") + 1]
+    assert "# Required output JSON schema" in system_prompt
+    assert "```json\n{}\n```" in system_prompt
 
 
 def test_structured_runner_fails_fast_when_lock_is_held(tmp_path):

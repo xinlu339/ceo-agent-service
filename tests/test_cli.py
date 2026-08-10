@@ -1429,6 +1429,8 @@ def test_process_work_items_command_backoffs_native_codex_missing_auth_header(
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
+
     class FakeTaskAgentCodexRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
@@ -1484,8 +1486,8 @@ def test_process_work_items_command_backoffs_native_codex_missing_auth_header(
         ).fetchone()
     assert row["status"] == "pending"
     assert row["attempts"] == 1
-    assert row["error"].startswith("codex_provider_unavailable:")
-    assert "native Codex temporarily omitted the authenticated request header" in row[
+    assert row["error"].startswith("pi_provider_unavailable:")
+    assert "legacy provider request omitted the authenticated request header" in row[
         "error"
     ]
     assert "restore Codex CLI login" not in row["error"]
@@ -1501,6 +1503,8 @@ def test_process_work_items_command_keeps_native_missing_header_pending_after_li
     monkeypatch,
     capsys,
 ):
+    monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
+
     class FakeTaskAgentCodexRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
@@ -1561,7 +1565,7 @@ def test_process_work_items_command_keeps_native_missing_header_pending_after_li
         ).fetchone()
     assert row["status"] == "pending"
     assert row["attempts"] == 4
-    assert row["error"].startswith("codex_provider_unavailable:")
+    assert row["error"].startswith("pi_provider_unavailable:")
     assert row["available_at"] > ""
 
 
@@ -1629,7 +1633,7 @@ def test_process_work_items_command_keeps_codex_transport_failure_pending_after_
         ).fetchone()
     assert row["status"] == "pending"
     assert row["attempts"] == 4
-    assert row["error"].startswith("codex_provider_unavailable:")
+    assert row["error"].startswith("pi_provider_unavailable:")
     assert row["available_at"] > ""
 
 
@@ -2708,6 +2712,12 @@ def test_build_work_profile_command_is_registered():
     assert args.include_dingtalk_messages is True
     assert args.include_dingtalk_kb is True
     assert args.dingtalk_message_target_count == 25
+
+
+def test_review_work_profile_with_nvwa_command_is_registered():
+    args = build_parser().parse_args(["review-work-profile-with-nvwa"])
+
+    assert args.command == "review-work-profile-with-nvwa"
 
 
 def test_build_work_profile_command_uses_all_sources_by_default():
@@ -5573,6 +5583,118 @@ def test_wechat_service_components_present_when_reader_ready(monkeypatch, tmp_pa
     monkeypatch.setenv("CEO_WECHAT_READER_ENABLED", "1")
     comps = cli._wechat_service_components(types.SimpleNamespace(db_path=db))
     assert [name for name, _ in comps] == ["wechat-producer", "wechat-consumer"]
+
+
+def test_wechat_service_components_start_sender_only_when_both_send_gates_allow(
+    monkeypatch,
+    tmp_path,
+):
+    import types
+    from app import cli
+    from app.store import AutoReplyStore
+
+    db = tmp_path / "w.sqlite3"
+    store = AutoReplyStore(db)
+    store.upsert_wechat_read_state(
+        account_id="a1",
+        account_dir="/a1",
+        db_dir="/a1/db_storage",
+        app_version="4.1.10",
+        self_user_id="self-1",
+        capability_status="ready",
+    )
+    monkeypatch.setenv("CEO_WECHAT_READER_ENABLED", "1")
+    monkeypatch.setenv("CEO_WECHAT_SENDER_ENABLED", "1")
+
+    dry_run_components = cli._wechat_service_components(
+        types.SimpleNamespace(db_path=db, dry_run=True)
+    )
+    live_components = cli._wechat_service_components(
+        types.SimpleNamespace(db_path=db, dry_run=False)
+    )
+
+    assert [name for name, _ in dry_run_components] == [
+        "wechat-producer",
+        "wechat-consumer",
+    ]
+    assert [name for name, _ in live_components] == [
+        "wechat-producer",
+        "wechat-consumer",
+        "wechat-sender",
+    ]
+
+
+def test_optional_wechat_component_failure_does_not_exit_main_service(
+    monkeypatch,
+    tmp_path,
+):
+    failures = []
+    exits = []
+    settings = WorkerSettings(db_path=tmp_path / "worker.sqlite3")
+    monkeypatch.setattr(
+        cli,
+        "_record_service_failure",
+        lambda _settings, component, exc: failures.append((component, str(exc))),
+    )
+
+    def fail():
+        raise RuntimeError("reader unavailable")
+
+    cli._service_component_target(
+        settings=settings,
+        component="wechat-producer",
+        target=fail,
+        exit_process=lambda status: exits.append(status),
+        critical=False,
+    )()
+
+    assert failures == [("wechat-producer", "reader unavailable")]
+    assert exits == []
+
+
+def test_run_service_composes_dingtalk_and_wechat_workers_together(
+    monkeypatch,
+    tmp_path,
+):
+    started = []
+    db = tmp_path / "worker.sqlite3"
+    store = AutoReplyStore(db)
+    store.upsert_wechat_read_state(
+        account_id="a1",
+        account_dir="/a1",
+        db_dir="/a1/db_storage",
+        app_version="4.1.10",
+        self_user_id="self-1",
+        capability_status="ready",
+    )
+    monkeypatch.setenv("CEO_WECHAT_READER_ENABLED", "1")
+    monkeypatch.setenv("CEO_WECHAT_SENDER_ENABLED", "0")
+    monkeypatch.setattr(cli, "doctor_mcp_command", lambda *args, **kwargs: None)
+
+    class CapturingThread:
+        def __init__(self, target, name, daemon):
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self):
+            started.append(self.name)
+
+    run_service(
+        WorkerSettings(db_path=db, dry_run=True, oa_pending_scan_enabled=False),
+        host="127.0.0.1",
+        port=0,
+        producer_interval_seconds=60,
+        consumer_poll_interval_seconds=10,
+        thread_factory=CapturingThread,
+        wait=lambda: None,
+        exit_process=lambda _status: None,
+    )
+
+    assert "ceo-agent-service-producer" in started
+    assert "ceo-agent-service-consumer" in started
+    assert "ceo-agent-service-wechat-producer" in started
+    assert "ceo-agent-service-wechat-consumer" in started
 
 
 def test_wechat_service_components_absent_when_ready_account_has_no_self_id(

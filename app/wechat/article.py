@@ -1,4 +1,4 @@
-"""Best-effort fetch of a shared article's body, to give Codex real context.
+"""Best-effort fetch of a shared article's body, to give Pi real context.
 
 WeChat public-account pages (mp.weixin.qq.com) return an anti-bot *verify* page
 to plain clients but serve the article to a MicroMessenger (WeChat) UA; other

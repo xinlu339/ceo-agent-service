@@ -70,7 +70,7 @@ from app.dingtalk_models import (
     DingTalkConversation,
     DingTalkMessage,
 )
-from app.codex_runner import selected_codex_model_provider
+from app.pi_runner import selected_pi_provider
 from app.notification import (
     dingtalk_conversation_notification_url,
     send_browser_notification,
@@ -98,8 +98,10 @@ HANDOFF_NOTIFICATION_PREFIX = "【CEO Agent 转人工通知】"
 # new processing acknowledgements before final replies.
 PROCESSING_ACK = "收到，我正在处理（by 分身）"
 CODEX_LOGIN_REQUIRED_PREFIX = "codex_login_required"
-CODEX_PROVIDER_AUTH_FAILED_PREFIX = "codex_provider_auth_failed"
-CODEX_PROVIDER_UNAVAILABLE_PREFIX = "codex_provider_unavailable"
+PI_PROVIDER_AUTH_FAILED_PREFIX = "pi_provider_auth_failed"
+PI_PROVIDER_UNAVAILABLE_PREFIX = "pi_provider_unavailable"
+LEGACY_CODEX_PROVIDER_AUTH_FAILED_PREFIX = "codex_provider_auth_failed"
+LEGACY_CODEX_PROVIDER_UNAVAILABLE_PREFIX = "codex_provider_unavailable"
 CRITICAL_INFO_UNAVAILABLE_PREFIX = "critical_info_unavailable:"
 XIAOQING_CRITICAL_INFO_UNAVAILABLE_MARKER = (
     f"{CRITICAL_INFO_UNAVAILABLE_PREFIX}xiaoqing_interview"
@@ -112,6 +114,9 @@ REPLY_TASK_RETRY_BASE_DELAY_SECONDS = 60
 REPLY_TASK_RETRY_MAX_DELAY_SECONDS = 15 * 60
 RECOVERABLE_AGENT_RUNTIME_ERRORS = frozenset(
     {
+        "pi_process_failed",
+        "pi_process_timeout",
+        "pi_stream_invalid",
         "codex_process_failed",
         "codex_process_timeout",
         "codex_stream_invalid",
@@ -207,6 +212,10 @@ def _is_codex_login_required_error(reason: str) -> bool:
 
 def _is_codex_provider_auth_error(reason: str) -> bool:
     normalized = reason.lower()
+    if normalized.startswith(
+        (PI_PROVIDER_AUTH_FAILED_PREFIX, LEGACY_CODEX_PROVIDER_AUTH_FAILED_PREFIX)
+    ):
+        return True
     responses_api_auth_failed = (
         "unexpected status 401 unauthorized" in normalized
         and (
@@ -223,34 +232,39 @@ def _is_codex_provider_auth_error(reason: str) -> bool:
 
 
 def _codex_provider_auth_error(reason: str) -> str:
+    if reason.startswith(PI_PROVIDER_AUTH_FAILED_PREFIX):
+        return reason
     normalized = reason.lower()
     if "missing bearer or basic authentication" in normalized:
         detail = "OpenAI Responses API was called without a bearer/basic auth header"
     elif "invalid api key" in normalized:
-        detail = "configured Codex model provider rejected its API key"
+        detail = "configured Pi model provider rejected its API key"
     elif (
         "unexpected status 403 forbidden" in normalized
         and "chatgpt.com/backend-api/codex/responses" in normalized
     ):
-        detail = "ChatGPT Codex backend rejected the service session with 403 Forbidden"
+        detail = "legacy ChatGPT Codex backend rejected the service session with 403 Forbidden"
     else:
-        detail = "Codex model provider authentication failed"
+        detail = "Pi model provider authentication failed"
     return (
-        f"{CODEX_PROVIDER_AUTH_FAILED_PREFIX}: {detail}; "
-        "native codex exec selected a Responses API model provider without "
-        "usable provider credentials; verify codex exec works in the service "
+        f"{PI_PROVIDER_AUTH_FAILED_PREFIX}: {detail}; "
+        "verify CEO_PI_API_KEY and the selected Pi provider configuration in the service "
         "environment before rerunning"
     )
 
 
 def _is_codex_provider_transport_error(reason: str) -> bool:
     normalized = reason.lower()
+    if normalized.startswith(
+        (PI_PROVIDER_UNAVAILABLE_PREFIX, LEGACY_CODEX_PROVIDER_UNAVAILABLE_PREFIX)
+    ):
+        return True
     if "/v1/responses" not in normalized:
         return False
     native_missing_auth_header = (
         "unexpected status 401 unauthorized" in normalized
         and "missing bearer or basic authentication" in normalized
-        and selected_codex_model_provider() == "openai"
+        and selected_pi_provider() == "openai"
     )
     return (
         "stream disconnected before completion" in normalized
@@ -261,16 +275,18 @@ def _is_codex_provider_transport_error(reason: str) -> bool:
 
 
 def _codex_provider_transport_error(reason: str) -> str:
+    if reason.startswith(PI_PROVIDER_UNAVAILABLE_PREFIX):
+        return reason
     normalized = reason.lower()
     if "process produced no output" in normalized:
-        detail = "Codex provider request produced no output before the idle timeout"
+        detail = "Pi provider request produced no output before the idle timeout"
     elif "missing bearer or basic authentication" in normalized:
-        detail = "native Codex temporarily omitted the authenticated request header"
+        detail = "the legacy provider request omitted the authenticated request header"
     else:
-        detail = "Codex provider request disconnected before completion"
+        detail = "Pi provider request disconnected before completion"
     return (
-        f"{CODEX_PROVIDER_UNAVAILABLE_PREFIX}: {detail}; "
-        "wait for network/provider recovery or verify native codex exec works "
+        f"{PI_PROVIDER_UNAVAILABLE_PREFIX}: {detail}; "
+        "wait for network/provider recovery or verify Pi works "
         "in the service environment before rerunning"
     )
 
@@ -299,8 +315,10 @@ def _normalize_codex_stop_error_reason(reason: str) -> str:
 def _is_codex_authorization_wait_reason(reason: str) -> bool:
     return reason.startswith(
         (
-            CODEX_PROVIDER_AUTH_FAILED_PREFIX,
-            CODEX_PROVIDER_UNAVAILABLE_PREFIX,
+            PI_PROVIDER_AUTH_FAILED_PREFIX,
+            PI_PROVIDER_UNAVAILABLE_PREFIX,
+            LEGACY_CODEX_PROVIDER_AUTH_FAILED_PREFIX,
+            LEGACY_CODEX_PROVIDER_UNAVAILABLE_PREFIX,
             CODEX_LOGIN_REQUIRED_PREFIX,
         )
     )
@@ -389,13 +407,13 @@ class ReplyTaskProcessingError(RuntimeError):
 
 
 class CodexAuthorizationRequiredError(ReplyTaskProcessingError):
-    """Raised when Codex login or selected provider credentials must be restored."""
+    """Legacy name for a Pi provider-credential recovery condition."""
 
     needs_authorization = True
 
 
 class DwsAuthorizationRequiredError(ReplyTaskProcessingError):
-    """Raised when DWS auth is not ready before starting a Codex agent."""
+    """Raised when DWS auth is not ready before starting a Pi agent."""
 
     needs_authorization = True
 
@@ -452,11 +470,11 @@ class DingTalkAutoReplyWorker:
         runner = getattr(self.codex, "runner", None)
         workspace = getattr(runner, "workspace", None)
         if workspace is None:
-            raise RuntimeError("native Codex runner workspace is unavailable")
+            raise RuntimeError("Pi runner workspace is unavailable")
         self.direct_agent_runner = DirectAgentRunner(
             store=self.store,
             workspace=Path(workspace),
-            codex_bin=str(getattr(runner, "codex_bin", "codex")),
+            codex_bin=str(getattr(runner, "node_binary", "node")),
         )
         return self.direct_agent_runner
 
@@ -1487,7 +1505,7 @@ class DingTalkAutoReplyWorker:
                 try:
                     self.store.defer_reply_task(
                         task.id,
-                        "codex_session_locked",
+                        "pi_session_locked",
                         expected_execution_generation=task.execution_generation,
                         available_at=self._reply_task_retry_available_at(1),
                     )
@@ -1503,7 +1521,10 @@ class DingTalkAutoReplyWorker:
                     exc
                 ) or _is_codex_authorization_wait_reason(authorization_wait_error):
                     provider_recovery = authorization_wait_error.startswith(
-                        CODEX_PROVIDER_UNAVAILABLE_PREFIX
+                        (
+                            PI_PROVIDER_UNAVAILABLE_PREFIX,
+                            LEGACY_CODEX_PROVIDER_UNAVAILABLE_PREFIX,
+                        )
                     )
                     notify_authorization_wait = (
                         task.error.strip() != authorization_wait_error
@@ -1535,7 +1556,7 @@ class DingTalkAutoReplyWorker:
                     )
                     if notify_authorization_wait:
                         notification_prefix = (
-                            "CEO task waiting for Codex provider recovery: "
+                            "CEO task waiting for Pi provider recovery: "
                             if provider_recovery
                             else "CEO task waiting for authorization: "
                         )
@@ -1784,12 +1805,23 @@ class DingTalkAutoReplyWorker:
                     continue
                 resolved += 1
                 continue
-            except AgentReadOnlyViolationError:
+            except AgentReadOnlyViolationError as exc:
+                violation_code = str(exc).strip()
+                retryable_violation = violation_code in {
+                    "reconciliation_command_unreviewed",
+                    "reconciliation_query_receipt_invalid",
+                    "reconciliation_tool_call_id_missing",
+                    "reconciliation_tool_start_missing",
+                }
                 self._defer_agent_reconciliation(
                     run.id,
                     runner.owner,
-                    code="reconciliation_write_forbidden",
-                    retryable=False,
+                    code=(
+                        violation_code
+                        if retryable_violation
+                        else "reconciliation_write_forbidden"
+                    ),
+                    retryable=retryable_violation,
                 )
                 continue
             except ReconciliationDependencyError as exc:
@@ -1820,6 +1852,19 @@ class DingTalkAutoReplyWorker:
             except Exception as exc:
                 code = str(exc).strip() or "reconciliation_tool_unavailable"
                 retryable = code in {
+                    "pi_process_failed",
+                    "pi_process_timeout",
+                    "pi_stream_invalid",
+                    "pi_not_settled",
+                    "pi_retry_incomplete",
+                    "pi_compaction_incomplete",
+                    "pi_tool_incomplete",
+                    "pi_extension_failed",
+                    "pi_provider_auth_failed",
+                    "pi_provider_unavailable",
+                    "reconciliation_proof_invalid",
+                    "reconciliation_proof_ambiguous",
+                    "reconciliation_result_invalid",
                     "codex_process_failed",
                     "codex_process_timeout",
                     "codex_stream_invalid",
@@ -1897,8 +1942,18 @@ class DingTalkAutoReplyWorker:
         gate_state: ChannelGateState | None = None,
     ) -> bool:
         run = self.store.get_agent_run(run_id)
-        if run is None:
+        if run is None or run.status != "unknown":
             return False
+        if run.lease_owner != owner:
+            claim = self.store.claim_unknown_agent_run(
+                run_id,
+                owner=owner,
+                lease_seconds=LEASE_SECONDS,
+                now=self._sqlite_timestamp(self._now()),
+            )
+            if not claim.claimed:
+                return False
+            run = claim.run
         structured_error = {
             "code": code,
             "retryable": retryable,
@@ -1909,14 +1964,17 @@ class DingTalkAutoReplyWorker:
             ),
         }
         if not retryable:
-            self.store.terminate_unknown_agent_run_unrecoverable(
-                run_id,
-                owner=owner,
-                code=code,
-                expected_execution_generation=run.execution_generation,
-                structured_error=structured_error,
-                now=self._sqlite_timestamp(self._now()),
-            )
+            try:
+                self.store.terminate_unknown_agent_run_unrecoverable(
+                    run_id,
+                    owner=owner,
+                    code=code,
+                    expected_execution_generation=run.execution_generation,
+                    structured_error=structured_error,
+                    now=self._sqlite_timestamp(self._now()),
+                )
+            except AgentRunLeaseLostError:
+                return False
             return True
         next_attempt = ""
         delay_seconds = min(
@@ -1926,15 +1984,18 @@ class DingTalkAutoReplyWorker:
         next_attempt = self._sqlite_timestamp(
             self._now() + timedelta(seconds=delay_seconds)
         )
-        self.store.defer_unknown_agent_run_reconciliation(
-            run_id,
-            structured_error,
-            owner=owner,
-            expected_execution_generation=run.execution_generation,
-            next_attempt_at=next_attempt,
-            suspended=False,
-            now=self._sqlite_timestamp(self._now()),
-        )
+        try:
+            self.store.defer_unknown_agent_run_reconciliation(
+                run_id,
+                structured_error,
+                owner=owner,
+                expected_execution_generation=run.execution_generation,
+                next_attempt_at=next_attempt,
+                suspended=False,
+                now=self._sqlite_timestamp(self._now()),
+            )
+        except AgentRunLeaseLostError:
+            return False
         return False
 
     def _build_agent_reconciliation_context(

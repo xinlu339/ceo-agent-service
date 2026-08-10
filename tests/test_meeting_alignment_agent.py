@@ -384,8 +384,14 @@ def test_runner_always_starts_fresh_and_uses_schema(tmp_path: Path):
     decision = runner.decide(prompt="decide")
 
     assert decision.action == "no_action"
-    assert "resume" not in captured["command"]
-    assert "meeting_alignment_decision.schema.json" in " ".join(captured["command"])
+    assert "--session-id" not in captured["command"]
+    assert captured["command"][captured["command"].index("--mode") + 1] == "json"
+    assert "--offline" in captured["command"]
+    assert "--no-context-files" in captured["command"]
+    assert "--output-schema" not in captured["command"]
+    assert "meeting_alignment_decision.schema.json" not in " ".join(
+        captured["command"]
+    )
     assert runner.last_transcript_start_line == 0
 
 
@@ -455,7 +461,7 @@ def test_runner_clears_prior_audit_metadata_before_executor_failure(tmp_path: Pa
     assert runner.last_audit_tool_events == []
 
 
-def test_runner_accepts_historical_sources_with_memory_recall_audit(tmp_path: Path):
+def test_runner_rejects_memory_history_even_when_legacy_event_is_present(tmp_path: Path):
     payload = derek_view_payload(historical_sources=["历史上线案例"])
 
     def executor(command, prompt):
@@ -477,11 +483,11 @@ def test_runner_accepts_historical_sources_with_memory_recall_audit(tmp_path: Pa
         )
 
     runner = MeetingAlignmentCodexRunner(workspace=tmp_path, executor=executor)
-    assert runner.decide(prompt="decide").action == "send"
-    assert any(
-        "memory_recall" in event.get("tool", "")
-        for event in runner.last_audit_tool_events
-    )
+    with pytest.raises(
+        RuntimeError,
+        match="Pi did not return a valid MeetingAlignmentDecision",
+    ):
+        runner.decide(prompt="decide")
 
 
 def test_runner_accepts_configured_profile_as_unqueried_history(tmp_path: Path):

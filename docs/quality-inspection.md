@@ -78,8 +78,10 @@ Lark。任一 gate 不是 `ready` 都作为 `channel:<name>/not_ready` violation
 可以显式使用 `--no-verify-channels`，但该结果不能作为线上健康证明。
 
 微信目前由本地 reader/delivery 状态覆盖，并没有在此命令中执行独立的 token 刷新或
-发送 smoke test。Codex 也不在本命令中执行登录或写入 smoke test；其运行可用性由
-`agent_runs`、`errors` 和独立的 `doctor-mcp` 诊断反映。DWS 的 gate 是可用性探针，
+发送 smoke test。Pi Provider 也不在本命令中执行真实模型调用或写入 smoke test；其
+静态运行能力由 `/config?tab=agent` 与 `doctor-mcp` 的 Node、CLI、reviewed extension、
+DWS schema、Provider 配置和 Friday Memory capability 探测反映，执行健康度由
+`agent_runs` 与 `errors` 反映。DWS 的 gate 是可用性探针，
 不是业务写入重试许可。文档和告警不得把这些局部检查表述成所有外部能力均已验证。
 
 ## 巡检、reconciliation 与修复的关系
@@ -129,7 +131,7 @@ Scheduler / hourly heartbeat
 | --- | --- | --- |
 | 增量窗口 | 用持久化 cursor 检查上次成功巡检到现在新增或更新的 error、attempt 与外部依赖失败 | 原子保存 cursor 和 report ID；中断后不跳过事件；加入 cursor 边界测试 |
 | 72 小时滚动窗口 | 发现重试风暴、反复失败和被反复恢复的异常 | 聚合事件历史而非只看当前状态；定义速率阈值和时区测试 |
-| 全部外部 live probe | Codex、DWS、微信、钉钉分别有不执行真实业务写入的认证/可达性证据 | 每项 probe 有 timeout、失败分类、脱敏输出和模拟测试 |
+| 全部外部 live probe | Pi Provider、Friday Memory、DWS、微信、钉钉分别有不执行真实业务写入的认证/可达性证据 | 每项 probe 有 timeout、失败分类、脱敏输出和模拟测试；Provider/Memory 凭证不进入报告 |
 | 修复编排 | violation 形成一个可去重、可审计的 incident，修复后回写终态 | incident key、幂等 repair run、review/merge/restart 证据和恢复测试 |
 | Dashboard 与 heartbeat | 同一 JSON 同时供审计页、通知和每小时报告消费 | 不直接读取零散表；测试同一 violation 在不同视图一致显示 |
 

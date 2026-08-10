@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -137,7 +138,7 @@ def _load_reviewed_lark_effects() -> dict[tuple[str, str], EffectKind]:
     effects: dict[tuple[str, str], EffectKind] = {}
     try:
         process = run_bounded_process(
-            ["lark-cli", "schema"],
+            [_configured_lark_binary(), "schema"],
             timeout=30,
         )
     except ProcessOutputLimitError as exc:
@@ -176,12 +177,21 @@ def _load_reviewed_lark_effects() -> dict[tuple[str, str], EffectKind]:
             continue
         if risk == "read":
             effect = EffectKind.READ_ONLY
-        elif risk in {"write", "high-risk-write"}:
+        elif risk == "write":
             effect = EffectKind.EFFECTFUL
         else:
             continue
         effects[("lark-cli", command_path.strip())] = effect
     return effects
+
+
+def _configured_lark_binary() -> str:
+    value = os.environ.get("CEO_FEISHU_CLI_BINARY", "").strip() or "lark-cli"
+    if Path(value).name != "lark-cli":
+        raise NativeCliMetadataUnavailableError(
+            cli="lark-cli", code="native_cli_metadata_binary_invalid", retryable=False
+        )
+    return value
 
 
 class NativeCliMetadataClassifier:
@@ -300,7 +310,7 @@ class NativeCliMetadataClassifier:
         for command_path in _command_path_candidates(argv[1:]):
             try:
                 process = run_bounded_process(
-                    [argv[0], *command_path.split(), "--help"],
+                    [_configured_lark_binary(), *command_path.split(), "--help"],
                     timeout=10,
                 )
             except ProcessOutputLimitError as exc:
@@ -318,6 +328,9 @@ class NativeCliMetadataClassifier:
                     break
             if risk not in {"read", "write", "high-risk-write"}:
                 continue
+            if risk == "high-risk-write":
+                self._cache[("lark-cli", command_path)] = None
+                return None
             parsed = EffectKind.READ_ONLY if risk == "read" else EffectKind.EFFECTFUL
             self._cache[("lark-cli", command_path)] = parsed
             return _classified_native_command(
@@ -507,6 +520,7 @@ def structured_target_identifiers(value: object) -> dict[str, str]:
                 normalized == "id"
                 or normalized.endswith("id")
                 or normalized.endswith("url")
+                or normalized == "uuid"
             ):
                 if item and not contains_credential(item):
                     identifiers[str(key)] = safe_observability_error(item, limit=500)

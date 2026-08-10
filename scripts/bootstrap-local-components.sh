@@ -8,6 +8,7 @@ fi
 
 RESULTS=()
 FAILED=0
+OPTIONAL_MISSING=0
 
 record() {
   local component="$1"
@@ -16,6 +17,8 @@ record() {
   RESULTS+=("${component}"$'\t'"${status}"$'\t'"${detail}")
   if [[ "${status}" == "failed" ]]; then
     FAILED=1
+  elif [[ "${status}" == "optional_missing" ]]; then
+    OPTIONAL_MISSING=1
   fi
   if [[ "${FORMAT_TEXT}" == "1" ]]; then
     printf '%s: %s - %s\n' "${component}" "${status}" "${detail}"
@@ -29,7 +32,11 @@ json_string() {
 emit_json() {
   local summary
   if [[ "${FAILED}" == "0" ]]; then
-    summary="Local CLI components were checked and repaired."
+    if [[ "${OPTIONAL_MISSING}" == "1" ]]; then
+      summary="Required local CLI components are ready; optional preparation components still need local sources."
+    else
+      summary="Local CLI components were checked and repaired."
+    fi
   else
     summary="Some CLI components still need an approved installer or manual authorization."
   fi
@@ -106,31 +113,81 @@ ensure_terminal_notifier() {
   fi
 }
 
-ensure_codex() {
-  local path version
-  path="$(command_path codex)"
-  if [[ -n "${path}" ]]; then
-    version="$(short_version codex --version)"
-    record "codex" "done" "available at ${path}${version:+ (${version})}"
+node_version_ok() {
+  local binary="$1"
+  [[ -x "${binary}" ]] || return 1
+  "${binary}" -e '
+    const [major, minor, patch] = process.versions.node.split(".").map(Number);
+    process.exit(
+      major > 22 ||
+      (major === 22 && (minor > 19 || (minor === 19 && patch >= 0)))
+        ? 0 : 1
+    );
+  ' >/dev/null 2>&1
+}
+
+find_pi_node() {
+  local candidate
+  if [[ -n "${CEO_PI_NODE_BINARY:-}" ]] && node_version_ok "${CEO_PI_NODE_BINARY}"; then
+    printf '%s\n' "${CEO_PI_NODE_BINARY}"
     return
   fi
-
-  if install_with_command "CODEX_INSTALL_COMMAND"; then
-    path="$(command_path codex)"
-    if [[ -n "${path}" ]]; then
-      record "codex" "done" "installed with CODEX_INSTALL_COMMAND at ${path}"
+  candidate="$(command_path node)"
+  if [[ -n "${candidate}" ]] && node_version_ok "${candidate}"; then
+    printf '%s\n' "${candidate}"
+    return
+  fi
+  while IFS= read -r candidate; do
+    if node_version_ok "${candidate}"; then
+      printf '%s\n' "${candidate}"
       return
     fi
-    record "codex" "failed" "CODEX_INSTALL_COMMAND completed but codex is still not on PATH."
+  done < <(find "${HOME}/.nvm/versions/node" -path '*/bin/node' -type f 2>/dev/null | sort -Vr)
+}
+
+ensure_pi() {
+  local script_root repo_root pi_root cli_path node_path node_version npm_path
+  script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo_root="$(cd "${script_root}/.." && pwd)"
+  pi_root="$(cd "${repo_root}/.." && pwd)/pi"
+  cli_path="${CEO_PI_CLI_PATH:-${pi_root}/packages/coding-agent/dist/cli.js}"
+  node_path="$(find_pi_node)"
+  if [[ -z "${node_path}" ]]; then
+    record "pi-node" "failed" "Pi requires Node >=22.19.0; set CEO_PI_NODE_BINARY or install a compatible Node version."
     return
   fi
+  node_version="$(short_version "${node_path}" --version)"
+  record "pi-node" "done" "available at ${node_path}${node_version:+ (${node_version})}"
 
-  record "codex" "failed" "Missing codex and no approved CODEX_INSTALL_COMMAND was provided."
+  if [[ -f "${cli_path}" ]]; then
+    record "pi-agent" "done" "built CLI available at ${cli_path}"
+    return
+  fi
+  if [[ ! -f "${pi_root}/package.json" ]]; then
+    record "pi-agent" "failed" "Missing sibling Pi checkout at ${pi_root}."
+    return
+  fi
+  npm_path="$(dirname "${node_path}")/npm"
+  if [[ ! -x "${npm_path}" ]]; then
+    record "pi-agent" "failed" "Compatible npm is missing next to ${node_path}."
+    return
+  fi
+  if (
+    cd "${pi_root}" &&
+    PATH="$(dirname "${node_path}"):${PATH}" "${npm_path}" ci --ignore-scripts &&
+    PATH="$(dirname "${node_path}"):${PATH}" "${npm_path}" run build
+  ); then
+    if [[ -f "${cli_path}" ]]; then
+      record "pi-agent" "done" "built sibling Pi CLI at ${cli_path}"
+      return
+    fi
+  fi
+  record "pi-agent" "failed" "Pi build did not produce ${cli_path}."
 }
 
 copy_nvwa_source() {
   local source="$1"
-  local target="${HOME}/.agents/skills/nuwa"
+  local target="${HOME}/.agents/skills/nvwa"
   mkdir -p "${target}"
   if command -v rsync >/dev/null 2>&1; then
     rsync -a "${source%/}/" "${target}/"
@@ -140,9 +197,10 @@ copy_nvwa_source() {
 }
 
 ensure_nvwa() {
-  local primary="${HOME}/.agents/skills/nuwa/SKILL.md"
-  local legacy="${HOME}/.agents/skills/huashu-nuwa/SKILL.md"
-  if [[ -f "${primary}" || -f "${legacy}" ]]; then
+  local primary="${HOME}/.agents/skills/nvwa/SKILL.md"
+  local legacy_nuwa="${HOME}/.agents/skills/nuwa/SKILL.md"
+  local legacy_huashu="${HOME}/.agents/skills/huashu-nuwa/SKILL.md"
+  if [[ -f "${primary}" || -f "${legacy_nuwa}" || -f "${legacy_huashu}" ]]; then
     record "nvwa-skill" "done" "Nvwa skill is available."
     return
   fi
@@ -160,11 +218,11 @@ ensure_nvwa() {
     return
   fi
 
-  record "nvwa-skill" "failed" "Missing Nvwa skill and no approved NVWA_SKILL_SOURCE directory was provided."
+  record "nvwa-skill" "optional_missing" "Optional profile-distillation skill is absent; set NVWA_SKILL_SOURCE when a reviewed local source is available. Runtime Pi is unaffected."
 }
 
 ensure_terminal_notifier
-ensure_codex
+ensure_pi
 ensure_nvwa
 
 if [[ "${FORMAT_TEXT}" == "0" ]]; then

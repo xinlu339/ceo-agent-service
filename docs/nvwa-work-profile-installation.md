@@ -3,7 +3,7 @@
 This guide describes the local dependency needed to generate a reviewed
 `data/work-profile/work_profile.md`.
 
-For a full machine setup, including `dws`, Codex CLI, Memory Connector,
+For a full machine setup, including `dws`, Node 22.19+, the sibling Pi CLI, the reviewed Friday Memory bridge,
 interactive parameters, corpus preparation, audit web management, launchd, and
 permission checks, use
 [docs/agent-installation-runbook.md](agent-installation-runbook.md). This file
@@ -66,7 +66,7 @@ The builder should not produce `data/work-profile/work_profile.json`,
 
 ## Review With Nvwa
 
-Start a Codex session with the Nvwa skill available and ask it to rewrite only
+Start a Pi session with the Nvwa skill available through reviewed workspace reads and ask it to rewrite only
 `data/work-profile/work_profile.md` using:
 
 ```text

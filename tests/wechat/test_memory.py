@@ -1,4 +1,5 @@
 import json
+import hashlib
 import threading
 import time
 
@@ -301,8 +302,10 @@ def test_codex_recall_matcher_accepts_only_audited_memory_recall(tmp_path):
         return success
     matcher = CodexMemoryRecallMatcher(tmp_path, executor=execute)
     assert matcher.match([candidate("fact", category="fact")])["fact"].relation == "exact"
-    assert 'mcp_servers.memory_connector.enabled_tools=["memory_recall"]' in captured["command"]
-    assert 'mcp_servers.memory_connector.disabled_tools=["memory_write"]' in captured["command"]
+    assert captured["command"][captured["command"].index("--tools") + 1] == (
+        "memory_recall"
+    )
+    assert not any("mcp_servers.memory_connector" in item for item in captured["command"])
     malicious = success.replace('"tool": "memory_recall"', '"tool": "memory_write"')
     with pytest.raises(RuntimeError, match="only memory_recall"):
         CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: malicious).match(
@@ -696,8 +699,8 @@ def test_codex_extraction_runner_parses_batch_envelope_and_forbids_write(tmp_pat
     result = CodexMemoryExtractionRunner(tmp_path, executor=execute).extract([message])
     assert [item.statement for item in result] == ["durable fact"]
     assert "不会提供 memory_write" in captured["prompt"]
-    assert "wechat_memory_candidates.schema.json" in " ".join(captured["command"])
-    assert "tools.enabled_tools=[]" in captured["command"]
+    assert "--output-schema" not in captured["command"]
+    assert "--no-tools" in captured["command"]
 
 
 def test_codex_extraction_parses_live_item_completed_agent_message(tmp_path):
@@ -740,6 +743,90 @@ def test_real_codex_lifecycle_counts_completed_write_once_without_call_id(tmp_pa
     backend = CodexMemoryWriteBackend(tmp_path, executor=lambda command, prompt: raw)
     assert backend.write(
         "final", source_time_start="2026-07-17", source_time_end="") == "episode-real"
+
+
+def test_pi_memory_write_backend_accepts_one_confirmed_reviewed_tool_event(tmp_path):
+    arguments = {"data": "final", "type": "text", "created_at": "2026-07-17"}
+    result = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(
+                                    {
+                                        "ok": True,
+                                        "episode_uuid": "episode-pi",
+                                        "processing_status": "completed",
+                                    }
+                                ),
+                            }
+                        ]
+                    }
+                ),
+            }
+        ],
+        "details": {
+            "protocolVersion": 1,
+            "bridge": "memory_connector",
+            "effect": "write",
+            "operation": "memory_write",
+            "operationDigest": hashlib.sha256(
+                json.dumps(
+                    {"tool": "memory_write", "arguments": arguments},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "targetIdentifiers": {},
+            "exitCode": 0,
+            "completed": True,
+            "safeToConfirm": True,
+            "receipt": {
+                "episode_uuid": "episode-pi",
+                "processing_status": "completed",
+            },
+        },
+    }
+    raw = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "tool_execution_start",
+                    "toolCallId": "memory-1",
+                    "toolName": "memory_write",
+                    "args": arguments,
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "memory-1",
+                    "toolName": "memory_write",
+                    "result": result,
+                    "isError": False,
+                }
+            ),
+        ]
+    )
+    captured = {}
+
+    def execute(command, prompt):
+        captured.update(command=command, prompt=prompt)
+        return raw
+
+    backend = CodexMemoryWriteBackend(tmp_path, executor=execute)
+
+    assert backend.write(
+        "final", source_time_start="2026-07-17", source_time_end=""
+    ) == "episode-pi"
+    assert captured["command"][captured["command"].index("--tools") + 1] == (
+        "memory_write"
+    )
 
 
 def test_recall_matcher_uses_one_exact_query_per_candidate(tmp_path):
@@ -859,13 +946,9 @@ def test_extraction_filters_sensitive_input_and_runs_read_only_without_tools(
     assert "alice@example.com" not in captured["prompt"]
     assert "13800138000" not in captured["prompt"]
     assert "12345678" not in captured["prompt"]
-    assert "--dangerously-bypass-approvals-and-sandbox" not in captured["command"]
-    assert "read-only" in captured["command"]
-    assert "tools.enabled_tools=[]" in captured["command"]
-    assert 'web_search="disabled"' in captured["command"]
-    assert "mcp_servers.xiaoqing_interview.enabled=false" in captured["command"]
-    assert "mcp_servers.exa.enabled=false" in captured["command"]
-    assert "mcp_servers.github.enabled=false" in captured["command"]
+    assert "--offline" in captured["command"]
+    assert "--no-context-files" in captured["command"]
+    assert "--no-tools" in captured["command"]
 
 
 def test_extraction_fails_closed_if_codex_emits_any_tool_call(tmp_path):
@@ -878,6 +961,26 @@ def test_extraction_fails_closed_if_codex_emits_any_tool_call(tmp_path):
     with pytest.raises(RuntimeError, match="must not call tools"):
         CodexMemoryExtractionRunner(
             tmp_path, executor=lambda command, prompt: raw).extract([])
+
+
+def test_extraction_fails_closed_if_pi_emits_any_tool_call(tmp_path):
+    raw = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "tool_execution_start",
+                    "toolCallId": "call-1",
+                    "toolName": "read",
+                    "args": {"path": "/tmp/file"},
+                }
+            ),
+            json.dumps({"candidates": []}),
+        ]
+    )
+    with pytest.raises(RuntimeError, match="must not call tools"):
+        CodexMemoryExtractionRunner(
+            tmp_path, executor=lambda command, prompt: raw
+        ).extract([])
 
 
 def test_clean_candidate_time_bounds_compare_instants_not_iso_strings(store):

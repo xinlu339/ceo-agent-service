@@ -28,11 +28,22 @@ class FakeStore:
 
 
 @pytest.fixture(autouse=True)
-def clear_fake_store() -> None:
+def clear_fake_store(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeStore.rows = []
+    for key in (
+        "MEMORY_CONNECTOR_URL",
+        "CONNECTOR_API_KEY",
+        "MEMORY_CONNECTOR_AUTH_TYPE",
+        "MEMORY_CONNECTOR_CONTENT_TYPE",
+        "MEMORY_CONNECTOR_USER_ID",
+        "CEO_PI_XIAOQING_ACCESS_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CEO_FEISHU_CLI_BINARY", "/missing/lark-cli")
+    monkeypatch.setattr("app.mcp_doctor.pi_memory_connector_env", lambda: {})
 
 
-def test_mcp_doctor_reports_native_memory_and_passthrough_config(
+def test_mcp_doctor_reports_all_reviewed_pi_integrations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = tmp_path / "config.toml"
@@ -46,7 +57,10 @@ url = "https://xiaoqing.example/mcp"
 """,
         encoding="utf-8",
     )
-    monkeypatch.delenv("CEO_CODEX_PASSTHROUGH_MCP_SERVERS", raising=False)
+    (tmp_path / "memory_connector.env").write_text(
+        "CONNECTOR_API_KEY=memory-secret\n",
+        encoding="utf-8",
+    )
 
     statuses = check_mcp_statuses(
         codex_config_path=config,
@@ -56,8 +70,13 @@ url = "https://xiaoqing.example/mcp"
     assert by_name["memory_connector"].state == "ready"
     assert by_name["memory_connector"].authorization_required is False
     assert by_name["memory_connector"].recover_command == ""
-    assert by_name["exa"].ready is True
-    assert by_name["xiaoqing_interview"].ready is True
+    assert "memory-secret" not in str(by_name["memory_connector"].as_dict())
+    assert by_name["exa"].state == "ready"
+    assert by_name["xiaoqing_interview"].state == "missing_auth"
+    assert by_name["xiaoqing_interview"].authorization_required is True
+    assert by_name["lark"].state == "missing_cli"
+    assert by_name["nvwa"].state == "missing_config"
+    assert by_name["dws_reviewed_tools"].state in {"ready", "blocked"}
 
 
 def test_mcp_doctor_reports_missing_memory_config(tmp_path: Path) -> None:
@@ -69,12 +88,12 @@ def test_mcp_doctor_reports_missing_memory_config(tmp_path: Path) -> None:
         name="memory_connector",
         state="missing_config",
         ready=False,
-        reason="[mcp_servers.memory_connector] is missing from Codex config",
+        reason="Memory Connector URL is missing or invalid for the reviewed Pi bridge",
         recover_command="ceo-agent setup-memory-connector --memory-url <memory-mcp-url>",
     )
 
 
-def test_mcp_doctor_marks_disabled_passthrough_as_tool_not_found(
+def test_mcp_doctor_uses_reviewed_exa_bridge_not_legacy_codex_passthrough(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = tmp_path / "config.toml"
@@ -86,8 +105,11 @@ def test_mcp_doctor_marks_disabled_passthrough_as_tool_not_found(
     )
     by_name = {status.name: status for status in statuses}
 
+    assert by_name["exa"].state == "ready"
+    assert "web_search_exa" in by_name["exa"].reason
     assert by_name["exa"].ready is True
-    assert by_name["xiaoqing_interview"].state == "tool_not_found"
+    assert by_name["xiaoqing_interview"].state == "missing_auth"
+    assert by_name["xiaoqing_interview"].ready is False
 
 
 def test_mcp_doctor_notification_is_sent_once(tmp_path: Path) -> None:
@@ -110,7 +132,7 @@ def test_mcp_doctor_notification_is_sent_once(tmp_path: Path) -> None:
         )
 
     assert len(sent) == 1
-    assert sent[0][0] == "CEO MCP needs authorization: memory_connector"
+    assert sent[0][0] == "CEO Pi capability needs authorization: memory_connector"
     assert len(FakeStore.rows) == 1
     assert McpDoctorState(tmp_path / "mcp-doctor-state.json").should_notify(status) is False
 

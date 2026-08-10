@@ -398,11 +398,11 @@ def test_task_agent_prompt_requires_xiaoqing_before_candidate_status_follow_up()
     prompt = build_task_agent_prompt(item, "候选项目:\n[]\n\n近期 follow-up 候选:\n[]")
 
     assert "xiaoqing_interview" in prompt
-    assert "当前阶段、最终决策、决策时间和决策说明" in prompt
-    assert "不要再问 HR" in prompt
-    assert "最终决策=淘汰/已淘汰" in prompt
-    assert "todo_changes.close" in prompt
-    assert "follow_up_changes.suppress" in prompt
+    assert "没有安装 Xiaoqing bridge" in prompt
+    assert "不得调用或声称调用" in prompt
+    assert "不得关闭/抑制 TODO" in prompt
+    assert "不得断言候选人终态" in prompt
+    assert "不要创建要求 HR 代查小青的状态 follow-up" in prompt
 
 
 def test_process_work_item_accepts_lily_owner_correction_reply(tmp_path):
@@ -2556,7 +2556,8 @@ def test_process_work_item_continues_when_memory_connector_unavailable(
     assert run_count == 1
     assert json.loads(memory_context_json) == memory_unavailable_context
     assert "Memory connector 状态:\n不可用：memory connector token is expired" in codex.prompts[0]
-    assert "不要因为 memory_recall 不可用而失败" in codex.prompts[0]
+    assert "不要因为 bridge 不可用而失败" in codex.prompts[0]
+    assert "不要调用或声称调用 memory_recall/MCP" in codex.prompts[0]
 
 
 def test_task_agent_codex_runner_isolates_user_config_for_memory_recall(tmp_path):
@@ -2584,27 +2585,34 @@ def test_task_agent_codex_runner_isolates_user_config_for_memory_recall(tmp_path
     runner.decide(prompt="{}", session_id=None)
 
     command = captured["command"]
-    assert "--ignore-user-config" in command
-    assert [
-        command[index + 1]
-        for index, value in enumerate(command[:-1])
-        if value == "--disable"
-    ] == ["hooks"]
+    assert "--offline" in command
+    assert "--no-context-files" in command
+    assert "--output-schema" not in command
 
 
-def test_task_agent_prompt_names_required_memory_recall_tool():
+def test_task_agent_prompt_uses_memory_only_when_injected_status_is_available():
     prompt = build_task_agent_prompt(
         _work_item(),
         "无候选项目",
         memory_issue="",
     )
 
-    assert "直接调用 memory_recall MCP 工具" in prompt
-    assert "list_mcp_resources" in prompt
-    assert "不能替代 memory_recall" in prompt
-    assert "只有实际调用 memory_recall 并获得可用记忆结果后" in prompt
-    assert 'source="memory_connector_runtime_unavailable"' in prompt
-    assert 'source="memory_recall_runtime_failure"' in prompt
+    assert "Memory Connector 是否可用只以文末注入的“Memory connector 状态”为准" in prompt
+    assert "状态明确为可用时，create_project 或 update_project 前才调用 memory_recall" in prompt
+    assert "Memory connector 状态:\n可用：需要用 memory_recall" in prompt
+    assert "当前 Memory Connector bridge 不可用" not in prompt
+
+
+def test_task_agent_prompt_forbids_memory_calls_when_bridge_is_unavailable():
+    prompt = build_task_agent_prompt(
+        _work_item(),
+        "无候选项目",
+        memory_issue="Pi Agent 当前未安装 Memory Connector MCP bridge",
+    )
+
+    assert "不要调用或声称调用 memory_recall/MCP" in prompt
+    assert "不要做 MCP 工具发现" in prompt
+    assert "memory_recall_used=false" in prompt
 
 
 def test_task_agent_prompt_defines_important_vs_routine_process_boundary():
@@ -3175,10 +3183,11 @@ def test_task_agent_codex_runner_uses_process_runner_signature(tmp_path):
     assert calls[0][1]["env"] == runner.runner.build_env()
     assert calls[0][1]["total_timeout_seconds"] == 7
     assert calls[0][1]["idle_timeout_seconds"] == 3
-    assert "--output-schema" in command
-    assert "--ignore-user-config" in command
-    assert command[command.index("--disable") + 1] == "hooks"
-    assert str(TASK_AGENT_DECISION_SCHEMA_PATH) in command
+    assert command[command.index("--mode") + 1] == "json"
+    assert "--offline" in command
+    assert "--no-context-files" in command
+    assert "--output-schema" not in command
+    assert str(TASK_AGENT_DECISION_SCHEMA_PATH) not in command
     assert str(CODEX_DECISION_SCHEMA_PATH) not in command
 
 

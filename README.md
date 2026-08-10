@@ -2,7 +2,9 @@
 
 面向企业管理者的本地优先钉钉消息自动处理系统。
 
-CEO Agent Service 会从钉钉读取私聊、群聊、在线文档、OA 审批、日程邀请和会议权限请求，把需要判断的消息交给 Codex Agent 处理，并把每一次决策、证据、发送结果和错误状态写入本地 SQLite，方便审计、反馈和持续修复。
+CEO Agent Service 会从钉钉读取私聊、群聊、在线文档、OA 审批、日程邀请和会议权限请求，把需要判断的消息交给同级 `../pi` 项目的 Pi Agent 处理，并把每一次决策、证据、发送结果和错误状态写入本地 SQLite，方便审计、反馈和持续修复。
+
+Pi 运行时要求 Node.js `22.19.0+`。Provider、Model、API protocol、Base URL、API Key、Thinking level、Node binary 和 Pi CLI path 可在 `/config?tab=agent` 配置。API Key 只保存在权限为 `0600` 的 `.env` 中，通过子进程环境变量传递；页面不回显，命令行参数和 Pi `models.json` 也不保存明文。
 
 > 这个项目的目标不是替人“随便自动回复”，而是把企业 IM 中可结构化处理的信息流接入一个可审计、可回滚、可人工接管的本地 agent 工作流。
 
@@ -18,22 +20,23 @@ CEO Agent Service 会从钉钉读取私聊、群聊、在线文档、OA 审批�
 - **钉钉消息发现**：通过 `dws` 读取未读会话、@ 消息、群聊广播消息、配置机器人私聊消息，并用慢路径补扫防止漏消息。
 - **消息路由**：区分群聊、私聊、文档、图片、日程、会议权限、OA 审批和系统通知。
 - **本地任务队列**：使用 SQLite 保存 `reply_tasks`、`reply_attempts`、`seen_messages`、`sent_replies`，避免重复处理和重复发送。
-- **Direct Agent 执行**：原生 `codex exec` 自行读取材料并使用当前 Codex 配置中的 CLI、MCP、plugin 和 skill，最后输出结构化终态；服务不再维护第二套 MCP 白名单、工具事件审计或副作用回执协议。
+- **Direct Agent 执行**：Pi JSON mode 自行读取材料，并且只使用仓库内 reviewed tools：受限本地读取、按安装版 schema 校验 effect 的 DWS/Lark read/write、Friday Memory read/write、Exa read-only，以及 Xiaoqing 招聘读取/受控结果上传。任意 bash、通用文件写入和未注册工具都不会暴露给 Pi。
+- **钉钉与微信并行**：同一服务可同时启动 DingTalk 与 WeChat producer/consumer；任务身份按 channel 隔离，WeChat 决策为 tool-free Pi 调用。微信后台自动发送同时受全局 `CEO_NOT_SEND_MESSAGE` 和独立 `CEO_WECHAT_SENDER_ENABLED` / `CEO_WECHAT_SEND_MODE` gate 约束。
 - **CEO 画像数据准备**：从本地工作文档、AI 听记、历史发送样例和可读钉钉知识库中提取证据，蒸馏生成 `data/work-profile/work_profile.md`；运行时只通过 `work_profile_instruction()` 消费这个结果，让 agent 学习管理者的判断顺序、追问方式、表达风格和硬边界。
 - **材料与工具上下文**：服务传递材料引用、原始 ID、链接和精确读取命令；Direct Agent 自行决定读取哪些钉钉文档、文件、OA 材料和本地 workspace 资料。
 - **安全和质量检查**：服务校验严格结构化 result、队列 generation 和精确重复投递；业务判断、工具选择和动作核对由 Direct Agent 使用实时系统完成。
 - **人工接管**：对需要本人处理的消息发送 handoff，并暂停该会话的自动回复直到检测到真人回复。
 - **Task 总结**：从已处理对话、AI 听记和 `CEO_WORKSPACE` 新增文件里抽取公司管理事项、业务项目和重要 TODO，归档到 work project 并生成下一步和跟进草稿。
 - **会后对齐 Agent**：发现 Derek 参会且已结束至少十分钟的会议；仅在存在观点分歧或需要输出 Derek 观点解读时生成跟进。多人会议默认发到 Agent 核验过、明确承接该业务或后续行动的团队群；涉及个人隐私、薪酬绩效或不适合公开的个人负面反馈时，可以私信相关参会人。
-- **审计 Web UI**：本地 FastAPI 页面查看历史、attempt 详情、Codex session、错误、Prompt 模板和路由配置。
+- **审计 Web UI**：本地 FastAPI 页面查看历史、attempt 详情、Pi session、错误、Prompt 模板、路由和 Pi Agent 配置。
 - **自动修复 heartbeat**：消费 fail-closed 质量巡检结果，覆盖必需队列、最新 trigger、陈旧处理、外部投递、反馈和近期错误；将须恢复的问题与仍在进行的工作分开呈现。未知写操作只做只读核对，不自动重放。
 - **管理者 OKR 周报**：每周日读取 CEO-2 管理群成员的实时叮当 OKR 和可访问证据，按 `dingtang-okr-review` 生成可审计评分、知识库报告和群内重点摘要。
 
 ## 按角色使用
 
-推荐一位管理者部署一套本地服务，使用自己的 DWS/Lark/Codex 登录身份、SQLite、workspace、工作画像和反馈服务。
-同事、HR、审批人员和项目人员不需要安装代码，只需在钉钉里按规则 @ 管理者或配置的 Agent 名称。飞书 CLI
-是可选的材料读取和回复通路，不是默认启用的通用飞书收件箱。
+推荐一位管理者部署一套本地服务，使用自己的 DWS 登录身份、Pi Provider 凭据、SQLite、workspace、工作画像和反馈服务。
+同事、HR、审批人员和项目人员不需要安装代码，只需在钉钉或已启用的微信范围内按规则触发。Lark 官方 CLI
+通过 reviewed adapter 暴露给 Pi；普通 read/write 按官方 schema 风险元数据校验，high-risk-write、认证和配置命令始终阻断。
 
 安装者、管理者本人、普通同事、HR、OA 审批人员和运维审计人员的完整操作方式见
 [docs/user-guide.md](docs/user-guide.md)。
@@ -49,11 +52,11 @@ CEO Agent Service 会从钉钉读取私聊、群聊、在线文档、OA 审批�
 3. **Producer Routing 路由判断层**：群聊必须 @ 触发；私聊不需要 @；系统通知跳过；OA/日程/会议权限进入专门 handler。
 4. **SQLite Queue 状态层**：保存待处理任务、处理尝试、已读消息、已发送回复。
 5. **Channel Gate 层**：用 CLI status 和 authenticated probe 确认通道可用；只有明确 `needs_login` 才协调一次登录流程。
-6. **Direct Agent 层**：同一对话复用一个原生 Codex session；每条新消息通过 `codex exec resume` 追加到该 session，并形成独立 run。
-7. **会话与投递层**：保存 Codex session 指针和 transcript 范围，并用 generation-aware claim 与 `sent_replies` 防止重复或过时投递。
+6. **Direct Agent 层**：同一对话复用一个原生 Pi session；每条新消息通过 `--session-id` 追加到该 session，并形成独立 run。
+7. **会话与投递层**：保存 Pi session 指针和 transcript 范围，并用 generation-aware claim 与 `sent_replies` 防止重复或过时投递。数据库中部分 `codex_*` 列名和表名暂时作为兼容存储名保留，不代表运行时仍调用 Codex。
 8. **Audit / Observability / Reconciliation**：审计页面、macOS 通知、launchd、fail-closed 质量巡检和结果未知写操作的只读核对。
 
-当回复判断依赖 DWS 材料时，`codex exec` 内的只读 DWS 命令统一使用 900 秒 HTTP 超时。若 DWS 读取仍以临时网络错误失败，且本轮没有记录其他可用材料，决策会被强制转换为 `blocked`，原 reply task 按指数退避重试；服务不会把材料读取失败改写成拒绝、追问或无依据回复。
+当回复判断依赖 DWS 材料时，Pi 内的只读 DWS 命令统一使用 900 秒 HTTP 超时。若 DWS 读取仍以临时网络错误失败，且本轮没有记录其他可用材料，决策会被强制转换为 `blocked`，原 reply task 按指数退避重试；服务不会把材料读取失败改写成拒绝、追问或无依据回复。
 
 DWS 可能同时返回通用错误码和更具体的服务端错误码；服务始终按具体服务端错误码分类。日历、消息、通讯录和 AI 听记等只读命令遇到临时 `ERROR`、`RATE_LIMIT_ERROR` 或 `PREPARE_CALL_TOOL_ERROR` 会在当前调用内重试，写操作不使用这条通用重试规则。
 
@@ -61,11 +64,11 @@ DWS 可能同时返回通用错误码和更具体的服务端错误码；服务�
 
 单个访问失败反馈只允许 Direct Agent 诊断和报告，不授权修改共享部署入口、域名、DNS、路由或基础设施配置。此类变更必须在上下文中已有至少 3 个相互独立的受影响案例，或 Derek 对该项具体变更给出当次明确授权；同一机器或网络上的重复探测只算一个案例。条件不足时保持配置不变并返回 `needs_human`。
 
-一次 reply task generation 对应一次 Direct Agent run，同一 `conversation_id` 的 run 复用 `conversations.codex_session_id`。Reply consumer 本身按队列逐条处理消息，不再额外维护对话锁。运行审计以 Codex session JSONL 为准，业务数据库只保存 session ID 和本次 transcript 行范围，不复制工具事件或生成服务自定义回执。任务终态直接采用严格 `AgentResult`；服务在收到结果后本地校验 JSON，不使用 Codex CLI 的 `--output-schema` 传输参数，避免上游 schema 兼容性错误在 Agent 执行前中断任务。无错误时 Agent 仍返回空错误对象，避免结果解析把成功执行误标为失败。精确重复发送仍由 trigger 和 `sent_replies` 幂等记录阻止，人工修订后的新内容不被旧结果拦截。
+一次 reply task generation 对应一次 Direct Agent run，同一 `conversation_id` 的 run 复用兼容字段 `conversations.codex_session_id` 保存 Pi session ID。运行审计以 Pi session JSONL 为准，业务数据库只保存 session ID 和本次 transcript 行范围。Pi 没有 `--output-schema`；服务把实际 JSON Schema 放入 system prompt，并在进程返回后用 Pydantic 本地校验，失败时在同一 session 中要求修复。无错误时 Agent 仍返回空错误对象。精确重复发送继续由 trigger 和 `sent_replies` 幂等记录阻止。
 
-`rerun-message --force-new-decision` 会在当前 generation 结束后创建新 generation，但继续复用该对话的 Codex session；仍在运行的 Agent 不会被抢占，普通重复提交仍按同一来源 revision 去重。
+`rerun-message --force-new-decision` 会在当前 generation 结束后创建新 generation，但继续复用该对话的 Pi session；仍在运行的 Agent 不会被抢占，普通重复提交仍按同一来源 revision 去重。
 
-所有仍使用 `CodexDecisionRunner` 的通道（包括微信消费）也忽略过期的用户级 Codex 配置，并显式采用服务当前的模型供应商配置；这使其与 Direct Agent 使用同一认证和模型配置来源，避免旧刷新令牌阻塞新消息处理。
+部分 Python 类名仍保留 `CodexDecisionRunner` 等兼容名称，但其底层 Runner 已切换为 Pi，并统一读取 `CEO_PI_*` 配置。
 
 Agent 必须如实返回动作结果；只完成诊断时返回 `needs_human` 或 `failed`。服务不再根据复制的工具事件二次判断 Agent 结论。发送只允许当前 task generation 的 delivery，sender 必须先原子 claim 才能真实发送。
 
@@ -106,7 +109,7 @@ Agent 必须如实返回动作结果；只完成诊断时返回 `needs_human` �
 
 默认设计是“本地优先”：
 
-- 钉钉认证、Codex session、SQLite 数据库、语料库和业务材料不应提交到 Git。
+- 钉钉认证、Pi session、API Key、SQLite 数据库、语料库和业务材料不应提交到 Git。
 - 默认使用 `CEO_NOT_SEND_MESSAGE=0` 正常处理消息和日历动作。
 - dry-run 需要显式设置 `CEO_NOT_SEND_MESSAGE=1` 或使用 `--not-send-message` / `--dry-run`，只记录决策不发送。
 - live send 仍需要 `CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1` 作为显式确认开关。
@@ -115,7 +118,7 @@ Agent 必须如实返回动作结果；只完成诊断时返回 `needs_human` �
 
 ## CLI 凭证
 
-- DWS 和 Lark CLI 复用安装用户在各 CLI 标准位置维护的本地登录状态；服务不维护第二套凭证。
+- DWS 与 Lark 复用安装用户在各自 CLI 标准位置维护的本地登录状态；Pi 只能调用 reviewed adapter，不接触、导出或复制登录凭证。服务不维护第二套凭证。
 - Agent 不得执行 auth login/reset/logout，也不能自行弹出授权页面。
 - Channel gate 在 Agent 前运行结构化 status 和 live authenticated probe。
 - 只有明确 `needs_login` 时，Login Coordinator 才启动一次相应 CLI 登录；并发和抑制窗口内不会重复启动。
@@ -146,9 +149,9 @@ OKR 审核 runner 默认使用叮当 OKR Web live source，不再依赖本地 xl
 
 ## Agent 安装入口
 
-推荐由 Codex 或其他本机 agent 按
+推荐由本机开发 agent 按
 [docs/agent-installation-runbook.md](docs/agent-installation-runbook.md) 执行安装。该 runbook 覆盖组件下载和校验
-（`dws`、Codex CLI、Memory Connector、Nvwa skill）、交互式参数收集、`.env` 配置、数据 corpus 准备、
+（`dws`、Node 22.19+、同级 Pi CLI build、Nvwa skill）、交互式参数收集、`.env` 配置、数据 corpus 准备、
 工作画像生成、审计 Web UI、launchd 常驻服务和权限检查。
 
 组件准备优先由 agent 自动执行：
@@ -157,7 +160,7 @@ OKR 审核 runner 默认使用叮当 OKR Web live source，不再依赖本地 xl
 scripts/bootstrap-local-components.sh --format json
 ```
 
-该脚本会安装 `terminal-notifier`，并检查 Codex CLI 与 Nvwa skill。DWS 和 Lark 已拆成 Tutorial
+该脚本会安装 `terminal-notifier`，检查 Node 22.19+、同级 Pi CLI build 与 Nvwa skill；若 Pi 尚未构建且同级源码存在，会执行 `npm ci --ignore-scripts` 和 `npm run build`。DWS 和 Lark 已拆成 Tutorial
 中的独立配置步骤：页面先检查 CLI 和登录状态；缺少 CLI 时点击对应按钮自动安装，未配置时再打开一次
 CLI 自带的授权流程。DWS 的内部安装来源通过 `DWS_INSTALLER_PATH` 或 `DWS_INSTALL_COMMAND` 提供；
 Lark 可通过 `LARK_CLI_INSTALL_COMMAND` 覆盖默认 npm 安装命令。
@@ -174,11 +177,14 @@ Lark 可通过 `LARK_CLI_INSTALL_COMMAND` 覆盖默认 npm 安装命令。
 需要：
 
 - Python 3.11+
+- Node.js 22.19.0+
+- 与本仓库平级的 Pi 源码目录，默认路径 `../pi`
+- 已构建的 Pi CLI：`../pi/packages/coding-agent/dist/cli.js`
 - 已认证的 `dws` CLI
-- 可运行 `codex exec` 的 Codex CLI
-- 可选：已认证的 Feishu/Lark CLI，默认二进制名为 `lark`
-- 可选：Codex `exa` MCP 配置，用于需要外部检索的回复判断
+- 可选：需要 Lark 能力时安装并本地登录官方 `lark-cli`
 - 可选：本地知识 workspace 和 graphify 输出
+
+本仓库已提供 Friday Memory、Exa、Xiaoqing 和 Lark reviewed adapters。Friday Memory 可复用已安装 `memory-connector` 插件的本机认证；Xiaoqing 需要本地 OAuth；Lark 需要本地 `lark-cli` 配置/登录；Nvwa 只用于显式工作画像 review，不进入普通消息运行时。
 
 ### 2. 安装本地服务
 
@@ -207,9 +213,21 @@ cp .env.example .env
 | `CEO_MEETING_PRODUCER_INTERVAL_SECONDS` | 会议信息发现周期，默认 60 秒 |
 | `CEO_MEETING_CONSUMER_POLL_INTERVAL_SECONDS` | 会后对齐队列消费周期，默认 10 秒 |
 | `CEO_MEETING_SETTLE_SECONDS` | 明确会议结束后的静默等待时间，默认 600 秒 |
-| `CEO_CODEX_MODEL` / `CEO_CODEX_MODEL_REASONING_EFFORT` / `CEO_CODEX_MODEL_PROVIDER` | Codex 模型配置；默认 `gpt-5.5` + `medium`，避免服务继承用户全局 `~/.codex/config.toml` 的模型 |
-| `CEO_FEISHU_CLI_BINARY` | 飞书 CLI 二进制名，默认 `lark` |
+| `CEO_PI_NODE_BINARY` | 可选的 Node 22.19+ 绝对路径；留空时自动发现 PATH 和 `~/.nvm/versions/node` 中的兼容版本 |
+| `CEO_PI_CLI_PATH` | Pi CLI 路径，默认 `../pi/packages/coding-agent/dist/cli.js` |
+| `CEO_PI_PROVIDER` / `CEO_PI_MODEL` | Provider 和模型；默认 `openai` / `gpt-5.5` |
+| `CEO_PI_API` | API protocol：`openai-responses`、`openai-completions`、`anthropic-messages` 或 `google-generative-ai` |
+| `CEO_PI_BASE_URL` | 可选自定义 Base URL；必须是无用户名、密码、query、fragment 的绝对 HTTP(S) URL |
+| `CEO_PI_API_KEY` | Provider API Key；只保存到权限为 `0600` 的 `.env`，不进入命令参数、页面回显或 `models.json` 明文 |
+| `CEO_PI_THINKING_LEVEL` | Pi thinking level，默认 `medium` |
+| `CEO_PI_AGENT_DIR` / `CEO_PI_SESSION_DIR` | Pi 独立配置和 session 目录 |
+| `CEO_FEISHU_CLI_BINARY` | 飞书/Lark 官方 CLI，默认 `lark-cli` |
 | `CEO_FEISHU_LIVE_SEND_ENABLED` | 飞书 CLI 真实发送开关，默认 `0`；未显式设为 `1` 时 `send_reply` 只返回 blocked，不会发送 |
+| `CEO_PI_EXA_MCP_URL` | Exa reviewed read-only MCP URL，默认 `https://mcp.exa.ai/mcp` |
+| `CEO_PI_XIAOQING_MCP_URL` | Xiaoqing reviewed MCP URL |
+| `CEO_PI_XIAOQING_ACCESS_TOKEN` | Xiaoqing 本地 OAuth token；密码输入不回显，留空保留，禁止发到聊天中 |
+| `CEO_WECHAT_READER_ENABLED` | 启用微信读取和决策队列；默认 `0` |
+| `CEO_WECHAT_SENDER_ENABLED` / `CEO_WECHAT_SEND_MODE` | 微信独立发送 gate；后台自动发送还要求全局 `CEO_NOT_SEND_MESSAGE=0` 且 mode 为 `auto` |
 | `data/mcp-doctor-state.json` | MCP doctor 的一次性提醒状态文件；用于避免 `needs_login` / `token_expired` 状态重复弹授权提醒 |
 | `CEO_MENTION_ALIASES` | 群聊中触发本人的 @ 别名 |
 | `CEO_DING_ROBOT_NAME` | handoff/DING 通知使用的机器人名称；默认服务启动配置为 `磊哥`，运行时解析 robot code |
@@ -219,7 +237,7 @@ cp .env.example .env
 | `CEO_HANDOFF_ACK` | 交给真人时发送的确认文本 |
 | `CEO_FEEDBACK_SPIKE_VERCEL_BASE_URL` | 可选的对话方反馈页根地址；留空则不追加反馈链接。启用前必须把本仓库的 Vercel API 路由部署到安装者自己的 Vercel 项目，并填写自己的部署根地址；不要复用其他人的反馈服务 URL。配置后会在发出的回复末尾追加 `👍 赞｜👎 踩` 反馈链接；同一会话长期未评价时会升级为强提醒，超过硬阈值后只回复“请对我提供反馈后再提问” |
 
-不要把 `HOME` 指向项目目录。`dws` 和 Codex 需要使用真实用户环境里的认证状态。
+不要把 `HOME` 指向项目目录。`dws` 和 Pi 的隔离运行目录都依赖真实用户环境。
 
 #### 可选：部署反馈链接服务
 
@@ -234,7 +252,7 @@ cp .env.example .env
 
 ### 4. 准备知识库
 
-CEO Agent Service 会把“知识库”分成两类：本地知识库和外部可访问知识库。本地知识库由 `CEO_WORKSPACE` 指向；外部知识库通过 `dws`、Codex MCP 工具或当前消息材料按权限读取。
+CEO Agent Service 会把“知识库”分成三类：`CEO_WORKSPACE` 下的本地材料、通过 reviewed DWS reads 访问的钉钉材料，以及配置可用时通过 reviewed Friday Memory tools 访问的长期记忆。旧 Codex MCP 配置本身不代表 Pi 能力；Pi 只使用本仓库明确注册的工具。
 
 #### 本地知识库
 
@@ -274,7 +292,7 @@ CEO Agent Service 会把“知识库”分成两类：本地知识库和外部�
 | DWS 企业搜索 | `dws aisearch` 可访问的人员、知识、行为、群组和帮助中心搜索 | 本地资料不足时补查企业内知识、历史上下文或组织信息 | 搜索结果仍需可读材料验证，不能只凭标题下结论 |
 | 钉钉会话上下文 | `dws chat` 可读的群聊、私聊、引用消息和历史消息 | 理解当前 trigger、前后文、是否已经有人处理 | 群聊仍必须满足路由规则才进入 agent |
 | OA / 日程 / 联系人 | `dws oa`、`dws calendar`、`dws contact` 可读的审批、日程、组织信息 | 审批审阅、日程判断、识别本人和相关人员 | 审批动作必须满足 SOP 和材料完整性要求 |
-| Memory Connector MCP | `memory_recall`、`memory_write`、`document_upload` 可访问的长期记忆 | 回忆历史决策、过往偏好、上次处理结果，并在回复后写入 episode | 不是替代业务文档的事实来源；关键判断仍要回到材料和上下文 |
+| Friday Memory Connector | reviewed Pi bridge 提供 `user_get`、`memory_recall`、`memory_get`、`timeline_get`、`memory_write`、`document_upload` | 回忆历史决策、过往偏好、精确 UUID/thread 查询和经授权写入 | 需要 Connector URL 与本地 API Key；ACL 由认证身份决定，禁止传 `user_id`、`graph_id`、`graph_ids`；写入必须有可信回执 |
 
 钉钉知识库准备建议：
 
@@ -340,9 +358,9 @@ http://127.0.0.1:8765/
 - `/tasks`：work projects、状态、category filter、Priority/Risk 排序、TODO checklist、实时全文检索和分页
 - `/tasks/{project_id}`：单个 work project 详情、facts、TODO DDL/owner、更新记录和 follow-up 记录
 - `/attempts/{id}`：单次处理详情；同一触发消息后续重跑成功时，旧记录顶部会链接到后续 attempt 并展示其最新动作，原始状态仍保留在详情字段中供审计
-- `/codex`：本地 Codex session
+- `/pi`：本地 Pi session；旧 `/codex` 路由只做兼容重定向
 - `/developer-prompt`：Developer/User Prompt 模板管理
-- `/config`：快路径、慢路径、群聊、私聊路由说明；`Channels` tab 展示 DingTalk/Feishu CLI doctor 状态
+- `/config`：快路径、慢路径、群聊、私聊路由说明；`Pi Agent` tab 配置 Provider、Model、API Key 和 Base URL；`Channels` tab 展示 DingTalk/Feishu CLI doctor 状态
 - `/errors`：错误列表
 
 ### 7. 启用 task 总结
@@ -381,7 +399,7 @@ recruiting, sales, finance, admin, HR, other
   长时间的普通消息处理阻塞。每个 Direct Agent 的已核验审批动作都会随流程 ID、任务 ID 和
   回读结果写入审批 History；服务启动时还会从精确匹配的已完成扫描任务回填旧记录，避免把
   实际已审阅的审批误显示为普通回复或过期状态。审批 History 按流程实例显示当前有效审阅结果，
-  同流程的技术重试仅保留在详情审计中，不会覆盖最近一次有效审阅。若 Codex 进程可安全重试但所属会话已卡住，
+  同流程的技术重试仅保留在详情审计中，不会覆盖最近一次有效审阅。若 Pi 进程可安全重试但所属会话已卡住，
   服务会清除该任务和会话的关联，在下一次重试时建立干净会话并重新读取实时审批状态。
   对同一流程的后续扫描，服务会把已核验的审批动作作为幂等依据交给 Agent：先读取实时状态，
   不重复已确认的同一动作；只有新增证据要求不同动作时才可再次处理。
@@ -416,37 +434,26 @@ CEO_NOT_SEND_MESSAGE=1 .venv/bin/ceo-agent daily-task-maintenance --not-send-mes
 
 `scan-task-sources` 的本地文件扫描只读取 `CEO_WORKSPACE` 指定路径，不会全盘扫描。AI 听记通过当前 `dws` 登录态增量读取。
 
-如果 Codex 或 Claude Desktop 没有配置 Memory Connector，可以先检查/写入本机配置：
+Pi 的能力边界由 `pi_extensions/ceo_agent_tools.ts` 定义：
 
-```bash
-.venv/bin/ceo-agent setup-memory-connector \
-  --memory-url 'https://memory.example.com/mcp/'
-```
+- 本地只读：`workspace_read`、`workspace_search`、`workspace_list`，并限制在配置的 read roots，包含 symlink realpath 防逃逸和 1 MiB 上限。
+- DWS：`execute_reviewed_read` 与 `execute_reviewed_write`，每次按安装版 `dws schema --all --compact --format json` 的 effect metadata 校验；认证、安装、破坏性和需要人工确认的命令拒绝。
+- Friday Memory：配置可用时提供 reviewed read/write tools；Python bridge 使用官方 MCP client，认证 scope 由 API Key 身份 ACL 决定，Provider secret 不传给 bridge 子进程。
+- Exa：`web_search_exa`、`web_fetch_exa`，永久只读，并拒绝私网、localhost、metadata endpoint 和带内嵌凭证的 URL。
+- Xiaoqing：5 个 reviewed reads 与 `upload_interview_result`；非 dry-run 上传必须有明确完成状态和结果记录 ID，否则保持 unknown，不自动重放。
+- Lark：`execute_reviewed_lark_read` / `execute_reviewed_lark_write` 按官方 CLI schema 风险分类；high-risk-write、登录、配置、安装和 dry-run 伪回执永久阻断。
+- Nvwa：只在 `review-work-profile-with-nvwa` 中暴露 `write_work_profile`，且只能原子替换固定画像文件；普通 Direct Agent 看不到该工具。
+- 始终不可用：任意 bash、通用文件写入、未注册 MCP 和未审查 CLI 调用。
 
-Codex 配置会写入 `[mcp_servers.memory_connector]`，并使用现有 OAuth Authorization 作为身份。Claude Desktop 的 remote MCP 需要在 Settings > Connectors 手动添加；命令只报告状态，不直接改写 remote connector。
+Pi 的原生 session JSONL 是运行审计。服务只保存 session ID 和每个 run 的 transcript 起止行。只读 Runner 使用 read allowlist；Direct Agent 只有在非 dry-run 且业务路径明确允许写入时才增加 reviewed write tools；工具全禁用的 WeChat 决策使用空 `--tools`。
 
-CEO reply agent 默认复用本机 Codex MCP/OAuth 配置，但仍显式禁用 hooks，避免个人自动化脚本影响服务行为。需要保留给 agent 的外部能力分两类：
-
-- CLI 能力：`dws` 和 Feishu/Lark CLI 由服务环境直接提供。DWS 负责钉钉消息、文档、审批、日历、通讯录和 AI 听记；Feishu/Lark CLI 负责飞书读取和显式开启后的回复发送。两者都不通过 MCP 透传。
-- MCP 能力：`memory_connector` 由子 Codex 继承本机 Codex MCP/OAuth 配置执行，服务不维护独立 Memory client 或单独 OAuth 登录态；`xiaoqing_interview` 和 `exa` 从 `~/.codex/config.toml` 的同名 `[mcp_servers.*]` 读取安全连接字段后透传。若安装者没有配置 `[mcp_servers.exa]`，服务使用默认 Exa remote MCP URL；若没有配置 `[mcp_servers.xiaoqing_interview]`，涉及小青面试资料的任务会被视为阻断性依赖缺失。
-
-为了避免把个人密钥写进进程命令行，MCP 透传只复制 URL、OAuth resource、command、args、startup timeout 和 bearer token 环境变量名，不复制 `[mcp_servers.*.env]` 里的密钥值。需要 API key 的 stdio MCP 应把密钥放在 launchd 或 shell 环境中。
-
-Direct Agent 原样使用本机 Codex 配置中的 MCP、plugin、App、shell 和已安装 skill；服务不再生成 MCP `enabled_tools` 白名单，也不关闭用户配置。Agent 可直接读取适用的 `SKILL.md`，并直接调用 DWS/Lark CLI 或 MCP。认证登录仍由服务 gate 和 Tutorial 管理，Agent 不执行 login/reset/logout。
-
-Codex CLI 的原生 session JSONL 是运行审计。服务只保存 session ID 和每个 run 的 transcript 起止行，避免复制工具参数、结果和另一套回执状态机。
-
-服务启动会先运行 MCP doctor，检查 `memory_connector`、`exa`、`xiaoqing_interview`，状态只使用 `ready`、`needs_login`、`missing_config`、`token_expired`、`network_blocked`、`tool_not_found` 等明确值。`needs_login` 和 `token_expired` 只记录/提醒一次，然后暂停相关任务，不让 agent 自己触发登录循环。手动检查：
+兼容命令 `doctor-mcp` 现在报告真实 Pi capability：reviewed DWS schema、Friday Memory、Exa、Xiaoqing、Lark 和 Nvwa 的 ready / missing auth / missing config 状态；它不会因为旧 Codex MCP 配置存在就宣称 Pi 可用：
 
 ```bash
 .venv/bin/ceo-agent doctor-mcp --verify-live
 ```
 
-Memory 写入由受限 Codex 子 agent 继承当前 Codex 的 `memory_connector` MCP 配置和插件登录态；服务本身不创建或刷新另一套 Memory OAuth 身份。若 `memory_connector` 需要重新授权，使用 Codex 原生命令：
-
-```bash
-codex mcp login memory_connector
-```
+Memory recall matcher 与专用 Memory writer 已接入 reviewed bridge，并分别限制为单一 `memory_recall` 或 `memory_write` 工具。Pi 工具 start/end 事件会实时持久化，避免中断后的写操作被当成“无副作用”重试；未知外部写操作只进入只读 reconciliation，必须用唯一匹配的 operation digest、target identifiers、result digest 和 proof 才能判定 confirmed/absent。无法证明时继续保持 `side_effect_state=unknown` 并指数退避，不自动重放原写入。
 
 Follow-up 发送仍遵守 live-send 安全边界：默认 dry-run 时只生成/记录草稿；真实发送需要 `CEO_NOT_SEND_MESSAGE=0` 且显式设置 `CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1`。
 
@@ -476,7 +483,7 @@ meeting producer 首次启用时会持久化激活时间。服务启动恢复队
 
 实际时长小于 5 分钟的听记在日历匹配和建队列前跳过；实际候选人面试由 agent 根据标题、摘要、参会人和完整转写识别并终止为 `no_action`。招聘站会、招聘计划、人才讨论和招聘需求对齐仍按普通业务会议处理。
 
-会后队列状态为 `waiting → pending → processing → no_action | ready_to_send → sent`；可重试错误进入 `retry` 并带 `available_at`，Codex 结构化输出或历史来源协议偶发不合格也会先按可重试错误处理，达到上限后才隔离。发送结果不确定但有 `openTaskId` 时只核验状态，不重复发送；notification 只在最终确认 `sent` 时弹出一次。普通 reply task 每产生一个新的 `failed` 或 `blocked` attempt，都会向已授权并连接 8765 的浏览器页面发布一次通知，点击进入对应 attempt 详情；dry-run 不发布。meeting run 和 reply attempt 共用 History 时间线、搜索、状态过滤、24 小时事件图和 Codex session 详情。
+会后队列状态为 `waiting → pending → processing → no_action | ready_to_send → sent`；可重试错误进入 `retry` 并带 `available_at`，Pi 结构化输出或历史来源协议偶发不合格也会先按可重试错误处理，达到上限后才隔离。发送结果不确定但有 `openTaskId` 时只核验状态，不重复发送；notification 只在最终确认 `sent` 时弹出一次。普通 reply task 每产生一个新的 `failed` 或 `blocked` attempt，都会向已授权并连接 8765 的浏览器页面发布一次通知，点击进入对应 attempt 详情；dry-run 不发布。meeting run 和 reply attempt 共用 History 时间线、搜索、状态过滤、24 小时事件图和 Pi session 详情。
 
 本地 dry-run 验证：
 
@@ -602,7 +609,7 @@ Live smoke tests 默认跳过，只有显式设置环境变量时才会访问真
 
 这个仓库可以开源代码和通用模板，但真实部署时请确认：
 
-- 没有提交真实 SQLite、日志、Codex session、语料 CSV、工作画像或钉钉导出材料。
+- 没有提交真实 SQLite、日志、Pi session、API Key、语料 CSV、工作画像或钉钉导出材料。
 - `.env`、keychain、token、cookie、DingTalk 机器人 code 不进入仓库。
 - `launchd` 模板中的个人路径和 persona 已替换。
 - README 中的架构图不包含敏感公司信息。

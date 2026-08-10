@@ -77,7 +77,11 @@ def test_read_prompt_templates_seed_missing_configured_files(tmp_path, monkeypat
 def test_default_developer_prompt_assigns_tool_execution_to_direct_agent():
     prompt = SEED_DEVELOPER_PROMPT_TEMPLATE.read_text(encoding="utf-8")
 
-    assert "你必须自行读取材料并直接调用获准的 CLI/MCP 工具完成任务" in prompt
+    assert "你必须自行读取材料并只调用获准的 reviewed Pi 工具" in prompt
+    assert "Friday Memory 只允许通过已注册的" in prompt
+    assert "Exa 永远只读" in prompt
+    assert "Lark high-risk-write 永远阻断" in prompt
+    assert "任意 bash、通用文件写入、未注册 MCP 和未审查 CLI 均不可用" in prompt
     assert "AI 只负责生成结构化计划" not in prompt
 
 
@@ -131,16 +135,18 @@ def test_default_developer_prompt_template_is_a_separate_file():
     assert "Alex 工作人格 Profile:" not in template
 
 
-def test_developer_prompt_delegates_memory_to_agent_mcp_tools():
+def test_developer_prompt_uses_only_reviewed_pi_integrations():
     template = read_developer_prompt_template()
 
-    assert "memory_connector MCP 可用" in template
-    assert "检索优先级是：memory_recall、本地文件、dws aisearch、dws 知识库" in template
-    assert "优先调用 memory_recall 获取可复用上下文" in template
-    assert "业务判断、人员判断、项目背景、客户口径、审批/日历处理" in template
-    assert "调用 memory_write 记录一条业务 episode" in template
-    assert "不要传 user_id" in template
-    assert "memory_write 失败不应改变最终 JSON" in template
+    assert "reviewed DWS 搜索与知识库工具" in template
+    assert "Friday Memory 只允许通过已注册的" in template
+    assert "永远不要传 user_id、graph_id 或 graph_ids" in template
+    assert "不得伪造查询或写入结果" in template
+    assert "Lark、Xiaoqing 和 Exa 当前没有 reviewed Pi 工具" in template
+    assert "critical_info_unavailable:memory_connector" in template
+    assert "memory_connector MCP 可用" not in template
+    assert "优先调用 memory_recall 获取可复用上下文" not in template
+    assert "调用 memory_write 记录一条业务 episode" not in template
 
 
 def test_developer_prompt_keeps_business_metrics_out_of_personnel_sensitivity():
@@ -700,8 +706,8 @@ def test_thread_prompt_defaults_to_business_context_retrieval():
 
     assert "默认不了解当前业务背景" in prompt
     assert "本地文件" in prompt
-    assert "dws aisearch" in prompt
-    assert "dws 知识库" in prompt
+    assert "reviewed DWS 搜索与知识库工具" in prompt
+    assert "Friday Memory reviewed read tools" in prompt
     assert "审批、日程、文档、链接、图片" in prompt
     assert "若这些材料已经足以判断是否回复和回复内容，不要再做本地 workspace 或 graphify 检索" not in prompt
 

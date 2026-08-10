@@ -17,12 +17,12 @@ Default safety:
 - Do not send DingTalk messages until `CEO_NOT_SEND_MESSAGE=0` and
   `CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1` are both explicitly confirmed.
 - Do not commit or upload local chat exports, corpus files, SQLite databases,
-  Codex sessions, DingTalk tokens, cookies, robot codes, or generated private
+  Pi sessions, DingTalk tokens, cookies, robot codes, or generated private
   evidence.
 - Keep real work data outside the repository, normally under
   `~/Documents/memory`.
 - Use the real user `HOME`; do not point `HOME` at the repository because
-  `dws`, Codex, launchd, and MCP credentials depend on the user's normal
+  `dws`, Pi, launchd, and local credentials depend on the user's normal
   profile directories.
 
 ## Phase 0: Collect Interactive Parameters
@@ -41,7 +41,9 @@ the local machine first and ask only when inspection cannot answer it.
 | Assistant signature | user supplied | Text appended to automated replies. |
 | Handoff acknowledgement | user supplied | Text used when the agent should hand off. |
 | Feedback web URL | optional | Vercel/base URL for thumbs-up/down links. |
-| Memory Connector URL | optional | Required only if setting up remote memory MCP config. |
+| Pi Provider / Model / API protocol | `openai` / `gpt-5.5` / `openai-responses` | Configure on `/config?tab=agent`. |
+| Pi Base URL | provider default | Optional custom provider endpoint. |
+| Pi API Key | user supplied | Stored only in ignored `.env`; never echo it or place it in command arguments. |
 | DingTalk KB workspace | optional | Workspace id or URL for profile evidence collection. |
 | Live send opt-in | no by default | Ask only after dry-run evidence is reviewed. |
 
@@ -63,13 +65,17 @@ Write chosen values to `.env` from `.env.example`. Keep user-specific values in
    git status --short --branch
    ```
 
-3. Confirm Python and Node are available:
+3. Confirm Python and Pi-compatible Node are available. Pi requires Node
+   `>=22.19.0`:
 
    ```sh
    python3 --version
    node --version
    npm --version
    ```
+
+   Also confirm the sibling Pi checkout exists at `../pi`. The bootstrapper can
+   build it when `packages/coding-agent/dist/cli.js` is absent.
 
 4. Create or refresh the Python environment:
 
@@ -98,7 +104,8 @@ scripts/bootstrap-local-components.sh --format json
 ```
 
 The bootstrapper automatically installs `terminal-notifier` through Homebrew
-when available and verifies Codex CLI and the Nvwa skill. DWS and Lark are
+when available, discovers Node `>=22.19.0`, builds/verifies the sibling Pi CLI,
+and verifies the Nvwa skill. DWS and Lark are
 separate Tutorial steps because each CLI owns its installation and interactive
 authorization lifecycle. If an internal component is missing, provide the
 approved source through one of these environment variables and click its
@@ -107,7 +114,6 @@ Tutorial setup action:
 - `DWS_INSTALLER_PATH`: executable installer for `dws`
 - `DWS_INSTALL_COMMAND`: approved shell command for installing `dws`
 - `LARK_CLI_INSTALL_COMMAND`: approved override for installing `lark-cli`
-- `CODEX_INSTALL_COMMAND`: approved shell command for installing Codex CLI
 - `NVWA_SKILL_SOURCE`: approved local directory containing the Nvwa skill
 
 Do not ask the user to copy individual terminal commands when the bootstrapper
@@ -153,22 +159,27 @@ The login step may require the user to approve a browser page, QR code, or
 DingTalk prompt. The agent should initiate the flow and wait for the user's
 confirmation instead of asking the user to run commands.
 
-### Codex CLI
+### Pi Agent
 
-1. Confirm Codex can run:
+1. Confirm a compatible Node and the built sibling Pi CLI can run:
 
    ```sh
-   command -v codex
-   codex --version
+   node --version
+   node ../pi/packages/coding-agent/dist/cli.js --version
    ```
 
-2. If Codex is not installed, set `CODEX_INSTALL_COMMAND` to the user's approved
-   Codex installation command and run the bootstrapper. If Codex is not
-   authenticated, initiate the auth flow yourself. Do not store API keys in this
-   repository.
+2. If Node is older than `22.19.0`, install or select a compatible Node version,
+   or set `CEO_PI_NODE_BINARY` to one. If the Pi CLI is not built, run the
+   bootstrapper; it executes `npm ci --ignore-scripts` and `npm run build` in the
+   sibling Pi checkout.
 
-3. Confirm continuity support later through a dry-run worker pass; the service
-   uses Codex sessions through the local runtime, not a cloud-only worker.
+3. Configure provider, model, API protocol, Base URL, API Key, thinking level,
+   Node path, Pi CLI path, agent directory, and session directory on
+   `/config?tab=agent`. The API Key must stay in the ignored `.env` with mode
+   `0600`; generated `models.json` contains only `$CEO_PI_API_KEY`.
+
+4. Confirm continuity support later through a dry-run worker pass; the service
+   resumes local Pi sessions from the configured Pi session directory.
 
 ### macOS Notifications
 
@@ -180,23 +191,17 @@ installs `terminal-notifier` automatically with Homebrew when possible:
 scripts/bootstrap-local-components.sh --format json
 ```
 
-### Memory Connector
+### Reviewed integrations
 
-If the deployment uses Friday Memory or another Memory Connector MCP endpoint:
-
-```sh
-.venv/bin/ceo-agent setup-memory-connector \
-  --memory-url '<memory-mcp-url>'
-```
-
-Codex config uses the installed MCP Authorization header as the authenticated
-OAuth identity. Do not provide or invent a separate `user_id`.
-
-In the Tutorial page, the Memory Connector "Fix automatically" action first
-uses `MEMORY_CONNECTOR_URL` when provided, then falls back to the existing
-`[mcp_servers.memory_connector].url` in the installed Codex config. If Codex
-already has `memory_connector` installed, the agent should not ask the user to
-re-enter the URL.
+The service ships a reviewed Friday Memory bridge. It is ready only when the
+bridge file, Connector URL, and a locally stored copyable API key are all
+present. The key is never rendered by the UI, and authenticated ACL owns memory
+scope; never configure or pass `user_id`, `graph_id`, or `graph_ids`. DWS is
+available only through the reviewed extension and installed schema metadata,
+not through arbitrary bash. Friday Memory, Xiaoqing Interview, Exa, and Lark
+use repository-owned reviewed adapters; missing OAuth, CLI login, or local
+configuration is reported explicitly. An installed legacy Codex MCP entry by
+itself does not grant Pi a capability.
 
 ### Nvwa Persona Skill
 
@@ -221,14 +226,29 @@ not in `~/.agents/skills`.
    The app loads `CEO_ENV_FILE` automatically. If `CEO_ENV_FILE` is unset, it
    reads this repository's `.env`.
 
-2. Edit `.env` with the Phase 0 values. Minimum fields to set:
+2. Edit `.env` with the Phase 0 values, then enforce private permissions without
+   displaying the file contents:
+
+   ```sh
+   chmod 600 .env
+   ```
+
+   Minimum fields to set:
 
    ```text
    CEO_WORKSPACE=$HOME/Documents/memory
    CEO_WORKER_DB=$HOME/Library/Application Support/ceo-agent-service/auto-reply.sqlite3
    CEO_CORPUS_DIR=./data/corpus
-   CEO_CODEX_MODEL=
-   CEO_CODEX_MODEL_PROVIDER=
+   CEO_PI_NODE_BINARY=
+   CEO_PI_CLI_PATH=../pi/packages/coding-agent/dist/cli.js
+   CEO_PI_PROVIDER=openai
+   CEO_PI_MODEL=gpt-5.5
+   CEO_PI_API=openai-responses
+   CEO_PI_BASE_URL=
+   CEO_PI_API_KEY=<provider API key>
+   CEO_PI_THINKING_LEVEL=medium
+   CEO_PI_AGENT_DIR=$HOME/Library/Application Support/ceo-agent-service/pi-agent
+   CEO_PI_SESSION_DIR=$HOME/Library/Application Support/ceo-agent-service/pi-sessions
    CEO_DRY_RUN=1
    CEO_PRINCIPAL_NAME=<principal display name>
    USER_ALIAS=<principal display name>
@@ -365,7 +385,7 @@ Permissions to verify before live operation:
 - The agent can read unread conversations, group context, quoted messages, docs,
   AI tables, contacts, calendar items, OA materials, and AI minutes needed by the
   deployment.
-- macOS allows Codex/Terminal process access needed for local files and network.
+- macOS allows the Pi/Node process and Terminal access needed for local files and network.
 - Notifications are allowed if macOS notifications are part of the deployment.
 - The service can bind the local audit web port, usually `127.0.0.1:8765`.
 - OA approval actions and chat sends remain blocked until explicit live-send
@@ -397,7 +417,7 @@ deployment boundary.
    - `/`: reply history and pending tasks.
    - `/attempts/{id}`: single attempt, prompt, decision, evidence, send status.
    - `/tasks`: project/TODO summary and follow-up drafts.
-   - `/codex`: local Codex session references.
+   - `/pi`: local Pi session references. `/codex` only redirects legacy links.
    - `/developer-prompt`: prompt templates.
    - `/config`: routing rules and runtime config.
    - `/errors`: unresolved runtime errors.
@@ -485,9 +505,14 @@ Only after reviewing dry-run attempts with the user:
 - Worktree inspected and unrelated changes preserved.
 - Python environment installed and tests for touched behavior pass.
 - `dws` exists, is authenticated, and passes `probe-dws`.
-- Codex CLI exists and can be used by the worker.
-- Optional Memory Connector configured without a separate memory `user_id`.
-- `.env` contains deployment-specific values and remains uncommitted.
+- Node `>=22.19.0` and the sibling Pi CLI exist and can be used by the worker.
+- The reviewed Pi extension and DWS schema probe pass; Friday Memory is either
+  configured and ready or explicitly marked Config Missing without exposing a key.
+- Exa reports reviewed read-only readiness; Xiaoqing reports its local OAuth
+  state; Lark reports official CLI/schema readiness; Nvwa reports whether its
+  local skill source is installed. No legacy Codex MCP setup is assumed to
+  transfer.
+- `.env` contains deployment-specific values, has mode `0600`, and remains uncommitted.
 - Workspace and corpus directories exist outside committed source data.
 - `build-corpus`, `collect-corpus`, and `build-work-profile` completed or have
   documented blockers.

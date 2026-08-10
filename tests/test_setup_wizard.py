@@ -58,7 +58,9 @@ def test_setup_wizard_steps_are_ordered_and_gated():
     assert get_step_definition("launchd").depends_on == ("dry_run",)
     assert get_step_definition("live_send").depends_on == ("dry_run",)
     assert get_action_definition("setup_cli_components").step_id == "cli_components"
-    assert get_action_definition("setup_mcp").step_id == "mcp"
+    assert [action.id for action in get_step_definition("mcp").actions] == [
+        "check_mcp"
+    ]
 
 
 def test_wechat_setup_is_available_without_mcp_or_service_config(tmp_path: Path):
@@ -129,11 +131,10 @@ def test_setup_wizard_action_metadata_is_gated():
                 False,
                 True,
             ),
-        ],
-        "mcp": [
-            ("check_mcp", "Check", "mcp", "check", False, False),
-            ("setup_mcp", "Fix automatically", "mcp", "run", False, False),
-        ],
+            ],
+            "mcp": [
+                ("check_mcp", "Check", "mcp", "check", False, False),
+            ],
         "service_config": [
             ("check_service_config", "Check", "service_config", "check", False, False),
             (
@@ -692,22 +693,27 @@ def test_run_setup_service_config_expands_example_environment_values(
     assert str(home) not in event.evidence["workspace"]
 
 
-def test_run_setup_mcp_writes_codex_config(tmp_path: Path):
-    codex_config = tmp_path / "config.toml"
+def test_check_mcp_reports_reviewed_bridge_configuration_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("CEO_FEISHU_CLI_BINARY", "/missing/lark-cli")
+    monkeypatch.delenv("CEO_PI_XIAOQING_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr("app.pi_capabilities.pi_memory_connector_env", lambda: {})
+    status = check_setup_step("mcp", repo_root=tmp_path)
 
-    event = run_setup_action(
-        "setup_mcp",
-        repo_root=tmp_path,
-        env={
-            "MEMORY_CONNECTOR_URL": "https://memory.example/mcp/",
-            "CODEX_CONFIG_PATH": str(codex_config),
-            "CLAUDE_CONFIG_PATH": str(tmp_path / "claude.json"),
-        },
-    )
-
-    assert event.status == "done"
-    assert "memory_connector" in codex_config.read_text(encoding="utf-8")
-    assert event.evidence["codex_config"] == "[REDACTED_PATH]"
+    assert status.status == "needs_action"
+    assert "reviewed Friday Memory bridge is installed" in status.summary
+    assert status.evidence["pi_memory_bridge"] is True
+    assert status.evidence["memory_tools_ready"] is False
+    assert status.evidence["xiaoqing_supported"] is False
+    assert status.evidence["xiaoqing_state"] == "missing_auth"
+    assert status.evidence["exa_supported"] is True
+    assert status.evidence["exa_state"] == "ready"
+    assert status.evidence["lark_supported"] is False
+    assert status.evidence["lark_state"] == "missing_cli"
+    assert status.evidence["nvwa_ready"] is False
+    assert status.evidence["nvwa_state"] == "missing_config"
 
 
 def test_run_setup_cli_components_runs_bootstrap_script(monkeypatch, tmp_path: Path):
@@ -885,74 +891,20 @@ def test_setup_dingtalk_cli_uses_configured_installer_and_finishes_when_ready(
     assert event.evidence["channel_state"] == "ready"
 
 
-def test_run_setup_mcp_uses_os_config_path_and_redacts_output(
-    monkeypatch,
-    tmp_path: Path,
-):
-    codex_config = tmp_path / "config.toml"
-    monkeypatch.setenv("MEMORY_CONNECTOR_URL", "https://memory.example/mcp/")
-    monkeypatch.setenv("CODEX_CONFIG_PATH", str(codex_config))
-    monkeypatch.setenv("CLAUDE_CONFIG_PATH", str(tmp_path / "claude.json"))
+def test_legacy_setup_mcp_action_fails_closed_without_writing_config(tmp_path: Path):
+    config_path = tmp_path / "config.toml"
 
-    event = run_setup_action("setup_mcp", repo_root=tmp_path, env={})
-
-    assert event.status == "done"
-    assert "memory_connector" in codex_config.read_text(encoding="utf-8")
-    assert event.evidence["codex_config"] == "[REDACTED_PATH]"
-    assert str(tmp_path) not in event.stdout_excerpt
-    assert "[REDACTED_PATH]" in event.stdout_excerpt
-
-
-def test_run_setup_mcp_uses_installed_codex_memory_connector_url(
-    monkeypatch,
-    tmp_path: Path,
-):
-    codex_home = tmp_path / "codex-home"
-    codex_home.mkdir()
-    codex_config = codex_home / "config.toml"
-    codex_config.write_text(
-        '[mcp_servers.memory_connector]\nurl = "https://memory.example/mcp/"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setenv("CLAUDE_CONFIG_PATH", str(tmp_path / "claude.json"))
-    monkeypatch.delenv("MEMORY_CONNECTOR_URL", raising=False)
-
-    event = run_setup_action("setup_mcp", repo_root=tmp_path, env={})
-
-    assert event.status == "done"
-    assert event.evidence["memory_url_source"] == "installed_codex_config"
-    assert event.evidence["codex_config"] == "[REDACTED_PATH]"
-
-
-def test_run_setup_mcp_handles_missing_and_failed_setup(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
-    monkeypatch.setenv("CLAUDE_CONFIG_PATH", str(tmp_path / "claude.json"))
-    missing = run_setup_action(
+    event = run_setup_action(
         "setup_mcp",
         repo_root=tmp_path,
-        env={"MEMORY_CONNECTOR_URL": "   "},
+        env={"CODEX_CONFIG_PATH": str(config_path)},
     )
 
-    assert missing.status == "failed"
-    assert missing.summary == "MEMORY_CONNECTOR_URL is missing."
-
-    def fail_setup(**kwargs):
-        del kwargs
-        raise OSError("cannot write /tmp/config.toml")
-
-    monkeypatch.setattr("app.setup_wizard.setup_memory_connector_command", fail_setup)
-    failed = run_setup_action(
-        "setup_mcp",
-        repo_root=tmp_path,
-        env={
-            "MEMORY_CONNECTOR_URL": "https://memory.example/mcp/",
-            "CODEX_CONFIG_PATH": str(tmp_path / "config.toml"),
-        },
-    )
-
-    assert failed.status == "failed"
-    assert "cannot write [REDACTED_PATH]" in failed.summary
+    assert event.status == "failed"
+    assert "reviewed Friday Memory bridge ships with this service" in event.summary
+    assert "automatic secret setup is disabled" in event.summary
+    assert event.evidence == {"automatic_secret_setup": False}
+    assert not config_path.exists()
 
 
 def test_run_setup_action_dispatches_wechat_connect(monkeypatch, tmp_path: Path):

@@ -33,6 +33,7 @@ from app.config import (
     principal_display_name,
     producer_interval_seconds,
     profile_evidence_dir,
+    repo_root,
     task_daily_interval_seconds,
     task_follow_up_interval_seconds,
     task_work_item_interval_seconds,
@@ -64,6 +65,7 @@ from app.external_retry import is_external_dependency_error
 from app.message_split import split_dingtalk_text
 from app.dingtalk_models import DingTalkConversation, DingTalkMessage
 from app.notification import send_macos_notification
+from app.nvwa_review import review_work_profile_with_nvwa
 from app.meeting_alignment import (
     MEETING_DISCOVERY_ACTIVATED_AT_STATE_KEY,
     consume_meeting_alignment_jobs,
@@ -122,6 +124,8 @@ WORK_SUMMARY_TRANSIENT_ERROR_MARKERS = (
     "failed to resolve",
     "connection reset",
     "connection refused",
+    "pi process timed out",
+    "task agent pi timed out",
     "codex exec timed out",
     "task agent codex timed out",
     "non-discard task decision requires memory_recall tool event",
@@ -282,8 +286,10 @@ def build_parser() -> argparse.ArgumentParser:
         "rerun-message",
         "send-attempt",
         "resolve-agent-run",
+        "reset-pi-sessions",
         "reset-codex-sessions",
         "build-work-profile",
+        "review-work-profile-with-nvwa",
         "replay-recent-meetings",
     ):
         subparser = subparsers.add_parser(command)
@@ -371,45 +377,65 @@ def build_parser() -> argparse.ArgumentParser:
             help="base delay before retrying transient dws errors; each retry multiplies this by the attempt number",
         )
         subparser.add_argument(
+            "--pi-timeout-seconds",
             "--codex-timeout-seconds",
+            dest="codex_timeout_seconds",
             type=_positive_int,
             default=_positive_int(
-                os.getenv("CEO_CODEX_TIMEOUT_SECONDS", str(defaults.codex_timeout_seconds))
+                os.getenv(
+                    "CEO_PI_TIMEOUT_SECONDS",
+                    os.getenv("CEO_CODEX_TIMEOUT_SECONDS", str(defaults.codex_timeout_seconds)),
+                )
             ),
-            help="maximum seconds to wait for one Codex decision",
+            help="maximum seconds to wait for one Pi decision; the Codex option is a compatibility alias",
         )
         subparser.add_argument(
+            "--pi-idle-timeout-seconds",
             "--codex-idle-timeout-seconds",
+            dest="codex_idle_timeout_seconds",
             type=_positive_int,
             default=_positive_int(
                 os.getenv(
-                    "CEO_CODEX_IDLE_TIMEOUT_SECONDS",
-                    str(defaults.codex_idle_timeout_seconds),
+                    "CEO_PI_IDLE_TIMEOUT_SECONDS",
+                    os.getenv(
+                        "CEO_CODEX_IDLE_TIMEOUT_SECONDS",
+                        str(defaults.codex_idle_timeout_seconds),
+                    ),
                 )
             ),
-            help="maximum seconds to wait without Codex stdout/stderr output",
+            help="maximum seconds to wait without Pi stdout/stderr output",
         )
         subparser.add_argument(
+            "--task-pi-timeout-seconds",
             "--task-codex-timeout-seconds",
+            dest="task_codex_timeout_seconds",
             type=_positive_int,
             default=_positive_int(
                 os.getenv(
-                    "CEO_TASK_CODEX_TIMEOUT_SECONDS",
-                    str(defaults.task_codex_timeout_seconds),
+                    "CEO_TASK_PI_TIMEOUT_SECONDS",
+                    os.getenv(
+                        "CEO_TASK_CODEX_TIMEOUT_SECONDS",
+                        str(defaults.task_codex_timeout_seconds),
+                    ),
                 )
             ),
-            help="maximum seconds to wait for one task-agent Codex decision",
+            help="maximum seconds to wait for one task-agent Pi decision",
         )
         subparser.add_argument(
+            "--task-pi-idle-timeout-seconds",
             "--task-codex-idle-timeout-seconds",
+            dest="task_codex_idle_timeout_seconds",
             type=_positive_int,
             default=_positive_int(
                 os.getenv(
-                    "CEO_TASK_CODEX_IDLE_TIMEOUT_SECONDS",
-                    str(defaults.task_codex_idle_timeout_seconds),
+                    "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS",
+                    os.getenv(
+                        "CEO_TASK_CODEX_IDLE_TIMEOUT_SECONDS",
+                        str(defaults.task_codex_idle_timeout_seconds),
+                    ),
                 )
             ),
-            help="maximum seconds to wait without task-agent Codex stdout/stderr output",
+            help="maximum seconds to wait without task-agent Pi stdout/stderr output",
         )
         if command == "refresh-org-cache":
             subparser.add_argument("--user-id", action="append", default=[])
@@ -609,7 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument(
                 "--force-new-decision",
                 action="store_true",
-                help="run Codex again even if this message already has an attempt",
+                help="run Pi again even if this message already has an attempt",
             )
         if command == "send-attempt":
             subparser.add_argument("--attempt-id", type=int, required=True)
@@ -1922,11 +1948,14 @@ def export_feedback_command(
     return len(attempts)
 
 
-def reset_codex_sessions_command(settings: WorkerSettings) -> int:
+def reset_pi_sessions_command(settings: WorkerSettings) -> int:
     store = AutoReplyStore(settings.db_path)
     cleared = store.reset_codex_sessions()
-    print(f"reset-codex-sessions cleared={cleared}", flush=True)
+    print(f"reset-pi-sessions cleared={cleared}", flush=True)
     return cleared
+
+
+reset_codex_sessions_command = reset_pi_sessions_command
 
 
 def _parse_macos_wifi_device(output: str) -> str:
@@ -2378,9 +2407,20 @@ def _wechat_service_components(settings: WorkerSettings) -> tuple:
     # The sender loop only auto-sends in 'auto' mode; in 'confirm' mode (default)
     # it holds ready_to_send deliveries for explicit approval. Only start it when
     # sending is enabled at all.
-    if _cfg.wechat_sender_enabled():
+    if _wechat_automatic_sender_enabled(settings):
         components.append(("wechat-sender", lambda: _run_wechat_loop(settings, "sender")))
     return tuple(components)
+
+
+def _wechat_automatic_sender_enabled(settings: WorkerSettings) -> bool:
+    """Require both the global no-send gate and the WeChat-specific gate.
+
+    Reading and decision preparation may run alongside DingTalk in dry-run mode,
+    but the background WeChat sender must never bypass ``CEO_NOT_SEND_MESSAGE``.
+    """
+    from app import config as _cfg
+
+    return not bool(getattr(settings, "dry_run", False)) and _cfg.wechat_sender_enabled()
 
 
 def _run_wechat_loop(settings: WorkerSettings, role: str) -> None:
@@ -2420,7 +2460,7 @@ def _run_wechat_loop(settings: WorkerSettings, role: str) -> None:
                 _wx.process_ready_wechat_deliveries(
                     store, wsender,
                     mode=_cfg.wechat_send_mode(),
-                    sender_enabled=_cfg.wechat_sender_enabled(),
+                    sender_enabled=_wechat_automatic_sender_enabled(settings),
                     reader=reader,
                     account=account,
                 )
@@ -2566,6 +2606,7 @@ def run_service(
                 component=component,
                 target=target,
                 exit_process=exit_process,
+                critical=not component.startswith("wechat-"),
             ),
             name=f"ceo-agent-service-{component}",
             daemon=True,
@@ -2663,20 +2704,23 @@ def _service_component_target(
     component: str,
     target: Callable[[], None],
     exit_process: Callable[[int], None],
+    critical: bool = True,
 ) -> Callable[[], None]:
     def run_component() -> None:
         try:
             target()
         except Exception as exc:
             _record_service_failure(settings, component, exc)
-            exit_process(1)
+            if critical:
+                exit_process(1)
             return
         _record_service_failure(
             settings,
             component,
             RuntimeError(f"{component} stopped unexpectedly"),
         )
-        exit_process(1)
+        if critical:
+            exit_process(1)
 
     return run_component
 
@@ -2802,6 +2846,20 @@ def build_work_profile_command(
         flush=True,
     )
     return len(evidence)
+
+
+def review_work_profile_with_nvwa_command(settings: WorkerSettings) -> None:
+    result = review_work_profile_with_nvwa(
+        workspace=repo_root(),
+        profile_path=work_profile_path(),
+        evidence_index_path=profile_evidence_dir() / "evidence_index.jsonl",
+        style_corpus_path=settings.corpus_dir / "style_corpus.csv",
+    )
+    print(
+        "review-work-profile-with-nvwa "
+        f"bytes={result.bytes_written} sha256={result.sha256}",
+        flush=True,
+    )
 
 
 def probe_dws() -> int:
@@ -2948,6 +3006,8 @@ def main() -> None:
             include_dingtalk_kb=args.include_dingtalk_kb,
             dingtalk_kb_workspace=args.dingtalk_kb_workspace,
         )
+    elif args.command == "review-work-profile-with-nvwa":
+        review_work_profile_with_nvwa_command(settings)
     elif args.command == "probe-dws":
         raise SystemExit(probe_dws())
     elif args.command == "refresh-org-cache":
@@ -2999,8 +3059,8 @@ def main() -> None:
             reason=args.reason,
             actor=args.actor,
         )
-    elif args.command == "reset-codex-sessions":
-        reset_codex_sessions_command(settings)
+    elif args.command in {"reset-pi-sessions", "reset-codex-sessions"}:
+        reset_pi_sessions_command(settings)
     elif args.command == "replay-recent-meetings":
         ensure_live_send_allowed(settings)
         replay_recent_meetings_command(

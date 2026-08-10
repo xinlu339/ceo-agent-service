@@ -1412,6 +1412,7 @@ def test_expired_agent_run_with_confirmed_receipt_enters_reconciliation_without_
         cli=cli,
         command_path=command_path,
         command_digest="digest",
+        target_identifiers={"conversation": "cid"},
         exit_code=0,
         owner="worker-a",
         now="2026-07-29 00:00:02",
@@ -1429,6 +1430,9 @@ def test_expired_agent_run_with_confirmed_receipt_enters_reconciliation_without_
     assert reclaim.run.side_effect_state == "unknown"
     assert reclaim.run.lease_owner == ""
     assert store.list_agent_execution_receipts(first.run.id)[0].operation_id == "write-1"
+    assert store.list_agent_execution_receipts(first.run.id)[0].target_identifiers == {
+        "conversation": "cid"
+    }
 
 
 def test_running_agent_events_are_persisted_incrementally(tmp_path: Path):

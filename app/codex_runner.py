@@ -17,7 +17,7 @@ AGENT_ENVELOPE_SCHEMA_PATH = (
     Path(__file__).resolve().parent / "schemas" / "agent_envelope.schema.json"
 )
 CODEX_DEVELOPER_INSTRUCTIONS_PREFIX = (
-    "You are the local CEO DingTalk reply worker. Inspect the workspace before "
+    "You are the Pi-powered local CEO DingTalk reply worker. Inspect the workspace before "
     "answering. Return only the requested JSON."
 )
 DWS_MATERIAL_READING_INSTRUCTIONS = """
@@ -50,15 +50,12 @@ XIAOQING_INTERVIEW_READING_INSTRUCTIONS = """
 Xiaoqing interview material reading
 
 - Candidate links under `https://interview.hr.startask.net/candidates/` are Xiaoqing interview-system records, not ordinary DingTalk docs or webpages.
-- When a candidate or hiring judgment depends on a Xiaoqing link, candidate name, interview record, resume, offer, hiring approval, or candidate comparison, use the `xiaoqing_interview` MCP tools before deciding.
-- If a Xiaoqing candidate URL is absent but a candidate name is present, call `search_candidates` with that name, pick the matching candidate, then call `get_interview_context` before making the hiring judgment.
-- For task/project/follow-up decisions about a candidate's process status, treat Xiaoqing's current stage, final_decision/current decision, decision time, and decision note as the current source of truth before asking HR to confirm status.
-- If Xiaoqing already shows a terminal final decision such as rejected/eliminated/pass/talent-pool or a clear closed stage, close or suppress the follow-up instead of asking HR whether to continue or close.
+- This Pi runtime has no reviewed `xiaoqing_interview` MCP bridge. Do not call or claim to call `xiaoqing_interview`, `search_candidates`, or `get_interview_context`.
+- When a candidate or hiring judgment depends on a Xiaoqing link, candidate name, interview record, resume, offer, hiring approval, candidate comparison, current stage, final decision, decision time, or decision note that is not already present in trusted prompt material, stop with `critical_info_unavailable:xiaoqing_interview ...`.
 - Do not use curl, browser scraping, DWS doc commands, or local search as substitutes for the Xiaoqing candidate record.
-- If `xiaoqing_interview` is unavailable, unauthorized, or cannot return the review package, classify it as a blocking tool/auth issue with `critical_info_unavailable:xiaoqing_interview ...`; do not tell HR the sender failed to provide the interview text when the link itself was provided.
-- Only ask HR to paste interview text after the Xiaoqing tool confirms the record lacks that content or the current user truly lacks access.
+- Do not tell HR that the sender failed to provide the interview text when a Xiaoqing link was provided. Treat this as a runtime dependency gap until a reviewed Pi bridge is installed.
 """.strip()
-# The CEO worker owns DWS readiness and authorization gating. Codex exec resume
+# The CEO worker owns DWS readiness and authorization gating. Pi session resume
 # does not support `-s`, so use the explicit bypass flag for both new and resumed
 # decision threads.
 CODEX_BYPASS_APPROVALS_AND_SANDBOX = "--dangerously-bypass-approvals-and-sandbox"
@@ -97,19 +94,17 @@ DEFAULT_CODEX_MODEL_REASONING_EFFORT = "medium"
 
 
 def _memory_connector_runtime_instructions() -> str:
-    issue = memory_connector_config_issue()
-    if not issue:
-        return (
-            "Memory connector runtime\n\n"
-            "- memory_connector MCP is available in this Codex invocation."
-        )
     return (
         "Memory connector runtime\n\n"
-        f"- memory_connector MCP is unavailable in this Codex invocation: {issue}.\n"
-        "- Do not call memory_connector MCP tools. Use current prompt material, "
-        "DWS, Exa, Lark CLI, Xiaoqing MCP, or local files when available; if "
-        "critical information is still missing, return the appropriate blocked "
-        "or stop_with_error result."
+        "- Pi exposes reviewed Memory tools when MEMORY_CONNECTOR_URL and the authenticated "
+        "API key are configured: user_get, memory_recall, memory_get, timeline_get, "
+        "memory_write, and document_upload.\n"
+        "- Never pass user_id, graph_id, or graph_ids. Authenticated ACL resolves scope. "
+        "Use one focused query for memory_recall, and use exact UUID/thread identifiers only "
+        "after a trusted result supplies them.\n"
+        "- If the reviewed Memory tool reports a configuration, authorization, or runtime "
+        "failure and critical information is still missing, return stop_with_error with a "
+        "reason starting `critical_info_unavailable:memory_connector`."
     )
 
 
@@ -186,12 +181,15 @@ def _parse_export_env_file(path: Path) -> dict[str, str]:
 
 
 def _memory_connector_env() -> dict[str, str]:
+    plugin_env = _memory_connector_env_from_plugin_config(
+        _codex_home() / "plugins" / "memory-connector" / ".mcp.json"
+    )
     file_env = _parse_export_env_file(_codex_home() / MEMORY_CONNECTOR_ENV_FILE)
     whitelisted_file_env = {
         key: value for key, value in file_env.items() if key in MEMORY_CONNECTOR_ENV_KEYS
     }
     config_env = _memory_connector_env_from_config(_codex_home() / "config.toml")
-    env = {**config_env, **whitelisted_file_env, **os.environ}
+    env = {**plugin_env, **config_env, **whitelisted_file_env, **os.environ}
     env.pop("MEMORY_CONNECTOR_USER_ID", None)
     token = env.get(MEMORY_CONNECTOR_API_KEY_ENV)
     if token and _jwt_token_is_expired(token):
@@ -254,6 +252,26 @@ def _memory_connector_env_from_config(config_path: Path) -> dict[str, str]:
     memory_config = (payload.get("mcp_servers") or {}).get("memory_connector") or {}
     if not isinstance(memory_config, dict):
         return {}
+    return _memory_connector_env_from_server_config(memory_config)
+
+
+def _memory_connector_env_from_plugin_config(config_path: Path) -> dict[str, str]:
+    if not config_path.exists():
+        return {}
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+    memory_config = servers.get("memory_connector") if isinstance(servers, dict) else None
+    if not isinstance(memory_config, dict):
+        return {}
+    return _memory_connector_env_from_server_config(memory_config)
+
+
+def _memory_connector_env_from_server_config(
+    memory_config: dict[str, object],
+) -> dict[str, str]:
     env: dict[str, str] = {}
     url = memory_config.get("url")
     if isinstance(url, str) and url.strip():

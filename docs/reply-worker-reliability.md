@@ -17,14 +17,14 @@ starts. Claimed reply tasks return to `pending`, work-summary inputs return to
 jobs are unlocked. Recovery subtracts the interrupted claim from each queue's
 attempt counter because process termination is not a business execution failure.
 Persisted Direct Agent run events and verified terminal receipts remain
-unchanged, so recovery can reconcile completed external actions without sending
-them again.
+unchanged. A completed Pi write can be recognized, but an unknown outcome is not
+automatically replayed or reconciled until the reviewed Pi bridge exists.
 
 External dependencies use two retry levels. The call boundary performs a small
 number of immediate retries, then raises a typed external-dependency failure
 instead of flattening it into a generic runtime error. The reply, work-summary,
 and meeting queues preserve that type and schedule a later retry without
-exhausting the business task's attempt limit. This applies to Codex runners and
+exhausting the business task's attempt limit. This applies to Pi runners and
 to DWS operations that the client has classified as retryable.
 
 Authorization failures remain in the authorization recovery path. Local input,
@@ -32,7 +32,8 @@ target-binding, privacy, schema, and business validation failures remain
 terminal or explicitly blocked. An external write with an unknown result is
 never replayed merely because its transport failed; the service must reconcile
 the existing operation first so retries cannot duplicate a message, approval,
-or other visible side effect.
+or other visible side effect. In the current Pi runtime, unknown effects stop for
+operator review because automatic reconciliation is unavailable.
 
 If a local result-envelope validation fails after an externally visible action,
 the failed run is not replayed. After read-back confirms the action, the
@@ -172,24 +173,23 @@ agent-task discovery. Delivery remains ordered, durable, and idempotent:
 working-hour, completion, daily-cap, sensitive-routing, and existing-send checks
 still run before each send, and a restart resumes from the persisted draft state.
 
-## Memory MCP inheritance
+## Pi reviewed-tool boundary
 
-The Direct Agent inherits the installed Codex `memory_connector` MCP
-configuration and plugin login state. The reply worker does not create or
-refresh a separate Memory OAuth client. Deferred `tool_search` discovery is a
-read-only event; a claimed successful `memory_write` still requires its own
-completed tool event and receipt.
+Pi starts with builtin tools and unrelated extensions disabled. The service
+loads only the reviewed extension: bounded local reads, DWS operations whose
+installed schema effect matches the selected read/write tool, Friday Memory,
+Exa, and Xiaoqing route through bounded Python MCP bridges, and Lark routes
+through its official CLI with schema-derived risk classification. Provider
+credentials are stripped from every tool child environment. Arbitrary bash,
+general file writes, high-risk Lark writes, and unregistered MCP tools remain
+unavailable.
 
-Native Codex plugin OAuth credentials are stored outside `config.toml`. A
-configured Memory MCP URL without a plaintext header or bearer environment
-variable is therefore valid and must not be reported as missing transferable
-authentication. The child `codex exec` process inherits the plugin login and
-performs the authenticated MCP call itself.
-
-If Memory is unavailable before a write starts, the run may fail or request
-human action according to the returned error. If a write starts but its result
-cannot be confirmed, the run becomes `unknown` and recovery is read-only. The
-service does not replay the write from a cached action list.
+Memory import recall and write entry points now start a real Pi process with a
+single allowed Memory tool and validate the completed tool lifecycle plus the
+trusted Extension receipt. Any write recorded as `unknown` is never blindly
+replayed. Controlled reconciliation exposes read tools only and can converge to
+confirmed/absent only with a unique digest-bound proof; otherwise the run keeps
+`side_effect_state=unknown` and retries with backoff.
 
 ## DWS upgrade check
 
@@ -288,10 +288,10 @@ can be inferred, the quote is omitted instead of falling back to `原消息`.
 ## Image attachments
 
 When a message references an image, the worker attempts to download it before
-calling Codex and passes successfully downloaded files through `image_paths`. If
+calling Pi and passes successfully downloaded files through `image_paths`. If
 DWS cannot return a usable image URL or the binary download fails, the worker
-records an `image_download` error and still calls Codex. The prompt includes a
-`图片读取状态` section with the failed image details and explicitly tells Codex not
+records an `image_download` error and still calls Pi. The prompt includes a
+`图片读取状态` section with the failed image details and explicitly tells Pi not
 to guess visual content when the question depends on the missing image.
 
 ## Material Reading Boundary
@@ -306,7 +306,7 @@ The worker still preprocesses:
 
 - Calendar invites, because calendar responses and calendar-context failures are
   part of the service state machine.
-- Images, because Codex receives local image paths rather than DingTalk media
+- Images, because Pi receives local image paths rather than DingTalk media
   IDs.
 
 For OA work, the service passes only the original process/task identifiers,
@@ -328,9 +328,11 @@ missing, the agent asks for that specific material instead of approving from the
 preview.
 
 When the trigger explicitly authorizes a reply and review is complete, the
-Direct Agent replies through DWS. The mail tool event and receipt are persisted
-before any DingTalk acknowledgement is considered complete. A retry reconciles
-the existing mail operation instead of blindly sending it again.
+Direct Agent replies through DWS. Pi tool start/end events and successful-write
+receipts are persisted before any DingTalk acknowledgement is considered
+complete. If the write outcome becomes unknown, the service does not replay it;
+the task stops for operator review because the Pi reconciliation bridge is not
+yet available.
 
 If a historical calendar event id can no longer be read from DWS, the DWS client
 returns no event detail instead of failing the whole producer pass. The worker
@@ -386,53 +388,36 @@ Reply tasks move from `pending` to `processing` when claimed. If task processing
 raises an exception, the consumer records a retry error and moves the task back
 to `pending` until the task reaches the maximum attempt count. Intermediate
 attempts do not send failure notifications; the queue owns failure reporting so
-transient Codex startup, model refresh, or provider errors cannot produce a
+transient Pi startup, model refresh, or provider errors cannot produce a
 false alarm before a later attempt succeeds. The default maximum is three
 claimed attempts.
 
-The Direct Agent does not force Codex's optional reasoning-summary setting.
-The summary capability is presentation metadata rather than a task requirement;
-leaving it to the installed CLI avoids a model-cache schema update preventing a
-durable task from starting.
-
-The Agent result parser accepts Codex's current `response_item` output and
-canonicalizes only `error: null` to the explicit empty error object. All other
-result fields remain subject to the committed strict schema, so malformed or
-ambiguous decisions still fail instead of being guessed.
-
-Direct Agent and reconciliation invocations ignore personal Codex user config.
-They receive the service-selected model and reviewed MCP configuration explicitly,
-so interactive plugins or UI-only settings cannot prevent durable queue recovery.
-They do not add disabled-server entries for personal MCPs: with user config
-ignored, those entries would create incomplete transports instead of isolating
-the service.
+The Agent result parser accepts Pi JSON-mode assistant events and validates the
+embedded result against the committed strict schema. Malformed or ambiguous
+decisions fail instead of being guessed. Direct Agent invocations use the
+service-owned Pi agent/session directories and generated `models.json`; personal
+Pi context files are disabled. MCP configuration is not inherited.
 
 Delivery failures for an otherwise sendable reply are treated as task processing
 failures after the reply attempt has recorded the failed send. This keeps the
 original message retryable instead of completing the task with a failed attempt.
 
 When the maximum is reached, the task is marked `failed`, the final error is
-recorded, and a local notification is sent. A Codex runtime failure
-(`codex_process_failed`, `codex_process_timeout`, or `codex_stream_invalid`)
+recorded, and a local notification is sent. A Pi runtime failure
+(`pi_process_failed`, `pi_process_timeout`, or `pi_stream_invalid`)
 with no external side effect receives one additional recovery claim after the
 ordinary business-attempt limit. The persisted Agent run and generation make
 that claim restart-resumable. If the additional claim also fails, the task
 becomes terminal and sends the normal failure notification instead of remaining
 in a permanent retry loop.
 
-Codex CLI login failures, explicit selected-provider authentication failures,
-and Codex Responses API transport failures are classified as wait states rather
-than ordinary processing failures. For the built-in `openai` provider, a
-Responses request that is missing its bearer/basic header is treated as a
-transient native Codex authentication-propagation failure: the worker records
-`codex_provider_unavailable`, sends a provider-recovery notification, and retries
-after the normal short backoff. An invalid API key, a missing header from an
-explicit non-OpenAI provider, or a rejected ChatGPT session remains an actual
-authorization wait. Both paths move the task back to `pending` without burning
-the business attempt budget. Work-summary inputs use the same classification and
-remain pending after the normal transient retry limit when the blocker is Codex
-authorization or provider availability.
-If Codex returns a structured `stop_with_error` for one of these wait states,
+Pi provider authentication failures and provider transport failures are
+classified as wait states rather than ordinary processing failures. Invalid or
+missing credentials produce `pi_provider_auth_failed`; connection, network, and
+provider timeout failures produce `pi_provider_unavailable`. Both paths move the
+task back to `pending` without burning the business attempt budget. Historical
+`codex_*` error codes remain recognized only for rows created before migration.
+If Pi returns a structured `stop_with_error` for one of these wait states,
 the reply attempt is recorded as `blocked` with the same sanitized reason rather
 than as a failed send.
 

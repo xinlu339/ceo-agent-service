@@ -3,18 +3,16 @@ import os
 import re
 import shutil
 import subprocess
-from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
-from io import StringIO
 from pathlib import Path
 
 from app.channel_gate import ChannelGateState, default_channel_gates
-from app.cli import setup_memory_connector_command
 from app.developer_prompt import (
     SEED_DEVELOPER_PROMPT_TEMPLATE,
     SEED_USER_PROMPT_TEMPLATE,
 )
-from app.memory_setup import codex_memory_connector_url
+from app.pi_capabilities import probe_pi_capabilities
+from app.pi_runner import MINIMUM_PI_NODE_VERSION, pi_cli_path, pi_node_binary, pi_node_version
 from app.prompt import DEFAULT_WORK_PROFILE_TEXT
 from app.setup_wizard_models import (
     SetupAction,
@@ -57,7 +55,7 @@ SETUP_WIZARD_STEPS: tuple[SetupStepDefinition, ...] = (
         id="cli_components",
         title="CLI Components",
         phase="Phase 2",
-        description="Verify and install Codex CLI, Nvwa skill, and notifications.",
+        description="Verify Node 22.19+, the sibling Pi CLI build, Nvwa skill, and notifications.",
         depends_on=["preflight"],
         actions=[
             SetupAction(
@@ -120,13 +118,12 @@ SETUP_WIZARD_STEPS: tuple[SetupStepDefinition, ...] = (
     ),
     SetupStepDefinition(
         id="mcp",
-        title="Memory Connector MCP",
+        title="Pi Reviewed Integrations",
         phase="Phase 2",
-        description="Verify or configure the memory_connector MCP entry.",
+        description="Verify the reviewed Memory, Exa, Xiaoqing, Lark, and Nvwa integration boundaries.",
         depends_on=["cli_components"],
         actions=[
             SetupAction(id="check_mcp", label="Check", step_id="mcp", kind="check"),
-            SetupAction(id="setup_mcp", label="Fix automatically", step_id="mcp", kind="run"),
         ],
     ),
     SetupStepDefinition(
@@ -547,6 +544,66 @@ def check_setup_step(
             binary="lark-cli",
             channel="lark",
         )
+    if step_id == "mcp":
+        report = probe_pi_capabilities(
+            env_values=_env_values(repo_root / ".env"),
+            root=repo_root,
+        )
+        memory_bridge = report.get("memory_bridge")
+        memory_url = report.get("memory_url")
+        memory_api_key = report.get("memory_api_key")
+        memory_tools = report.get("memory_tools")
+        xiaoqing = report.get("xiaoqing_interview")
+        exa = report.get("exa")
+        lark = report.get("lark")
+        nvwa = report.get("nvwa")
+        evidence = {
+            "pi_memory_bridge": memory_bridge.ready,
+            "memory_url_configured": memory_url.ready,
+            "memory_api_key_configured": memory_api_key.ready,
+            "memory_tools_ready": memory_tools.ready,
+            "xiaoqing_supported": xiaoqing.ready,
+            "xiaoqing_state": xiaoqing.state,
+            "exa_supported": exa.ready,
+            "exa_state": exa.state,
+            "lark_supported": lark.ready,
+            "lark_state": lark.state,
+            "nvwa_ready": nvwa.ready,
+            "nvwa_state": nvwa.state,
+        }
+        if not memory_bridge.ready:
+            return _status(
+                "mcp",
+                title="Pi Reviewed Integrations",
+                status="blocked",
+                summary="The reviewed Friday Memory bridge is missing.",
+                evidence=evidence,
+            )
+        if not memory_tools.ready:
+            return _status(
+                "mcp",
+                title="Pi Reviewed Integrations",
+                status="needs_action",
+                summary=(
+                    "The reviewed Friday Memory bridge is installed. Configure the "
+                    "Memory Connector URL and API key locally. Exa is available "
+                    "through its reviewed read-only bridge; Xiaoqing requires local "
+                    "OAuth, Lark uses its reviewed official CLI adapter, and Nvwa "
+                    "requires a local skill installation."
+                ),
+                evidence=evidence,
+            )
+        return _status(
+            "mcp",
+            title="Pi Reviewed Integrations",
+            status="done",
+            summary=(
+                "Friday Memory and Exa reviewed tools are ready. Xiaoqing uses the "
+                f"reviewed bridge ({xiaoqing.state}); Lark uses the reviewed official "
+                f"CLI adapter ({lark.state}); Nvwa profile review is {nvwa.state}."
+            ),
+            evidence=evidence,
+        )
     if step_id == "service_config":
         return check_service_config(repo_root=repo_root)
     if step_id == "data_corpus":
@@ -626,33 +683,43 @@ def _check_preflight(*, repo_root: Path) -> SetupStepStatus:
 
 
 def _check_cli_components(*, repo_root: Path) -> SetupStepStatus:
-    del repo_root
-    codex_ready = shutil.which("codex") is not None
+    node_binary = pi_node_binary()
+    node_version = pi_node_version(node_binary)
+    node_ready = node_version is not None and node_version >= MINIMUM_PI_NODE_VERSION
+    cli_path = pi_cli_path()
+    if not cli_path.is_absolute():
+        cli_path = (repo_root / cli_path).resolve()
+    pi_ready = cli_path.is_file()
     terminal_notifier_ready = shutil.which("terminal-notifier") is not None
     nvwa_ready = any(
         path.exists()
         for path in (
+            Path.home() / ".agents" / "skills" / "nvwa" / "SKILL.md",
             Path.home() / ".agents" / "skills" / "nuwa" / "SKILL.md",
             Path.home() / ".agents" / "skills" / "huashu-nuwa" / "SKILL.md",
         )
     )
-    missing = [
+    missing_runtime = [
         label
         for label, ready in (
-            ("codex", codex_ready),
-            ("Nvwa skill", nvwa_ready),
+            ("Node >= 22.19.0", node_ready),
+            ("Pi CLI build", pi_ready),
             ("terminal-notifier", terminal_notifier_ready),
         )
         if not ready
     ]
-    if missing:
+    if missing_runtime:
         return _status(
             "cli_components",
             title="CLI Components",
             status="needs_action",
-            summary="Missing CLI components: " + ", ".join(missing),
+            summary="Missing required CLI components: " + ", ".join(missing_runtime),
             evidence={
-                "codex": codex_ready,
+                "pi_node": node_ready,
+                "pi_node_binary": str(node_binary),
+                "pi_node_version": ".".join(map(str, node_version or ())),
+                "pi_cli": pi_ready,
+                "pi_cli_path": str(cli_path),
                 "nvwa_skill": nvwa_ready,
                 "terminal_notifier": terminal_notifier_ready,
             },
@@ -661,10 +728,18 @@ def _check_cli_components(*, repo_root: Path) -> SetupStepStatus:
         "cli_components",
         title="CLI Components",
         status="done",
-        summary="Codex CLI, Nvwa skill, and terminal-notifier are available.",
+        summary=(
+            "Node, Pi CLI, Nvwa skill, and terminal-notifier are available."
+            if nvwa_ready
+            else "Runtime CLI components are ready. Optional Nvwa profile-distillation skill is not installed."
+        ),
         evidence={
-            "codex": True,
-            "nvwa_skill": True,
+            "pi_node": True,
+            "pi_node_binary": str(node_binary),
+            "pi_node_version": ".".join(map(str, node_version or ())),
+            "pi_cli": True,
+            "pi_cli_path": str(cli_path),
+            "nvwa_skill": nvwa_ready,
             "terminal_notifier": True,
         },
     )
@@ -1085,6 +1160,21 @@ def _setup_service_config(
     source_path = env_path if env_path.exists() else repo_root / ".env.example"
     values = _raw_env_values(source_path)
     defaults = {
+        "CEO_PI_NODE_BINARY": "",
+        "CEO_PI_CLI_PATH": "../pi/packages/coding-agent/dist/cli.js",
+        "CEO_PI_PROVIDER": "openai",
+        "CEO_PI_MODEL": "gpt-5.5",
+        "CEO_PI_API": "openai-responses",
+        "CEO_PI_BASE_URL": "",
+        "CEO_PI_API_KEY": "",
+        "CEO_PI_THINKING_LEVEL": "medium",
+        "CEO_PI_AGENT_DIR": "$HOME/Library/Application Support/ceo-agent-service/pi-agent",
+        "CEO_PI_SESSION_DIR": "$HOME/Library/Application Support/ceo-agent-service/pi-sessions",
+        "CEO_PI_EXA_MCP_URL": "https://mcp.exa.ai/mcp",
+        "CEO_PI_EXA_BRIDGE_PATH": "",
+        "CEO_PI_XIAOQING_MCP_URL": "https://interview.hr.startask.net/mcp",
+        "CEO_PI_XIAOQING_ACCESS_TOKEN": "",
+        "CEO_PI_XIAOQING_BRIDGE_PATH": "",
         "CEO_WORKSPACE": "workspace",
         "CEO_WORKER_DB": "$HOME/Library/Application Support/ceo-agent-service/auto-reply.sqlite3",
         "CEO_CORPUS_DIR": "data/corpus",
@@ -1100,6 +1190,10 @@ def _setup_service_config(
         "".join(f"{key}={values[key]}\n" for key in sorted(values)),
         encoding="utf-8",
     )
+    try:
+        env_path.chmod(0o600)
+    except OSError:
+        pass
 
     workspace = _resolve_repo_path(repo_root, values["CEO_WORKSPACE"])
     db_parent = _resolve_repo_path(repo_root, values["CEO_WORKER_DB"]).parent
@@ -1154,75 +1248,18 @@ def _setup_mcp(
     repo_root: Path,
     env: dict[str, str],
 ) -> SetupWizardEvent:
-    codex_config = env.get("CODEX_CONFIG_PATH") or os.getenv("CODEX_CONFIG_PATH", "")
-    if not codex_config:
-        codex_home = env.get("CODEX_HOME") or os.getenv("CODEX_HOME", "~/.codex")
-        codex_config = str(Path(codex_home).expanduser() / "config.toml")
-    codex_config_path = Path(codex_config).expanduser()
-    memory_url = (
-        env.get("MEMORY_CONNECTOR_URL") or os.getenv("MEMORY_CONNECTOR_URL", "")
-    ).strip()
-    memory_url_source = "environment" if memory_url else ""
-    if not memory_url:
-        memory_url = codex_memory_connector_url(codex_config_path)
-        memory_url_source = "installed_codex_config" if memory_url else ""
-    if not memory_url:
-        return SetupWizardEvent(
-            step_id="mcp",
-            action_id="setup_mcp",
-            status="failed",
-            summary="MEMORY_CONNECTOR_URL is missing.",
-        )
-    claude_config = env.get("CLAUDE_CONFIG_PATH") or os.getenv(
-        "CLAUDE_CONFIG_PATH",
-        str(
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "Claude"
-            / "claude_desktop_config.json"
-        ),
-    )
-
-    stdout = StringIO()
-    stderr = StringIO()
-    try:
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            result = setup_memory_connector_command(
-                memory_url=memory_url,
-                codex_config=str(codex_config_path),
-                claude_config=claude_config,
-            )
-    except BaseException as exc:
-        return SetupWizardEvent(
-            step_id="mcp",
-            action_id="setup_mcp",
-            status="failed",
-            summary=redact_setup_output(str(exc)),
-            stdout_excerpt=redact_setup_output(stdout.getvalue()),
-            stderr_excerpt=redact_setup_output(stderr.getvalue()),
-        )
-
-    stdout_excerpt = "\n".join(
-        part
-        for part in (
-            stdout.getvalue().strip(),
-            json.dumps(result, ensure_ascii=False, sort_keys=True),
-        )
-        if part
-    )
+    del repo_root, env
     return SetupWizardEvent(
         step_id="mcp",
         action_id="setup_mcp",
-        status="done",
-        summary="Memory Connector MCP config checked.",
-        evidence={
-            "codex_config": redact_setup_output(result["codex_config"]),
-            "claude_status": result["claude_status"],
-            "memory_url_source": memory_url_source,
-        },
-        stdout_excerpt=redact_setup_output(stdout_excerpt),
-        stderr_excerpt=redact_setup_output(stderr.getvalue()),
+        status="failed",
+        summary=(
+            "The reviewed Friday Memory bridge ships with this service. Configure "
+            "the Connector URL and API key locally; automatic secret setup is disabled. "
+            "Exa, Xiaoqing, and Lark already use reviewed adapters; complete any local "
+            "OAuth/CLI login outside chat, and install the Nvwa skill from a local source."
+        ),
+        evidence={"automatic_secret_setup": False},
     )
 
 

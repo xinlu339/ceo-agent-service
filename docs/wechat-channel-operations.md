@@ -19,7 +19,7 @@ Accessibility send (verified live to 文件传输助手, including background qu
 | `cipher.py` / `schema.py` / `backend.py` | SQLCipher-4 decrypt (passphrase→PBKDF2), zstd, `Msg_<md5>`/`Name2Id`/`contact.db` parsing, decrypted mirror |
 | `reader.py` | Capability-gated normalized reads |
 | `producer.py` | Eligible-message → channel-isolated reply task (exact group @-gate) |
-| `prompt.py` / `consumer.py` | WeChat-specific prompt + Codex decision → fail-closed delivery; the schema-validated reply transport marker maps to WeChat delivery, while every other system action is rejected |
+| `prompt.py` / `consumer.py` | WeChat-specific prompt + tool-free Pi decision → fail-closed delivery; the schema-validated reply transport marker maps to WeChat delivery, while every other system action is rejected |
 | `accessibility.py` | Exact-once delivery state machine + real AX runner |
 | `sender_ipc.py` / `sender_helper.py` | Owner-only IPC client/server and dedicated signed Sender app entrypoint |
 | `memory_import.py` / `memory_writer.py` | Bounded extraction + deterministic cleanup; claimed, approved-only Memory writer (`memory.py` keeps public imports) |
@@ -168,14 +168,14 @@ If the process crashes while a row is `writing`, an operator can use that row's
 retryable state. Cross-run candidates with the same normalized statement reuse
 the existing row and merge source IDs/time without resetting its review/write
 state; rejected/revoked rows do not suppress a later import. Before any pending
-row is created, a read-only Codex matcher is hard-limited to the
-`memory_connector.memory_recall` tool. Exact durable-Memory matches are skipped;
+row is created, a read-only Pi matcher is hard-limited to the reviewed
+`memory_recall` tool. Exact durable-Memory matches are skipped;
 compatible matches use a separately validated merged statement and remain
 pending; contradictory matches retain the new statement and are flagged pending.
 Every non-`none` relation must cite a Memory id and minimal evidence that are
 programmatically verified against the same object in the connector's returned
 `memories` list; an empty list is a successful `none` result. The recall query
-is deterministic for the whole candidate batch and must match the sole audited
+is deterministic for each candidate and must match that candidate's sole audited
 tool call exactly. Missing, ambiguous, unrelated, or tool-noncompliant recall
 fails the import closed.
 Model-provided cleanup notes are never persisted. The interrupted-write action
@@ -206,8 +206,10 @@ least 15 minutes.
      `CEO_WECHAT_READER_ENABLED` **and** a single account is persisted `ready`
      with a non-empty self-wxid
      (`_wechat_service_components`); disabled by default (no effect on the DingTalk
-     service). Auto-send stays gated — the loops enqueue tasks and produce
-     `ready_to_send` deliveries but do not send.
+     service). The DingTalk and WeChat producer/consumer threads run side by side,
+     and a WeChat initialization failure is recorded without terminating the
+     DingTalk main service. Auto-send stays gated — the loops enqueue tasks and
+     produce `ready_to_send` deliveries but do not send unless every send gate passes.
    - If macOS denies access to another app's data (`EACCES`/`EPERM`), the WeChat
      loop records one `wechat_data_permission_required` error and stops until
      service restart instead of retrying every poll interval.
@@ -254,8 +256,9 @@ pending.
   sends **nothing** — deliveries wait for explicit approval
   (`ceo-agent wechat pending` / `approve --id N` / `reject --id N`, or
   `service.approve_wechat_delivery`/`reject_wechat_delivery`). In **auto** mode the
-  `wechat-sender` loop sends them (only when `CEO_WECHAT_SENDER_ENABLED=1`). This is
-  the primary guard against a wrong/awkward send.
+  `wechat-sender` loop sends them only when `CEO_WECHAT_SENDER_ENABLED=1`,
+  `CEO_NOT_SEND_MESSAGE=0`, and mode is `auto`. This is the primary guard against
+  a wrong/awkward send.
 - **New inbound context supersedes stale unsent drafts.** Creating a delivery for
   a newer trigger in the same account and conversation atomically marks older
   `ready_to_send`, `failed`, or `send_unknown` deliveries as `superseded`; their

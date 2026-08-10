@@ -1,5 +1,5 @@
 """WeChat reply consumer: claim channel-isolated tasks, decide with the existing
-Codex runner, and prepare a fail-closed delivery.
+Pi runner, and prepare a fail-closed delivery.
 
 The consumer never sends. For send_reply / ask_clarifying_question it leak-checks
 the text and records exactly one ``wechat_deliveries`` row in ``ready_to_send``;

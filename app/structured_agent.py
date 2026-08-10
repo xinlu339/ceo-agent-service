@@ -9,20 +9,16 @@ from app.agent_envelope import AgentEnvelope
 from app.codex_decision import (
     _subprocess_failure_reason,
     extract_codex_audit_events,
-    extract_codex_audit_events_from_session,
     extract_codex_session_id,
 )
-from app.codex_history import find_codex_session_path
-from app.codex_runner import (
-    CODEX_BYPASS_APPROVALS_AND_SANDBOX,
-    CodexRunner,
-    _codex_home,
-    _config_string,
-    codex_model_config_options,
-    memory_connector_config_options,
-    passthrough_mcp_server_config_options,
-)
 from app.external_retry import ExternalDependencyError, run_external
+from app.pi_events import assistant_text_candidates
+from app.pi_history import (
+    count_pi_session_lines,
+    extract_pi_audit_events_from_session,
+    find_pi_session_path,
+)
+from app.pi_runner import PiRunner, pi_process_failure_reason
 from app.process_runner import run_process_with_idle_timeout
 
 
@@ -60,10 +56,17 @@ class AgentSpec:
         skill_text = load_skill_text(
             [*self.primary_skill_paths, *self.reply_visible_skill_paths]
         )
+        effective_schema_path = self.output_schema_path or self.schema_path
+        schema_text = effective_schema_path.read_text(encoding="utf-8").strip()
         parts = [
             self.developer_preamble.strip(),
             f"# Agent spec\n\nname: {self.name}",
             skill_text,
+            (
+                "# Required output JSON schema\n\n"
+                "Return exactly one JSON object that validates against this schema:\n\n"
+                f"```json\n{schema_text}\n```"
+            ),
         ]
         return "\n\n".join(part for part in parts if part)
 
@@ -94,13 +97,16 @@ class StructuredCodexRunner:
         self.store = store
         self.workspace = workspace
         self.spec = spec
-        self.codex_bin = codex_bin
+        self.pi_node_binary = None if codex_bin == "codex" else codex_bin
         self.executor = executor
         self.session_exists = session_exists or self._local_session_exists
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
         self.persist_conversation_session = persist_conversation_session
-        self.runner = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+        self.runner = PiRunner(
+            workspace=workspace,
+            node_binary=self.pi_node_binary,
+        )
         self._run_process_with_idle_timeout = run_process_with_idle_timeout
 
     def run(
@@ -111,7 +117,7 @@ class StructuredCodexRunner:
         prompt: str,
         *,
         owner: str,
-        allow_side_effects: bool = True,
+        allow_side_effects: bool = False,
     ) -> StructuredAgentRun:
         with self.store.codex_session_lock(conversation_id, owner):
             session_id = self._usable_session_id(conversation_id)
@@ -183,16 +189,11 @@ class StructuredCodexRunner:
 
     @staticmethod
     def _local_session_exists(session_id: str) -> bool:
-        return find_codex_session_path(session_id, codex_home=_codex_home()) is not None
+        return find_pi_session_path(session_id) is not None
 
     @staticmethod
     def _session_line_count(session_id: str | None) -> int:
-        if not session_id:
-            return 0
-        path = find_codex_session_path(session_id, codex_home=_codex_home())
-        if path is None:
-            return 0
-        return len(path.read_text(encoding="utf-8").splitlines())
+        return count_pi_session_lines(session_id)
 
     @staticmethod
     def _audit_tool_events(
@@ -204,9 +205,8 @@ class StructuredCodexRunner:
     ) -> list[dict[str, str]]:
         session_events = []
         if session_id and end_line >= start_line:
-            session_events = extract_codex_audit_events_from_session(
+            session_events = extract_pi_audit_events_from_session(
                 session_id,
-                codex_home=_codex_home(),
                 start_line=start_line,
                 end_line=end_line,
             )
@@ -216,13 +216,13 @@ class StructuredCodexRunner:
         env = self.runner.build_env()
         if self.executor is not None:
             return run_external(
-                "codex exec",
+                "pi agent",
                 lambda: self.executor(command, prompt, env),
                 max_attempts=3,
-                dependency="codex",
+                dependency="pi",
             )
         completed = run_external(
-            "codex exec",
+            "pi agent",
             lambda: self._run_process_with_idle_timeout(
                 command,
                 prompt=prompt,
@@ -231,21 +231,28 @@ class StructuredCodexRunner:
                 idle_timeout_seconds=self.idle_timeout_seconds,
             ),
             max_attempts=3,
-            dependency="codex",
+            dependency="pi",
         )
         if completed.timed_out:
             raise ExternalDependencyError(
-                "codex structured agent",
-                RuntimeError(completed.timeout_reason or "codex exec timed out"),
-                dependency="codex",
+                "pi structured agent",
+                RuntimeError(completed.timeout_reason or "pi agent timed out"),
+                dependency="pi",
             )
         if completed.returncode != 0:
             raise ExternalDependencyError(
-                "codex structured agent",
+                "pi structured agent",
                 RuntimeError(
                     _subprocess_failure_reason(completed.stderr, completed.stdout)
                 ),
-                dependency="codex",
+                dependency="pi",
+            )
+        pi_failure = pi_process_failure_reason(completed.stdout, completed.stderr)
+        if pi_failure:
+            raise ExternalDependencyError(
+                "pi structured agent",
+                RuntimeError(pi_failure),
+                dependency="pi",
             )
         return completed.stdout
 
@@ -254,67 +261,15 @@ class StructuredCodexRunner:
         prompt: str,
         session_id: str | None,
         *,
-        allow_side_effects: bool = True,
+        allow_side_effects: bool = False,
     ) -> list[str]:
-        safety_options = (
-            [
-                "-c",
-                'approval_policy="untrusted"',
-                "-c",
-                'approvals_reviewer="auto_review"',
-            ]
-            if allow_side_effects
-            else [
-                "-c",
-                'approval_policy="never"',
-            ]
+        return self.runner.build_command(
+            prompt,
+            session_id,
+            output_schema_path=self.spec.output_schema_path,
+            approval_policy="untrusted" if allow_side_effects else "never",
+            developer_instructions=self.spec.developer_instructions(),
         )
-        common = [
-            "--json",
-            *codex_model_config_options(ignore_user_config=False),
-            "--ignore-rules",
-            "--disable",
-            "hooks",
-            *memory_connector_config_options(),
-            *passthrough_mcp_server_config_options(),
-            *safety_options,
-            "-c",
-            _config_string("developer_instructions", self.spec.developer_instructions()),
-            "-c",
-            'model_reasoning_summary="concise"',
-            "-c",
-            "include_permissions_instructions=false",
-            "-c",
-            "include_apps_instructions=false",
-            "-c",
-            "include_environment_context=false",
-        ]
-        schema_options = (
-            ["--output-schema", str(self.spec.output_schema_path)]
-            if self.spec.output_schema_path is not None
-            else []
-        )
-        if session_id:
-            return [
-                self.codex_bin,
-                "exec",
-                "resume",
-                *common,
-                CODEX_BYPASS_APPROVALS_AND_SANDBOX,
-                *schema_options,
-                session_id,
-                "-",
-            ]
-        return [
-            self.codex_bin,
-            "exec",
-            *common,
-            CODEX_BYPASS_APPROVALS_AND_SANDBOX,
-            *schema_options,
-            "--cd",
-            str(self.workspace),
-            "-",
-        ]
 
 
 def parse_agent_envelope(raw: str) -> AgentEnvelope:
@@ -323,6 +278,8 @@ def parse_agent_envelope(raw: str) -> AgentEnvelope:
         if isinstance(payload, dict):
             if "kind" in payload and "user_response" in payload:
                 return AgentEnvelope.model_validate(payload)
+            for candidate in reversed(assistant_text_candidates(payload)):
+                return _parse_agent_envelope_payload(json.loads(candidate))
             item = payload.get("item")
             if isinstance(item, dict) and isinstance(item.get("text"), str):
                 return _parse_agent_envelope_payload(json.loads(item["text"]))

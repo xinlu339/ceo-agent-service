@@ -9,7 +9,7 @@ CEO Agent Service 不是一个所有人共用同一身份的机器人后台。�
 
 - 一位管理者对应一套本地服务。
 - 服务运行在该管理者自己的 macOS 用户下。
-- `dws`、Lark CLI、Codex 和 MCP 使用该用户自己的登录状态。
+- `dws` 与 `lark-cli` 使用该用户自己的本地登录状态，并只通过 reviewed adapter 暴露给 Pi。Pi Provider 使用部署者在 Pi Agent 配置页保存的 API Key/Base URL。
 - `.env`、SQLite、workspace、工作画像和反馈服务由该用户单独配置。
 - 同事主要通过钉钉与这套服务交互，不需要安装代码。飞书 CLI 是可选的材料读取和回复通路，不应被理解为
   默认启用的通用飞书收件箱。
@@ -32,14 +32,14 @@ OA 任务”以及“哪些资料当前身份有权读取”。
 
 ### 1.1 让本机 Agent 执行安装
 
-把仓库放在该用户的本机后，要求 Codex 或其他本机 Agent：
+把仓库放在该用户的本机后，要求本机开发 Agent：
 
 > 请按照 `docs/agent-installation-runbook.md` 为当前 macOS 用户安装 CEO Agent Service。先保持
-> dry-run，完成 DWS、Lark、Codex、MCP、workspace、工作画像和审计页面验证后，再询问是否开启真实发送。
+> dry-run，完成 DWS、Lark、Node 22.19+、同级 Pi CLI、Pi Provider、workspace、工作画像和审计页面验证后，再询问是否开启真实发送。Friday Memory、Exa、Xiaoqing 使用仓库内受控 bridge；缺少本地 OAuth/登录时要明确显示为待授权。
 
 安装 Agent 应自行执行命令、检查输出和修改本机配置。只有以下步骤需要打断用户：
 
-- DWS、Lark、Codex 或 MCP 登录授权；
+- DWS、Lark 登录授权，或 Pi Provider API Key/Base URL；
 - macOS 权限或通知权限；
 - 安装来源确认；
 - 管理者身份、Agent 名称和回复签名确认；
@@ -218,14 +218,14 @@ Direct Agent 会通过当前 DWS 登录身份实时读取：
 
 可以让 Agent：
 
-- 读取钉钉或飞书文档并总结问题；
-- 结合群聊上下文、企业搜索和 Exa 查证资料；
+- 读取钉钉文档、本地 workspace 材料并总结问题；
+- 结合群聊上下文、DWS 企业搜索和配置可用时的 Friday Memory 查证资料；
 - 修改文档或发表评论；
 - 形成项目决策、下一步和 owner；
 - 把处理结果回复到原群。
 
 不要要求 service 预先把所有文件正文塞进 prompt。消息中保留原始链接或文件引用后，Direct Agent 会根据任务
-自行决定是否调用 DWS/Lark CLI 展开材料。
+自行决定是否调用 reviewed DWS/Lark/Friday Memory/Xiaoqing/Exa read tools 展开材料；只能使用本轮实际暴露且已通过本地授权 gate 的能力。
 
 如果某种内容类型没有 CLI 读取或导出能力，例如部分画布，Agent 应明确说明能力边界并请求可读版本，不能假装
 已经看过。
@@ -255,7 +255,7 @@ Direct Agent 会通过当前 DWS 登录身份实时读取：
 | `terminal blocked` | 已确认无法执行，例如任务不属于当前用户 | 不重放 |
 | `failed` | Agent、工具、数据或发送失败 | 先查根因，再决定是否重跑 |
 | `processing` | 正在执行 | 超过正常时长才排查 |
-| `unknown` | 写操作可能已发生，但缺少可靠回执 | 只读核对，禁止直接重放 |
+| `unknown` | 写操作可能已发生，但缺少可靠回执 | 禁止直接重放；当前 Pi bridge 未提供受控核对时会转为不可自动恢复，并保留 unknown 副作用状态供人工处理 |
 
 ### 重跑原则
 
@@ -298,7 +298,7 @@ Direct Agent 会通过当前 DWS 登录身份实时读取：
 - `.env` 中 principal、mention alias、Agent 名称、签名和 handoff 文案已替换。
 - SQLite、workspace、corpus 和工作画像不与其他人共享。
 - Feedback URL 来自该管理者自己的部署，或保持关闭。
-- DWS/Lark/Codex/MCP gate 均已验证。
+- DWS gate、Pi CLI/Provider、reviewed extension 与 DWS schema 均已验证；Friday Memory、Exa、Xiaoqing、Lark、Nvwa 分别显示 Ready、Missing Auth、Missing CLI 或 Missing Config，页面不回显任何 Key/token。
 - 已完成一条 dry-run 和一条受控 live E2E。
 - History 中能核对 trigger、Agent 结果、工具事件和外部回执。
 - 没有 unresolved `failed`、`processing` 或 `unknown` backlog。

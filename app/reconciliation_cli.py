@@ -214,7 +214,7 @@ def _execute_reviewed(
 server = FastMCP(
     "reconciliation_cli",
     instructions=(
-        "Read installed Agent skills and run DWS or Lark commands only after "
+        "Read installed Agent skills and run DWS commands only after "
         "reviewing installed effect metadata."
     ),
 )

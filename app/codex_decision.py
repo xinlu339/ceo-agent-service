@@ -13,14 +13,25 @@ from app.codex_history import (
     extract_codex_audit_events_from_session,
     find_codex_session_path,
 )
-from app.codex_runner import CodexRunner
+from app.codex_runner import codex_developer_instructions
 from app.config import assistant_signature, forbidden_path_prefixes
 from app.dingtalk_models import CodexAction, CodexDecision
+from app.pi_events import (
+    assistant_text_candidates,
+    pi_audit_events_from_payload,
+    pi_session_id_from_payload,
+)
+from app.pi_history import (
+    count_pi_session_lines,
+    extract_pi_audit_events_from_session,
+    find_pi_session_path,
+)
+from app.pi_runner import PiRunner, pi_process_failure_reason
 from app.process_runner import run_process_with_idle_timeout
 
 
 SIGNATURE = assistant_signature()
-CODEX_TIMEOUT_REASON_PREFIX = "codex exec timed out after"
+CODEX_TIMEOUT_REASON_PREFIX = "Pi process timed out after"
 DWS_TRANSIENT_DEPENDENCY_UNAVAILABLE_PREFIX = (
     "dws_transient_dependency_unavailable:"
 )
@@ -132,7 +143,7 @@ def parse_codex_json(raw: str, *, allow_legacy: bool = True) -> CodexDecision:
     message = (
         "No AgentEnvelope JSON found"
         if not allow_legacy
-        else "No Codex decision JSON found"
+        else "No agent decision JSON found"
     )
     raise json.JSONDecodeError(message, raw, 0)
 
@@ -149,6 +160,10 @@ def extract_codex_session_id(raw: str) -> str | None:
 def extract_codex_audit_events(raw: str, limit: int = 40) -> list[dict[str, str]]:
     events: list[dict[str, str]] = []
     for payload in _iter_json_payloads(raw):
+        for event in pi_audit_events_from_payload(payload):
+            events.append(event)
+            if len(events) >= limit:
+                return events
         event = _audit_event_from_payload(payload)
         if event:
             events.append(event)
@@ -165,7 +180,7 @@ def _parse_codex_jsonl(raw: str, *, allow_legacy: bool = True) -> CodexDecision:
     message = (
         "No AgentEnvelope JSON found"
         if not allow_legacy
-        else "No Codex decision JSON found"
+        else "No agent decision JSON found"
     )
     raise json.JSONDecodeError(message, raw, 0)
 
@@ -311,7 +326,7 @@ def _audit_documents_from_payload(value: Any) -> list[dict[str, str]]:
 
 
 def _decision_text_candidates(payload: dict[str, Any]) -> list[str]:
-    candidates: list[str] = []
+    candidates = assistant_text_candidates(payload)
     message = payload.get("message")
     if isinstance(message, str):
         candidates.append(message)
@@ -343,12 +358,11 @@ def _decision_text_candidates(payload: dict[str, Any]) -> list[str]:
 def _session_id_from_payload(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return None
+    pi_session_id = pi_session_id_from_payload(payload)
+    if pi_session_id:
+        return pi_session_id
     for key in ("session_id", "sessionId", "thread_id", "threadId"):
         value = payload.get(key)
-        if isinstance(value, str) and value:
-            return value
-    if payload.get("type") == "session":
-        value = payload.get("id")
         if isinstance(value, str) and value:
             return value
     if payload.get("type") == "session_meta":
@@ -536,7 +550,7 @@ def _codex_stdout_error_reason(stdout: str) -> str:
         return ""
     if _has_responses_transport_then_auth_fallback(error_messages):
         return _short_text(
-            "stream disconnected before completion: native codex exec "
+            "stream disconnected before completion: Pi provider transport "
             f"transport fallback ended with {error_messages[-1]}",
             1200,
         )
@@ -584,7 +598,7 @@ def _subprocess_failure_reason(stderr: str, stdout: str) -> str:
     for line in stderr_lines:
         if " WARN " not in f" {line} ":
             return _short_text(line, 1200)
-    return "codex exec failed without a valid AgentEnvelope"
+    return "Pi process failed without a valid AgentEnvelope"
 
 
 def _timeout_output_text(output: bytes | str | None) -> str:
@@ -647,14 +661,17 @@ class CodexDecisionRunner:
         timeout_seconds: int = 1200,
         idle_timeout_seconds: int = 900,
         codex_home: Path | None = None,
-        approval_policy: str = "untrusted",
+        approval_policy: str = "never",
         use_approval_bypass: bool = True,
         developer_instructions: str | None = None,
         command_mutator: Callable[[list[str]], None] | None = None,
     ):
         if approval_policy not in {"untrusted", "never"}:
             raise ValueError("unsupported approval policy")
-        self.runner = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+        self.runner = PiRunner(
+            workspace=workspace,
+            node_binary=None if codex_bin == "codex" else codex_bin,
+        )
         self.executor = executor or self._subprocess_executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
@@ -754,7 +771,7 @@ class CodexDecisionRunner:
                 self._remember_audit_tool_events(raw_outputs)
                 return CodexDecision(
                     action=CodexAction.STOP_WITH_ERROR,
-                    reason=f"invalid JSON or Codex decision twice: {first_raw[:200]} | {second_raw[:200]}",
+                    reason=f"invalid JSON or Pi decision twice: {first_raw[:200]} | {second_raw[:200]}",
                     macos_notify=True,
                 )
 
@@ -804,7 +821,9 @@ class CodexDecisionRunner:
             image_paths=image_paths,
             ignore_user_config=True,
             approval_policy=self.approval_policy,
-            developer_instructions=self.developer_instructions,
+            developer_instructions=(
+                self.developer_instructions or codex_developer_instructions()
+            ),
             use_approval_bypass=self.use_approval_bypass,
         )
         if self.command_mutator is not None:
@@ -844,7 +863,11 @@ class CodexDecisionRunner:
         session_id = self.last_session_id
         if not session_id:
             return None
-        path = find_codex_session_path(session_id, codex_home=self.codex_home)
+        path = (
+            find_codex_session_path(session_id, codex_home=self.codex_home)
+            if self.codex_home is not None
+            else find_pi_session_path(session_id)
+        )
         if path is None:
             return None
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -861,12 +884,19 @@ class CodexDecisionRunner:
         self.last_transcript_end_line = self._session_line_count(session_id)
         session_events = []
         if session_id:
-            session_events = extract_codex_audit_events_from_session(
-                session_id,
-                codex_home=self.codex_home,
-                start_line=self.last_transcript_start_line,
-                end_line=self.last_transcript_end_line,
-            )
+            if self.codex_home is not None:
+                session_events = extract_codex_audit_events_from_session(
+                    session_id,
+                    codex_home=self.codex_home,
+                    start_line=self.last_transcript_start_line,
+                    end_line=self.last_transcript_end_line,
+                )
+            else:
+                session_events = extract_pi_audit_events_from_session(
+                    session_id,
+                    start_line=self.last_transcript_start_line,
+                    end_line=self.last_transcript_end_line,
+                )
         self.last_audit_tool_events = session_events or extract_codex_audit_events(
             "\n".join(raw_outputs)
         )
@@ -877,7 +907,7 @@ class CodexDecisionRunner:
             decision.action != CodexAction.STOP_WITH_ERROR
             and not decision.audit_summary.strip()
         ):
-            raise ValueError("audit_summary is required for Codex decisions")
+            raise ValueError("audit_summary is required for Pi decisions")
         if (
             decision.action
             in {CodexAction.SEND_REPLY, CodexAction.ASK_CLARIFYING_QUESTION}
@@ -920,9 +950,17 @@ class CodexDecisionRunner:
             if stdout:
                 return f"{stdout}\n{stop_error}"
             return stop_error
+        pi_failure = pi_process_failure_reason(completed.stdout, completed.stderr)
+        if pi_failure:
+            return error_agent_envelope_json(
+                pi_failure,
+                external_dependency_failed=True,
+            )
         return completed.stdout.strip()
 
     def _session_line_count(self, session_id: str | None) -> int:
         if not session_id:
             return 0
-        return count_codex_session_lines(session_id, codex_home=self.codex_home)
+        if self.codex_home is not None:
+            return count_codex_session_lines(session_id, codex_home=self.codex_home)
+        return count_pi_session_lines(session_id)

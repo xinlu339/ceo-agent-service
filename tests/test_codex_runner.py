@@ -390,11 +390,13 @@ def test_codex_developer_instructions_require_xiaoqing_for_interview_links():
     assert "search_candidates" in instructions
     assert "get_interview_context" in instructions
     assert "xiaoqing_interview" in instructions
-    assert "final_decision/current decision" in instructions
+    assert "Do not call or claim to call" in instructions
+    assert "This Pi runtime has no reviewed" in instructions
     assert "current stage" in instructions
-    assert "close or suppress the follow-up" in instructions
+    assert "final decision" in instructions
     assert "critical_info_unavailable:xiaoqing_interview" in instructions
-    assert "do not tell HR the sender failed to provide the interview text" in instructions
+    assert "Do not tell HR that the sender failed to provide the interview text" in instructions
+    assert "use the `xiaoqing_interview` MCP tools before deciding" not in instructions
 
 
 def test_codex_command_does_not_use_agent_envelope_schema_by_default(tmp_path: Path):
@@ -469,6 +471,41 @@ def test_codex_runner_env_loads_memory_connector_env_file(
     assert env["MEMORY_CONNECTOR_URL"] == "https://memory.example/mcp/"
     assert "MEMORY_CONNECTOR_USER_ID" not in env
     assert "UNRELATED_SECRET" not in env
+
+
+def test_codex_runner_reuses_installed_memory_plugin_credentials(
+    tmp_path: Path,
+    monkeypatch,
+):
+    codex_home = tmp_path / ".codex"
+    plugin_dir = codex_home / "plugins" / "memory-connector"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "memory_connector": {
+                        "url": "https://memory.example/mcp/",
+                        "http_headers": {
+                            "Authorization": "Bearer installed-plugin-secret",
+                            "X-Friday-Memory-Auth-Type": "api_key",
+                            "Content-Type": "application/json",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    env = CodexRunner(workspace=tmp_path, codex_bin="codex").build_env()
+
+    assert env["MEMORY_CONNECTOR_URL"] == "https://memory.example/mcp/"
+    assert env["CONNECTOR_API_KEY"] == "installed-plugin-secret"
+    assert env["MEMORY_CONNECTOR_AUTH_TYPE"] == "api_key"
+    assert env["MEMORY_CONNECTOR_CONTENT_TYPE"] == "application/json"
+    assert "MEMORY_CONNECTOR_USER_ID" not in env
 
 
 def test_codex_runner_env_preserves_process_auth_env_while_stripping_tool_secrets(
@@ -558,7 +595,7 @@ def test_codex_runner_env_loads_memory_connector_from_codex_config(
     )
 
 
-def test_codex_command_inherits_oauth_memory_connector_without_copying_auth(
+def test_legacy_codex_config_does_not_enable_memory_connector_for_pi(
     tmp_path: Path, monkeypatch
 ):
     codex_home = tmp_path / ".codex"
@@ -586,8 +623,9 @@ def test_codex_command_inherits_oauth_memory_connector_without_copying_auth(
 
     assert not any("mcp_servers.memory_connector" in item for item in command)
     assert memory_connector_config_issue() == ""
-    assert "memory_connector MCP is available" in developer_arg
-    assert "Do not call memory_connector MCP tools" not in developer_arg
+    assert "Pi exposes reviewed Memory tools when MEMORY_CONNECTOR_URL" in developer_arg
+    assert "authenticated API key are configured" in developer_arg
+    assert "critical_info_unavailable:memory_connector" in developer_arg
 
 
 def test_codex_command_does_not_auto_fallback_to_configured_profile(
@@ -821,8 +859,11 @@ def test_builds_new_thread_command(tmp_path: Path):
     assert "默认不了解当前业务背景" in developer_arg
     assert "当前待处理消息" not in developer_arg
     assert "\\n" in developer_arg
-    assert "memory_connector MCP 可用" in developer_arg
-    assert "memory_write 记录一条业务 episode" in developer_arg
+    assert "Friday Memory 只允许通过已注册的" in developer_arg
+    assert "Lark、Xiaoqing 和 Exa 当前没有 reviewed Pi 工具" in developer_arg
+    assert "critical_info_unavailable:memory_connector" in developer_arg
+    assert "memory_connector MCP 可用" not in developer_arg
+    assert "memory_write 记录一条业务 episode" not in developer_arg
 
     assert _without_developer_instructions(command) == [
         "codex",
@@ -945,11 +986,13 @@ def test_codex_developer_instructions_hold_thread_prompt_not_turn_message(monkey
     )
     instructions = codex_developer_instructions()
 
-    assert instructions.startswith("You are the local CEO DingTalk reply worker.")
+    assert instructions.startswith(
+        "You are the Pi-powered local CEO DingTalk reply worker."
+    )
     assert "你是 明哥 的钉钉自动回复分身" in instructions
     assert "默认不了解当前业务背景" in instructions
     assert "本地文件" in instructions
-    assert "dws aisearch" in instructions
+    assert "reviewed DWS 搜索与知识库工具" in instructions
     assert "graphify query" in instructions
     assert "星尘数据的CEO，负责算法部、售前部、市场部、HR部的工作。" in instructions
     assert "只回答“新消息”提出的问题" in instructions

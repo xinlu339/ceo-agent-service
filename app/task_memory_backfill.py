@@ -4,6 +4,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.pi_events import assistant_text_candidates
+from app.pi_runner import (
+    PiRunner,
+    pi_memory_connector_config_issue,
+    pi_process_failure_reason,
+)
 from app.task_models import ProjectMemoryContext, WorkProject, WorkTodo, WorkUpdate
 
 
@@ -26,11 +32,13 @@ class ProjectMemoryContextCodexRunner:
             extract_codex_audit_events,
             extract_codex_session_id,
         )
-        from app.codex_runner import CodexRunner
         from app.process_runner import run_process_with_idle_timeout
 
         self.workspace = workspace
-        self.runner = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+        self.runner = PiRunner(
+            workspace=workspace,
+            node_binary=None if codex_bin == "codex" else codex_bin,
+        )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
@@ -48,6 +56,10 @@ class ProjectMemoryContextCodexRunner:
         todos: list[WorkTodo],
         updates: list[WorkUpdate],
     ) -> ProjectMemoryContext:
+        if self.executor is None:
+            issue = pi_memory_connector_config_issue()
+            if issue:
+                raise RuntimeError(f"project memory backfill unavailable: {issue}")
         prompt = build_project_memory_context_prompt(
             project=project,
             todos=todos,
@@ -64,7 +76,9 @@ class ProjectMemoryContextCodexRunner:
             session_id=None,
             image_paths=None,
             output_schema_path=PROJECT_MEMORY_CONTEXT_SCHEMA_PATH,
+            use_output_schema=False,
             ignore_user_config=True,
+            approval_policy="never",
         )
         if self.executor is not None:
             return self.executor(command, prompt)
@@ -77,12 +91,15 @@ class ProjectMemoryContextCodexRunner:
         )
         if completed.timed_out:
             raise RuntimeError(
-                completed.timeout_reason or "project memory backfill codex timed out"
+                completed.timeout_reason or "project memory backfill Pi process timed out"
             )
         if completed.returncode != 0:
             raise RuntimeError(
                 self._subprocess_failure_reason(completed.stderr, completed.stdout)
             )
+        pi_failure = pi_process_failure_reason(completed.stdout, completed.stderr)
+        if pi_failure:
+            raise RuntimeError(pi_failure)
         return completed.stdout
 
 
@@ -206,9 +223,9 @@ def _parse_json_value(value: str, default: object) -> object:
 
 
 def _memory_context_text_candidates(payload: object) -> list[str]:
-    candidates: list[str] = []
     if not isinstance(payload, dict):
-        return candidates
+        return []
+    candidates = assistant_text_candidates(payload)
     for key in ("message", "last_agent_message", "content", "text"):
         value = payload.get(key)
         if isinstance(value, str):

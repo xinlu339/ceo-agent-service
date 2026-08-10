@@ -24,7 +24,7 @@ class CapturingExecutor:
         )
 
 
-def test_wechat_decision_runner_uses_read_only_memory_only_command(tmp_path):
+def test_wechat_decision_runner_uses_tool_free_pi_command(tmp_path):
     executor = CapturingExecutor()
     runner = WechatDecisionRunner(workspace=tmp_path, executor=executor)
 
@@ -33,9 +33,8 @@ def test_wechat_decision_runner_uses_read_only_memory_only_command(tmp_path):
     command = executor.commands[0]
     command_text = " ".join(command)
     assert "--dangerously-bypass-approvals-and-sandbox" not in command
-    assert "--sandbox read-only" in command_text
-    assert 'approval_policy="never"' in command_text
-    assert "features.plugins=false" in command_text
-    assert "features.apps=false" in command_text
-    assert 'web_search="disabled"' in command_text
-    assert 'mcp_servers.memory_connector.enabled_tools=["memory_get","memory_recall","timeline_get","user_get"]' in command_text
+    assert "--no-tools" in command
+    assert "--tools" not in command
+    assert "--offline" in command
+    assert "--no-context-files" in command
+    assert "memory_connector" not in command_text

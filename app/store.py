@@ -336,11 +336,26 @@ class AgentExecutionReceipt(BaseModel):
     cli: str
     command_path: str
     command_digest: str
+    target_identifiers_json: str = "{}"
     exit_code: int
     completed: bool
     persisted: bool
     safe_to_confirm: bool
     created_at: str
+
+    @property
+    def target_identifiers(self) -> dict[str, str]:
+        try:
+            value = json.loads(self.target_identifiers_json)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(key): item
+            for key, item in value.items()
+            if isinstance(item, str)
+        }
 
 
 @dataclass(frozen=True)
@@ -894,6 +909,7 @@ class AutoReplyStore:
                     cli text not null,
                     command_path text not null,
                     command_digest text not null,
+                    target_identifiers_json text not null default '{}',
                     exit_code integer not null,
                     completed integer not null,
                     persisted integer not null,
@@ -1357,6 +1373,17 @@ class AutoReplyStore:
                 "create index if not exists idx_agent_run_events_run_scope "
                 "on agent_run_events(agent_run_id, event_scope)"
             )
+            agent_execution_receipt_columns = {
+                row["name"]
+                for row in db.execute(
+                    "pragma table_info(agent_execution_receipts)"
+                ).fetchall()
+            }
+            if "target_identifiers_json" not in agent_execution_receipt_columns:
+                db.execute(
+                    "alter table agent_execution_receipts add column "
+                    "target_identifiers_json text not null default '{}'"
+                )
             self._migrate_reply_task_channel_identity(db)
             db.execute(
                 """
@@ -2391,6 +2418,7 @@ class AutoReplyStore:
         cli: str,
         command_path: str,
         command_digest: str,
+        target_identifiers: dict[str, str] | None = None,
         exit_code: int,
         owner: str,
         now: str | datetime | None = None,
@@ -2408,6 +2436,10 @@ class AutoReplyStore:
             raise ValueError("execution receipt identity must be non-empty")
         if exit_code != 0:
             raise ValueError("only successful executions can produce receipts")
+        target_identifiers_json = _json_object_text(
+            target_identifiers or {},
+            field="target_identifiers",
+        )
         with self._agent_run_write_transaction(now) as (db, (_, now_text)):
             self._require_current_agent_run_write_access(
                 db,
@@ -2419,9 +2451,9 @@ class AutoReplyStore:
                 """
                 insert or ignore into agent_execution_receipts (
                     agent_run_id, receipt_id, operation_id, cli,
-                    command_path, command_digest, exit_code,
+                    command_path, command_digest, target_identifiers_json, exit_code,
                     completed, persisted, safe_to_confirm, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?)
                 """,
                 (
                     run_id,
@@ -2430,6 +2462,7 @@ class AutoReplyStore:
                     cli,
                     command_path,
                     command_digest,
+                    target_identifiers_json,
                     exit_code,
                     now_text,
                 ),
@@ -2448,6 +2481,7 @@ class AutoReplyStore:
                 or row["cli"] != cli
                 or row["command_path"] != command_path
                 or row["command_digest"] != command_digest
+                or row["target_identifiers_json"] != target_identifiers_json
                 or row["exit_code"] != exit_code
             ):
                 raise ValueError("conflicting execution receipt")

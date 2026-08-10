@@ -57,6 +57,13 @@ for plist_name in "${plist_names[@]}"; do
   target_plist="${target_dir}/${plist_name}"
 
   cp "${source_plist}" "${target_plist}"
+  # The checked-in plist remains portable. Pin the installed service to this
+  # checkout so launchd does not depend on its sparse environment or a
+  # machine-specific default repository location.
+  plutil -replace EnvironmentVariables.CEO_SERVICE_ROOT \
+    -string "${repo_root}" \
+    "${target_plist}"
+  plutil -lint "${target_plist}" >/dev/null
 
   launchctl bootout "${domain}/${label}" 2>/dev/null || true
   launchctl bootout "${domain}" "${target_plist}" 2>/dev/null || true

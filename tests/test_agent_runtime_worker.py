@@ -940,6 +940,54 @@ def test_reconciliation_failure_sets_backoff_and_is_not_reclaimed_early(
     assert len(runner.reconciliation_contexts) == 1
 
 
+def test_real_pi_runner_keeps_unknown_effect_when_pi_process_is_unavailable(
+    tmp_path: Path,
+):
+    trigger = _message(raw_payload={"processInstanceId": "proc-1"})
+    store = AutoReplyStore(tmp_path / "runtime.sqlite3")
+    task_id = _enqueue(store, trigger)
+    unknown = _seed_unknown_run(store, task_id)
+
+    calls = []
+
+    def unavailable_executor(*args, **kwargs):
+        calls.append((args, kwargs))
+        return ProcessRunResult(
+            returncode=1,
+            stdout="",
+            stderr="provider unavailable",
+        )
+
+    runner = DirectAgentRunner(
+        store=store,
+        workspace=tmp_path,
+        executor=unavailable_executor,
+    )
+    worker = DingTalkAutoReplyWorker(
+        store=store,
+        dws=ContextOnlyDws([trigger]),
+        codex=object(),
+        direct_agent_runner=runner,
+        channel_gates={"dingtalk": ReadyGate("dingtalk")},
+        now_provider=lambda: NOW,
+    )
+
+    assert worker.reconcile_unknown_agent_runs(limit=1) == 0
+
+    unresolved = store.get_agent_run(unknown.id)
+    task = store.get_reply_task(task_id)
+    assert calls
+    assert unresolved is not None and unresolved.status == "unknown"
+    assert unresolved.side_effect_state == "unknown"
+    assert json.loads(unresolved.structured_error_json) == {
+        "authorization_required": False,
+        "code": "pi_process_failed",
+        "retryable": True,
+    }
+    assert unresolved.reconciliation_next_attempt_at
+    assert task is not None and task.status == "processing"
+
+
 def test_non_retryable_reconciliation_is_never_selected_by_due_scan(tmp_path: Path):
     trigger = _message(raw_payload={"processInstanceId": "proc-1"})
     store = AutoReplyStore(tmp_path / "runtime.sqlite3")

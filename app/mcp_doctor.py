@@ -1,6 +1,5 @@
 import json
 import os
-import tomllib
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,12 +8,14 @@ from typing import Callable, Iterable
 import httpx
 
 from app.codex_runner import (
-    CODEX_PASSTHROUGH_MCP_SERVERS_ENV,
-    DEFAULT_CODEX_PASSTHROUGH_MCP_SERVERS,
-    DEFAULT_EXA_MCP_URL,
+    MEMORY_CONNECTOR_ENV_FILE,
+    MEMORY_CONNECTOR_ENV_KEYS,
+    _memory_connector_env_from_config,
+    _parse_export_env_file,
 )
-from app.memory_setup import codex_config_has_memory_connector, codex_memory_connector_url
 from app.notification import send_macos_notification
+from app.pi_capabilities import PiCapabilityReport, probe_pi_capabilities
+from app.pi_runner import pi_memory_connector_env
 from app.store import AutoReplyStore
 
 MCP_DOCTOR_STATE_FILENAME = "mcp-doctor-state.json"
@@ -87,29 +88,27 @@ def check_mcp_statuses(
     verify_live: bool = False,
     memory_reachability_checker: Callable[[str], None] | None = None,
 ) -> list[McpStatus]:
-    config_path = codex_config_path or _codex_config_path()
-    config = _read_toml(config_path)
-    passthrough_names = _passthrough_mcp_server_names()
-    servers = config.get("mcp_servers") if isinstance(config, dict) else {}
-    if not isinstance(servers, dict):
-        servers = {}
+    memory_env = _memory_environment(codex_config_path)
+    report = probe_pi_capabilities(memory_env=memory_env)
     return [
         _memory_connector_status(
-            config_path=config_path,
+            report=report,
             verify_live=verify_live,
             memory_reachability_checker=memory_reachability_checker,
         ),
-        _passthrough_server_status(
-            "exa",
-            servers=servers,
-            passthrough_names=passthrough_names,
-            default_server={"url": DEFAULT_EXA_MCP_URL},
+        _capability_status(
+            report,
+            "dws_reviewed_tools",
+            name="dws_reviewed_tools",
         ),
-        _passthrough_server_status(
+        _capability_status(
+            report,
             "xiaoqing_interview",
-            servers=servers,
-            passthrough_names=passthrough_names,
+            name="xiaoqing_interview",
         ),
+        _capability_status(report, "exa", name="exa"),
+        _capability_status(report, "lark", name="lark"),
+        _capability_status(report, "nvwa", name="nvwa"),
     ]
 
 
@@ -138,7 +137,7 @@ def record_and_notify_mcp_doctor(
             )
             if notify:
                 sender(
-                    f"CEO MCP needs authorization: {status.name}",
+                    f"CEO Pi capability needs authorization: {status.name}",
                     _notification_message(status),
                 )
             state.mark_notified(status)
@@ -162,41 +161,57 @@ def mcp_doctor_report(
             notify=True,
         )
     return {
-        "ok": all(status.ready for status in statuses),
+        "ok": all(
+            status.ready
+            for status in statuses
+            if status.state != "unsupported"
+        ),
         "statuses": [status.as_dict() for status in statuses],
     }
 
 
 def _memory_connector_status(
     *,
-    config_path: Path,
+    report: PiCapabilityReport,
     verify_live: bool,
     memory_reachability_checker: Callable[[str], None] | None,
 ) -> McpStatus:
-    if not codex_config_has_memory_connector(config_path):
+    bridge = report.get("memory_bridge")
+    url = report.get("memory_url")
+    api_key = report.get("memory_api_key")
+    if not bridge.ready:
         return McpStatus(
             name="memory_connector",
-            state="missing_config",
+            state="tool_not_found",
             ready=False,
-            reason="[mcp_servers.memory_connector] is missing from Codex config",
+            reason="reviewed Pi Memory Connector bridge is missing",
+        )
+    if not url.ready:
+        return McpStatus(
+            name="memory_connector",
+            state=url.state,
+            ready=False,
+            reason="Memory Connector URL is missing or invalid for the reviewed Pi bridge",
             recover_command="ceo-agent setup-memory-connector --memory-url <memory-mcp-url>",
         )
-    url = codex_memory_connector_url(config_path)
-    if not url:
+    if not api_key.ready:
         return McpStatus(
             name="memory_connector",
-            state="missing_config",
+            state="needs_login",
             ready=False,
-            reason="[mcp_servers.memory_connector] has no url",
-            recover_command="ceo-agent setup-memory-connector --memory-url <memory-mcp-url>",
+            reason=(
+                "Memory Connector API key is missing or expired; configure it locally "
+                "and do not paste it into chat"
+            ),
+            authorization_required=True,
         )
 
     if verify_live:
         try:
             if memory_reachability_checker is not None:
-                memory_reachability_checker(url)
+                memory_reachability_checker(url.detail)
             else:
-                _check_http_reachable(url)
+                _check_http_reachable(url.detail)
         except Exception as exc:
             return McpStatus(
                 name="memory_connector",
@@ -210,81 +225,49 @@ def _memory_connector_status(
         name="memory_connector",
         state="ready",
         ready=True,
-        reason="native Codex MCP configured",
+        reason="reviewed Pi Memory Connector bridge is configured",
     )
 
 
-def _passthrough_server_status(
-    name: str,
+def _capability_status(
+    report: PiCapabilityReport,
+    key: str,
     *,
-    servers: dict[str, object],
-    passthrough_names: tuple[str, ...],
-    default_server: dict[str, object] | None = None,
+    name: str,
 ) -> McpStatus:
-    if name not in passthrough_names:
-        return McpStatus(
-            name=name,
-            state="tool_not_found",
-            ready=False,
-            reason=f"{name} is not enabled in {CODEX_PASSTHROUGH_MCP_SERVERS_ENV}",
-        )
-    server = servers.get(name)
-    if not isinstance(server, dict):
-        server = default_server
-    if not isinstance(server, dict):
-        return McpStatus(
-            name=name,
-            state="missing_config",
-            ready=False,
-            reason=f"[mcp_servers.{name}] is missing from Codex config",
-        )
-    if _server_has_launch_target(server):
-        return McpStatus(
-            name=name,
-            state="ready",
-            ready=True,
-            reason="configured",
-        )
+    capability = report.get(key)
     return McpStatus(
         name=name,
-        state="missing_config",
-        ready=False,
-        reason=f"[mcp_servers.{name}] has no url or command",
+        state=capability.state,
+        ready=capability.ready,
+        reason=capability.detail,
+        authorization_required=capability.state
+        in {"needs_login", "missing_auth", "token_expired"},
     )
 
 
-def _server_has_launch_target(server: dict[str, object]) -> bool:
-    for key in ("url", "command"):
-        value = server.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    return False
-
-
-def _passthrough_mcp_server_names() -> tuple[str, ...]:
-    raw = os.environ.get(CODEX_PASSTHROUGH_MCP_SERVERS_ENV, "").strip()
-    if not raw:
-        return DEFAULT_CODEX_PASSTHROUGH_MCP_SERVERS
-    names = tuple(
-        name.strip()
-        for name in raw.replace(";", ",").split(",")
-        if name.strip()
-    )
-    return names or DEFAULT_CODEX_PASSTHROUGH_MCP_SERVERS
-
-
-def _codex_config_path() -> Path:
-    return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"
-
-
-def _read_toml(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        payload = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+def _memory_environment(config_path: Path | None) -> dict[str, str]:
+    if config_path is None:
+        return pi_memory_connector_env()
+    config_path = config_path.expanduser()
+    file_env = _parse_export_env_file(config_path.parent / MEMORY_CONNECTOR_ENV_FILE)
+    whitelisted_file_env = {
+        key: value for key, value in file_env.items() if key in MEMORY_CONNECTOR_ENV_KEYS
+    }
+    configured = _memory_connector_env_from_config(config_path)
+    process_env = {
+        key: os.environ[key]
+        for key in MEMORY_CONNECTOR_ENV_KEYS
+        if os.environ.get(key)
+    }
+    merged = {
+        **pi_memory_connector_env(),
+        **configured,
+        **whitelisted_file_env,
+        **process_env,
+    }
+    merged.pop("MEMORY_CONNECTOR_USER_ID", None)
+    return merged
 
 
 def _network_or_tool_state(message: str) -> str:

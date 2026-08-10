@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"captured-send-session"}
+{"type":"agent_start"}
+{"type":"tool_execution_start","toolCallId":"effect-1","toolName":"execute_reviewed_write","args":{"argv":["dws","chat","message","send","--group","cid-1","--text","done","--format","json","--yes"]}}
+{"type":"tool_execution_end","toolCallId":"effect-1","toolName":"execute_reviewed_write","isError":false,"result":{"content":[{"type":"text","text":"{\"success\":true}"}],"details":{"protocolVersion":1,"cli":"dws","effect":"write","operation":"chat message send","operationDigest":"8f023d7439d5141ebb05ab02603122bb8d82e455914afe7818049cf825db4ec5","targetIdentifiers":{"group":"cid-1"},"exitCode":0,"completed":true,"safeToConfirm":true}}}
+{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"{\"outcome\":\"completed\",\"summary\":\"Agent completed and verified the requested work.\",\"error\":{\"code\":\"\",\"retryable\":false,\"authorization_required\":false}}"}]}}
+{"type":"agent_end","willRetry":false}
+{"type":"agent_settled"}

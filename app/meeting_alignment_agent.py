@@ -4,7 +4,6 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
-from app.codex_runner import CodexRunner
 from app.config import work_profile_path
 from app.external_retry import ExternalDependencyError
 from app.meeting_alignment_models import (
@@ -13,6 +12,9 @@ from app.meeting_alignment_models import (
     MeetingSource,
 )
 from app.prompt import work_profile_instruction
+from app.pi_events import assistant_text_candidates
+from app.pi_history import count_pi_session_lines, extract_pi_audit_events_from_session
+from app.pi_runner import PiRunner, pi_process_failure_reason
 from app.store import CodexSessionSearchResult
 
 
@@ -38,7 +40,7 @@ class MeetingAlignmentCodex(Protocol):
 
 
 class MeetingAlignmentAgent:
-    """Build one isolated meeting prompt and ask Codex for a strict decision."""
+    """Build one isolated meeting prompt and ask Pi for a strict decision."""
 
     def __init__(self, codex: MeetingAlignmentCodex):
         self.codex = codex
@@ -76,14 +78,13 @@ class MeetingAlignmentCodexRunner:
             extract_codex_audit_events,
             extract_codex_session_id,
         )
-        from app.codex_history import (
-            count_codex_session_lines,
-            extract_codex_audit_events_from_session,
-        )
         from app.process_runner import run_process_with_idle_timeout
 
         self.workspace = workspace
-        self.runner = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+        self.runner = PiRunner(
+            workspace=workspace,
+            node_binary=None if codex_bin == "codex" else codex_bin,
+        )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
@@ -92,9 +93,9 @@ class MeetingAlignmentCodexRunner:
         self._extract_codex_session_id = extract_codex_session_id
         self._extract_codex_audit_events = extract_codex_audit_events
         self._extract_codex_audit_events_from_session = (
-            extract_codex_audit_events_from_session
+            extract_pi_audit_events_from_session
         )
-        self._session_line_count = count_codex_session_lines
+        self._session_line_count = count_pi_session_lines
         self._subprocess_failure_reason = _subprocess_failure_reason
         self.last_session_id: str | None = None
         self.last_audit_tool_events: list[dict[str, str]] = []
@@ -137,7 +138,7 @@ class MeetingAlignmentCodexRunner:
             )
         except ValueError as exc:
             raise RuntimeError(
-                "Codex did not return a valid MeetingAlignmentDecision"
+                "Pi did not return a valid MeetingAlignmentDecision"
             ) from exc
         return decision
 
@@ -147,6 +148,18 @@ class MeetingAlignmentCodexRunner:
             session_id=None,
             image_paths=None,
             output_schema_path=MEETING_ALIGNMENT_DECISION_SCHEMA_PATH,
+            approval_policy="never",
+        )
+        from app.wechat.codex_safety import _set_pi_tools
+
+        _set_pi_tools(
+            command,
+            (
+                "workspace_read",
+                "workspace_search",
+                "workspace_list",
+                "execute_reviewed_read",
+            ),
         )
         if self.executor is not None:
             return self.executor(command, prompt)
@@ -159,22 +172,29 @@ class MeetingAlignmentCodexRunner:
         )
         if completed.timed_out:
             raise ExternalDependencyError(
-                "codex meeting alignment",
+                "pi meeting alignment",
                 RuntimeError(
-                    completed.timeout_reason or "meeting alignment codex timed out"
+                    completed.timeout_reason or "meeting alignment pi timed out"
                 ),
-                dependency="codex",
+                dependency="pi",
             )
         if completed.returncode != 0:
             raise ExternalDependencyError(
-                "codex meeting alignment",
+                "pi meeting alignment",
                 RuntimeError(
                     self._subprocess_failure_reason(
                         completed.stderr,
                         completed.stdout,
                     )
                 ),
-                dependency="codex",
+                dependency="pi",
+            )
+        pi_failure = pi_process_failure_reason(completed.stdout, completed.stderr)
+        if pi_failure:
+            raise ExternalDependencyError(
+                "pi meeting alignment",
+                RuntimeError(pi_failure),
+                dependency="pi",
             )
         return completed.stdout
 
@@ -269,8 +289,8 @@ def build_meeting_alignment_prompt(
 - 取舍问题应把“选择什么、牺牲什么、承担什么后果”压缩为可回答的问题；回答最小集合后应能直接导出结论或明确下一步。
 - key_questions.answer_owner_names 必须写真正能回答/拍板的人。mention_names 默认只覆盖参会 owner；如果 owner 不是参会人，只有会议中明确说到这是他的任务、由他负责、交给他确认或跟进时，才可以放进 mention_names 并在 final_message 中真实 @。否则可以在正文里写“需要后续同步某某确认”，但不要把这个非参会人放进 mention_names，也不要写成真实 @。
 - “Derek 的观点输出解读”只能解释 Derek 在会议中明确表达的观点，meeting_evidence 必须引用会议原话或可核验片段。
-- 可以结合工作人格和 memory_recall 找到的历史案例、信息来打比方、举例和补全解释，但不能用历史信息发明或替换 Derek 的立场，也不能让历史材料覆盖会议证据。
-- 使用历史内容时，historical_sources 必须逐项记录来源。未经 memory_recall 核验时，唯一允许的历史来源是服务端注入的工作人格来源 `{work_profile_source}`；不使用历史内容则返回空列表。
+- 本次会议对齐调用只暴露本地和 DWS reviewed read tools，不暴露 Friday Memory。不得调用或声称调用 memory_recall。可以结合服务端注入的工作人格来打比方、举例和补全解释，但不能用历史信息发明或替换 Derek 的立场，也不能让工作人格覆盖会议证据。
+- 使用历史内容时，historical_sources 必须逐项记录来源；当前唯一允许的历史来源是服务端注入的工作人格来源 `{work_profile_source}`。不使用历史内容则返回空列表。
 - 能只靠会议证据解释时，historical_sources 必须为空数组。只有实际引用了工作人格中的具体判断或案例时才记录工作人格来源。
 - 记录注入的工作人格来源时，historical_sources 的数组元素必须逐字填写 `{work_profile_source}`，不得改写、加标题或写成说明性文字。
 - final_message 不要暴露工具、审计过程、本地路径或置信度。
@@ -287,7 +307,7 @@ def build_meeting_alignment_prompt(
 服务端注入的工作人格（仅作解释辅助，不能创造会议立场）：
 {work_profile or "（无可用工作人格）"}
 
-相似历史 Codex sessions（仅作上下文复用；当前会议证据优先）：
+相似历史 Pi sessions（仅作上下文复用；当前会议证据优先）：
 {similar_sessions_text}
 
 完整会议来源 JSON：
@@ -309,7 +329,7 @@ def _similar_sessions_prompt_block(
                     f"   title: {session.title}",
                     f"   source: {session.source_type}:{session.source_id}",
                     f"   summary: {session.summary_text}",
-                    f"   codex_url: /codex/{session.session_id}",
+                    f"   pi_url: /pi/{session.session_id}",
                 ]
             )
         )
@@ -345,7 +365,7 @@ def parse_meeting_alignment_decision(raw: str) -> MeetingAlignmentDecision:
 
 
 def _decision_text_candidates(payload: dict[str, object]) -> list[str]:
-    candidates: list[str] = []
+    candidates = assistant_text_candidates(payload)
     for key in ("text", "output_text"):
         value = payload.get(key)
         if isinstance(value, str):
@@ -370,17 +390,11 @@ def _validate_historical_sources(
     viewpoint = decision.derek_viewpoint
     if viewpoint is None or not viewpoint.historical_sources:
         return
-    used_memory_recall = any(
-        "memory_recall" in str(event.get("tool", "")).casefold()
-        for event in audit_tool_events
-    )
-    if used_memory_recall:
-        return
+    del audit_tool_events
     if all(source == work_profile_source for source in viewpoint.historical_sources):
         return
     raise ValueError(
-        "historical_sources require memory_recall audit evidence or the "
-        "configured work profile source"
+        "historical_sources require the configured work profile source"
     )
 
 

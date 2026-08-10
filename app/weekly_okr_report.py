@@ -15,9 +15,10 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field, ValidationError
 
 from app.codex_decision import _subprocess_failure_reason
-from app.codex_runner import CodexRunner
 from app.dws_client import DwsClient, DwsError
 from app.okr_review import DwsLiveOkrSource, current_quarter_period
+from app.pi_events import assistant_text_candidates
+from app.pi_runner import PiRunner, pi_process_failure_reason
 from app.process_runner import run_process_with_idle_timeout
 
 
@@ -208,7 +209,7 @@ class CodexWeeklyOkrAgent:
         idle_timeout_seconds: int = 900,
         executor: Callable[[list[str], str, dict[str, str]], str] | None = None,
     ):
-        self.runner = CodexRunner(workspace=workspace)
+        self.runner = PiRunner(workspace=workspace)
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
         self.executor = executor
@@ -320,6 +321,7 @@ class CodexWeeklyOkrAgent:
             prompt,
             session_id=None,
             output_schema_path=WEEKLY_OKR_REPORT_SCHEMA_PATH,
+            approval_policy="never",
         )
         env = self.runner.build_env()
         if self.executor is not None:
@@ -338,6 +340,12 @@ class CodexWeeklyOkrAgent:
                 raise RuntimeError(
                     _subprocess_failure_reason(completed.stderr, completed.stdout)
                 )
+            pi_failure = pi_process_failure_reason(
+                completed.stdout,
+                completed.stderr,
+            )
+            if pi_failure:
+                raise RuntimeError(pi_failure)
             raw = completed.stdout
         analysis = WeeklyOkrAnalysis.model_validate(_extract_report_payload(raw))
         _validate_manager_coverage(analysis, [manager])
@@ -817,7 +825,7 @@ def build_weekly_okr_prompt(
 任务：
 1. 读取实时文件中每位管理者的 `processed.objectives`、`processed.okrRows`、KR 数值进度、进度历史和评论/进展。不能只看进度百分比。
 2. 必须按实时文件中的原始顺序，对每一个 KR 返回且只返回一条 kr_reviews；objective_title 和 kr_title 尽量逐字复制实时源，程序以顺序和标题共同绑定系统 KR，kr_id 仅作辅助字段。系统百分比和自述只作为线索，综合评论/进展、独立证据、目标承诺、实际效果和完成时间，按技能中的 0/20/40/60/80/100 校准规则给出 base_score 和应用时间折扣后的 score。不得用系统进度直接换算评分。
-3. 使用 memory_recall 以及 DWS 的文档、知识库、AI听记、群聊、日志、待办、日历等只读能力寻找独立证据。文档型产出必须找到并读取正文；只找到标题按未找到处理。无法独立访问的业务系统若进展给出明确数字，可作为工作事实，但要写清审计缺口。
+3. 使用已注入材料、本地文件以及 reviewed DWS 只读工具的文档、知识库、AI听记、群聊、日志、待办、日历等能力寻找独立证据。Friday Memory reviewed read tools 配置可用时，可以用 memory_recall 补充历史背景；若工具明确报告未配置或授权失败，继续使用当前材料并记录证据缺口。不得调用 memory_write、document_upload 或任何写工具；Lark、Xiaoqing 和 Exa 当前不受支持。文档型产出必须找到并读取正文；只找到标题按未找到处理。无法独立访问的业务系统若进展给出明确数字，可作为工作事实，但要写清审计缺口。
 4. 将 KR 语义分类为业务OKR、领导力或文化价值观。业务/GTM、产品、工程类分别应用技能中的效果证据门槛；多项承诺逐项评价；先按结果质量给基础分，再按 DDL 应用时间折扣。
 5. 使用当前钉钉通讯录 title 作为职级授权来源，确认专业贡献者、经理、总监、VP、CXO；无法可靠确认则写职级待确认。管理者按四个领导力维度分别评分；专业贡献者只有在系统明确分配领导力考核时才返回四维候选分，且候选分不进入专业贡献者最终公式。所有人按三个文化价值观维度分别评分。80+ 必须有超出标准的具体案例，90+ 必须有相应榜样范围证据，低于 70 必须写明未满足行为或反面案例。不要用业务得分替代领导力或文化得分。
 6. 每位名单成员都必须返回一条 manager_reviews；没有 OKR、没有本周更新或没有独立证据也不得省略。重点进展、风险、下周承诺和 CEO 决策事项保持简洁。
@@ -1837,7 +1845,12 @@ def _extract_report_payload(raw: str) -> dict[str, Any]:
             direct.append(payload)
         if not isinstance(payload, dict):
             continue
-        for value in (payload.get("message"), (payload.get("item") or {}).get("text") if isinstance(payload.get("item"), dict) else None):
+        item = payload.get("item")
+        values: list[object] = [payload.get("message")]
+        if isinstance(item, dict):
+            values.append(item.get("text"))
+        values.extend(assistant_text_candidates(payload))
+        for value in values:
             if not isinstance(value, str):
                 continue
             try:
@@ -1847,11 +1860,11 @@ def _extract_report_payload(raw: str) -> dict[str, Any]:
             if isinstance(nested, dict) and "manager_reviews" in nested:
                 direct.append(nested)
     if not direct:
-        raise ValueError("Codex did not return a weekly OKR report payload")
+        raise ValueError("Pi did not return a weekly OKR report payload")
     try:
         return WeeklyOkrAnalysis.model_validate(direct[-1]).model_dump()
     except ValidationError as exc:
-        raise ValueError("Codex weekly OKR payload failed validation") from exc
+        raise ValueError("Pi weekly OKR payload failed validation") from exc
 
 
 def _okr_stats(payload: dict[str, Any]) -> dict[str, Any]:

@@ -3,6 +3,8 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic.json_schema import SkipJsonSchema
 
+from app.pi_events import assistant_text_candidates
+
 
 def _strict_agent_error_json_schema(schema: dict[str, object]) -> None:
     properties = schema.get("properties")
@@ -96,6 +98,10 @@ class ExecutionReceipt(BaseModel):
     completed: bool
     persisted: bool
     safe_to_confirm: bool
+    cli: str = ""
+    operation: str = ""
+    operation_digest: str = ""
+    target_identifiers: dict[str, str] = Field(default_factory=dict)
 
 
 class ResultParseError(ValueError):
@@ -129,7 +135,7 @@ def parse_agent_result(raw: str) -> AgentResult:
             raise ResultParseError(
                 "latest agent result candidate is malformed or does not match the strict schema"
             ) from exc
-    raise ResultParseError("no valid AgentResult JSON found in Codex JSONL")
+    raise ResultParseError("no valid AgentResult JSON found in agent JSONL")
 
 
 def _parse_jsonl_payloads(raw: str) -> list[dict]:
@@ -143,7 +149,7 @@ def _parse_jsonl_payloads(raw: str) -> list[dict]:
         except json.JSONDecodeError as exc:
             if seen_json_record:
                 raise ResultParseError(
-                    f"Codex JSONL record is malformed at line {line_number}"
+                    f"Agent JSONL record is malformed at line {line_number}"
                 ) from exc
             continue
         seen_json_record = True
@@ -153,6 +159,9 @@ def _parse_jsonl_payloads(raw: str) -> list[dict]:
 
 
 def _agent_message_candidate(payload: dict) -> str | None:
+    pi_candidates = assistant_text_candidates(payload)
+    if pi_candidates:
+        return pi_candidates[-1]
     response_item = payload.get("payload")
     if (
         payload.get("type") == "response_item"

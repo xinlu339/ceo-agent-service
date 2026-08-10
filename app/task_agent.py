@@ -7,8 +7,17 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from app.store import AutoReplyStore, RecentFollowUpCandidate
-from app.codex_runner import memory_connector_config_issue
 from app.external_retry import ExternalDependencyError
+from app.pi_events import assistant_text_candidates
+from app.pi_history import count_pi_session_lines, extract_pi_audit_events_from_session
+from app.pi_runner import (
+    PiRunner,
+    pi_memory_connector_config_issue,
+    pi_process_failure_reason,
+)
+
+
+memory_connector_config_issue = pi_memory_connector_config_issue
 from app.task_models import (
     FollowUpDraftChange,
     FollowUpDraftDecision,
@@ -134,15 +143,13 @@ class TaskAgentCodexRunner:
             extract_codex_audit_events,
             extract_codex_session_id,
         )
-        from app.codex_history import (
-            count_codex_session_lines,
-            extract_codex_audit_events_from_session,
-        )
-        from app.codex_runner import CodexRunner
         from app.process_runner import run_process_with_idle_timeout
 
         self.workspace = workspace
-        self.runner = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+        self.runner = PiRunner(
+            workspace=workspace,
+            node_binary=None if codex_bin == "codex" else codex_bin,
+        )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
@@ -150,9 +157,9 @@ class TaskAgentCodexRunner:
         self._extract_codex_session_id = extract_codex_session_id
         self._extract_codex_audit_events = extract_codex_audit_events
         self._extract_codex_audit_events_from_session = (
-            extract_codex_audit_events_from_session
+            extract_pi_audit_events_from_session
         )
-        self._session_line_count = count_codex_session_lines
+        self._session_line_count = count_pi_session_lines
         self._subprocess_failure_reason = _subprocess_failure_reason
         self.last_session_id: str | None = None
         self.last_audit_tool_events: list[dict[str, str]] = []
@@ -188,7 +195,9 @@ class TaskAgentCodexRunner:
             session_id,
             image_paths=None,
             output_schema_path=TASK_AGENT_DECISION_SCHEMA_PATH,
+            use_output_schema=False,
             ignore_user_config=True,
+            approval_policy="never",
         )
         if self.executor is not None:
             return self.executor(command, prompt)
@@ -201,22 +210,29 @@ class TaskAgentCodexRunner:
         )
         if completed.timed_out:
             raise ExternalDependencyError(
-                "codex task agent",
+                "pi task agent",
                 RuntimeError(
-                    completed.timeout_reason or "task agent codex timed out"
+                    completed.timeout_reason or "task agent pi timed out"
                 ),
-                dependency="codex",
+                dependency="pi",
             )
         if completed.returncode != 0:
             raise ExternalDependencyError(
-                "codex task agent",
+                "pi task agent",
                 RuntimeError(
                     self._subprocess_failure_reason(
                         completed.stderr,
                         completed.stdout,
                     )
                 ),
-                dependency="codex",
+                dependency="pi",
+            )
+        pi_failure = pi_process_failure_reason(completed.stdout, completed.stderr)
+        if pi_failure:
+            raise ExternalDependencyError(
+                "pi task agent",
+                RuntimeError(pi_failure),
+                dependency="pi",
             )
         return completed.stdout
 
@@ -255,27 +271,23 @@ def build_task_agent_prompt(
 - 每次必须评估 failure_risk 和 failure_risk_score：failure_risk 说明如果不跟进会发生什么；failure_risk_score 是 0 到 1 的失败风险，0 表示几乎无业务影响，1 表示会直接影响关键交付、收入、合规或管理决策。
 - BM25 候选项目只是初始线索，不是权威匹配结果。
 - 判断事项是否关联公司目标、OKR/KR 或关键项目时，如果工作区存在 `OKR档案/latest_company_okr_index.md`，先读取它作为公司目标参照；这份索引只用于判断 task-worthy 和项目归属，不是 TODO 完成证据。
-- 如果 OKR 索引不存在或无法读取，继续使用 Work Item、候选项目、DWS 和 memory_recall 判断，不要因此停止。
-- 如果候选项目为空或你判断不匹配，可以使用 dws 或 memory_connector 恢复更多上下文；这是提示，不是硬性要求。
+- 如果 OKR 索引不存在或无法读取，继续使用 Work Item、候选项目、DWS 和本地上下文判断，不要因此停止。
+- 如果候选项目为空或你判断不匹配，可以使用 DWS 或本地材料恢复更多上下文；这是提示，不是硬性要求。
 - 近期 follow-up 候选只是上下文线索。你必须自己判断当前 Work Item 是否真的回应了某条 follow-up；不能因为候选存在就关闭 TODO 或 suppress follow-up。
 - 如果 Work Item 明确说明追错 owner、重复追问或不应继续跟进，可以通过 follow_up_changes 更新已有 follow_up_draft；不要生成新的 follow_up_draft 来继续追同一个错误 owner。
 - 只有当前消息和候选上下文共同明确证明 TODO 完成时，才把 todo_changes 写成 close 并提供 completion_evidence。
 - 已完成、已取消、已删除或用户明确表示不应继续跟进的 TODO 是负向证据；不要为了同一事项新建 TODO 或 follow_up_draft，优先关闭/取消/抑制已有项或仅更新项目背景。
 - 同一事项从不同会议听记、文档或消息重复出现时，只能合并到既有 TODO；不要换标题重新创建。
-- memory_connector 是外部辅助服务，不能成为 task agent 的运行依赖。
-- 如果 memory_connector 状态为可用，create_project 或 update_project 前必须直接调用 memory_recall MCP 工具查历史背景；不要传入或编造 user_id。
-- list_mcp_resources、list_mcp_resource_templates、memory_get、timeline_get 或本地搜索都不能替代 memory_recall；只有实际调用 memory_recall 并获得可用记忆结果后，memory_recall_used 才能为 true。
-- 如果当前运行时确实没有暴露可直接调用的 memory_recall 工具，先用工具发现结果证明不可用，再继续处理；此时 memory_recall_used=false，并在 project.memory_context.memories 写入一条 source="memory_connector_runtime_unavailable" 的证据说明。
-- 如果实际调用了 memory_recall 但该工具超时或传输失败，继续处理；此时 memory_recall_used=false，并在 project.memory_context.memories 写入一条 source="memory_recall_runtime_failure" 的证据说明。
-- 如果 memory_connector 状态为不可用，不要因此停止任务、不要输出 critical_info_unavailable、不要把任务转人工；改用 Work Item、候选项目、DWS 或本地上下文判断。此时 memory_recall_used=false，project.memory_context 写明原本会查询什么、memory_connector 不可用的原因，以及你实际采用的替代证据。
-- project.memory_context 必须写入本次记忆查询或替代依据：memory_recall 有命中时写查询、摘要和关键记忆证据；没有命中时写查询和无命中结论；memory_connector 不可用时写查询意图、不可用原因和替代证据。
+- Memory Connector 是否可用只以文末注入的“Memory connector 状态”为准，不能成为 task agent 的硬运行依赖。状态不可用时不得调用或声称调用 memory_recall、memory_get、timeline_get、user_get 或其他 MCP 工具，也不要先做 MCP 工具发现；继续使用 Work Item、候选项目、DWS 或本地上下文判断。
+- 状态不可用时 memory_recall_used 必须为 false，project.memory_context 写明原本会查询什么、bridge 不可用，以及本次实际采用的替代证据。状态明确为可用时，create_project 或 update_project 前才调用 memory_recall，并以真实工具事件为准。
+- project.memory_context 必须写入本次查询意图和实际依据；不要把当前项目字段伪装成来自 Memory 的证据。
 - 如果上下文无法支撑稳定项目名称，不要创建模糊项目；生成 follow_up_draft 询问项目、目标、owner。
 - AI听记或本地听记的说话人标签只能作为弱证据；如果多人会议的 transcript 大段只有同一个 speaker，说明说话人标注不可信，不能据此认定 owner，也不能直接私聊该 speaker。
-- 候选人流程状态 follow-up 不能只依赖本地项目里的旧摘要或 AI 听记。若 Work Item、候选项目或 follow-up 涉及候选人的推进、淘汰、人才池、offer、最终决策或流程关闭，先用 xiaoqing_interview 读取候选人当前阶段、最终决策、决策时间和决策说明；小青已给出终态时，关闭/抑制对应 TODO 和 follow-up，不要再问 HR “是否继续/是否关闭”。小青仍是 pending/waiting 且缺决策说明时，才可以生成面向 HR 的状态确认 follow-up。
-- 样例：如果小青显示“最终决策=淘汰/已淘汰”，输出 todo_changes.close 和 follow_up_changes.suppress；如果小青显示“最终决策=waiting/pending”，可以保留跟进，但 question_text 要写成“当前小青最终决策仍为 waiting，请确认是否要更新最终决策”，而不是让 HR 代替你查小青。
+- 当前 Pi 运行时也没有安装 Xiaoqing bridge。不得调用或声称调用 xiaoqing_interview、search_candidates 或 get_interview_context，也不得用 curl、DWS 文档读取或本地搜索冒充小青候选人记录。
+- 若 Work Item、候选项目或 follow-up 涉及候选人的推进、淘汰、人才池、offer、最终决策或流程关闭，而当前输入没有可信的最新状态，不得关闭/抑制 TODO、不得断言候选人终态，也不要创建要求 HR 代查小青的状态 follow-up。没有独立的重要风险时 discard；有独立风险时只记录已有证据支持的风险，不推断流程状态。
 - 行政、工商、法务、财务、人事合规类事项必须区分汇报人、推动人和实际执行 owner；只有材料明确写出“某人负责/待办/owner/由某人完成”且不是低可信说话人标签推导时，才能给该人生成 follow_up_draft。否则只更新项目背景或生成需要确认真实 owner 的 TODO，不要直接私聊。
 - 只有消息、会议纪要或文档明确证明 TODO 完成时，才能自动清理 TODO，并写入 completion_evidence。
-- Work Item 来源为 follow_up_completion_check 时，只是在提醒你检查已有 follow-up 是否完成；只有 sources、DWS 检索、会议纪要或 memory_recall 明确证明 owner 已完成时，才能 close TODO。completion_evidence 必须写 source、reason、description、completed_at；证据不足时不要 close，也不要新建 TODO。
+- Work Item 来源为 follow_up_completion_check 时，只是在提醒你检查已有 follow-up 是否完成；只有 sources、DWS 检索或会议纪要明确证明 owner 已完成时，才能 close TODO。completion_evidence 必须写 source、reason、description、completed_at；证据不足时不要 close，也不要新建 TODO。
 - 生成 TODO 或 follow_up_draft 前必须确定 owner_user_id；只有 owner_name 不够。如果上下文缺少 userId，先用 dws 或已有联系人信息补齐；仍无法唯一确定时，不要生成 follow_up_draft。
 - owner_user_id 不能靠猜。只有消息、会议纪要、文档、候选上下文或 DWS/通讯录结果明确支持“这个人负责/承诺完成/被指定为 owner”时，才能给 TODO 或 follow_up_draft 填 owner_user_id。参与人、发言人、转述人、群成员或 AI 听记 speaker 标签本身都不是 owner 证据。
 - todo_changes 如果填写 owner_user_id，必须同时填写 owner_evidence={{source, reason, description}}，说明 owner 判定来自哪条事实；证据不足时不要填 owner_user_id。
@@ -302,8 +314,7 @@ def build_task_agent_prompt(
 - follow_up_drafts 的 owner_user_id 不能为空，且必须有 todo_id 或 todo_ref；title、description、owners、scheduled_at、priority、tags、participants 字段必须完整。
 - follow_up_drafts 不需要人工审批字段；可发送性由 scheduled_at、target_kind、target_conversation_id 和 owner_user_id 决定。
 - follow_up_changes 用于更新已有 follow_up_drafts；必须引用 follow_up_id，且只能在当前 Work Item 明确支持时使用。
-- memory_connector 可用时，非 discard 决策的 memory_recall_used 必须为 true，且 project.memory_context 不能为空。
-- memory_connector 不可用时，非 discard 决策的 memory_recall_used 必须为 false，且 project.memory_context 仍不能为空。
+- 严格按下方 Memory connector 状态行动：可用时只依据真实 memory_recall 工具结果；不可用时 memory_recall_used=false。无论是否可用，非 discard 决策的 project.memory_context 都不能为空。
 
 Memory connector 状态:
 {memory_status}
@@ -392,8 +403,9 @@ def _memory_connector_prompt_status(memory_issue: str) -> str:
     if issue:
         return (
             f"不可用：{issue}\n"
-            "- 继续处理 Work Item；不要因为 memory_recall 不可用而失败。\n"
-            "- 不能调用 memory_recall 时，在 project.memory_context 记录查询意图、不可用原因和替代证据。"
+            "- 不要调用或声称调用 memory_recall/MCP，也不要做 MCP 工具发现。\n"
+            "- 继续处理 Work Item；不要因为 bridge 不可用而失败。\n"
+            "- 在 project.memory_context 记录查询意图、不可用原因和替代证据，memory_recall_used=false。"
         )
     return "可用：需要用 memory_recall 补足非 discard 决策的历史背景。"
 
@@ -1156,9 +1168,9 @@ def _enum_value(value: object) -> object:
 
 
 def _task_decision_text_candidates(payload: object) -> list[str]:
-    candidates: list[str] = []
     if not isinstance(payload, dict):
-        return candidates
+        return []
+    candidates = assistant_text_candidates(payload)
     for key in ("message", "last_agent_message", "content", "text"):
         value = payload.get(key)
         if isinstance(value, str):

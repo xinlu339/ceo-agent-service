@@ -144,7 +144,7 @@ generate `data/work-profile/work_profile.json`, `data/work-profile/work-skill/SK
 ## Step 3: Review With Nvwa
 
 After `build-work-profile` prepares the evidence and runtime profile file, run a
-Codex session with the Nvwa skill loaded and ask it to rewrite only
+Pi session with the Nvwa skill available through reviewed workspace reads and ask it to rewrite only
 `data/work-profile/work_profile.md` from `data/profile-evidence/evidence_index.jsonl`,
 `data/corpus/style_corpus.csv`, and `data/work-profile/work_profile.md`.
 

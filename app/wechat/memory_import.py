@@ -164,20 +164,28 @@ def _parse_output(raw: str) -> list[ExtractedMemoryCandidate]:
 
 
 class CodexMemoryExtractionRunner:
-    """Structured Codex runner. It has no Memory write permission in its prompt."""
+    """Structured Pi runner. It has no Memory write permission in its prompt."""
 
     def __init__(self, workspace: Path, codex_bin: str = "codex", executor=None,
                  timeout_seconds: int = 1200, idle_timeout_seconds: int = 900):
-        from app.codex_runner import CodexRunner
-        self.runner = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+        from app.pi_runner import PiRunner
+        self.runner = PiRunner(
+            workspace=workspace,
+            node_binary=None if codex_bin == "codex" else codex_bin,
+        )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
 
     def extract(self, messages: list[WechatMessage]) -> list[ExtractedMemoryCandidate]:
         prompt = self._prompt(messages)
-        command = self.runner.build_command(prompt, None, output_schema_path=SCHEMA_PATH,
-                                            ignore_user_config=True)
+        command = self.runner.build_command(
+            prompt,
+            None,
+            output_schema_path=SCHEMA_PATH,
+            ignore_user_config=True,
+            approval_policy="never",
+        )
         from app.wechat.codex_safety import make_read_only_without_tools
         make_read_only_without_tools(command)
         if self.executor is not None:
@@ -194,6 +202,10 @@ class CodexMemoryExtractionRunner:
                 raise RuntimeError(completed.timeout_reason or "WeChat Memory extraction timed out")
             if completed.returncode != 0:
                 raise RuntimeError(_subprocess_failure_reason(completed.stderr, completed.stdout))
+            from app.pi_runner import pi_process_failure_reason
+            pi_failure = pi_process_failure_reason(completed.stdout, completed.stderr)
+            if pi_failure:
+                raise RuntimeError(pi_failure)
             raw = completed.stdout
         from app.wechat.codex_safety import has_any_tool_event
         if has_any_tool_event(raw):
@@ -229,8 +241,11 @@ class CodexMemoryRecallMatcher:
 
     def __init__(self, workspace: Path, codex_bin: str = "codex", executor=None,
                  timeout_seconds: int = 1200, idle_timeout_seconds: int = 900):
-        from app.codex_runner import CodexRunner
-        self.runner = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+        from app.pi_runner import PiRunner
+        self.runner = PiRunner(
+            workspace=workspace,
+            node_binary=None if codex_bin == "codex" else codex_bin,
+        )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
@@ -260,15 +275,15 @@ class CodexMemoryRecallMatcher:
             "compatible 还必须给非空 merged_statement。"
         )
         command = self.runner.build_command(
-            prompt, None, output_schema_path=DEDUPE_SCHEMA_PATH,
-            ignore_user_config=True)
-        from app.wechat.codex_safety import disable_configured_mcp_servers
-        disable_configured_mcp_servers(
-            command, except_names=frozenset({"memory_connector"}))
-        command[-1:-1] = [
-            "-c", 'mcp_servers.memory_connector.enabled_tools=["memory_recall"]',
-            "-c", 'mcp_servers.memory_connector.disabled_tools=["memory_write"]',
-        ]
+            prompt,
+            None,
+            output_schema_path=DEDUPE_SCHEMA_PATH,
+            ignore_user_config=True,
+            approval_policy="never",
+        )
+        from app.wechat.codex_safety import _set_pi_tools
+
+        _set_pi_tools(command, ("memory_recall",))
         raw = self._execute(command, prompt)
         recalled_memories = self._validate_audit(raw, expected_query=statement)
         payload = self._result_payload(raw)

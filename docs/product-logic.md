@@ -17,24 +17,34 @@ must explicitly mention the principal before they become candidates.
 
 ## Decision
 
-The worker sends one batch of unread messages to Codex. Codex decides whether
-the batch needs one response, no response, clarification, human handoff, or an
-error stop.
+The worker stores one batch of unread messages as a generation-aware task and
+starts one Pi Direct Agent run. Pi returns a strict terminal result: completed,
+no action, needs human, or failed. Reply text and any confirmed reviewed tool
+effects are attached to that run before the delivery layer acts.
 
 The batch may contain multiple direct-chat messages. These messages are a single
-conversation turn, not independent tickets. Codex should decide whether the
+conversation turn, not independent tickets. Pi should decide whether the
 latest unread batch as a whole requires a response and should cover every
 important item in one reply when needed.
 
 ## Retrieval
 
-Before answering substantive questions, Codex is instructed to:
+Before answering substantive questions, Pi can use only the tools exposed by
+the reviewed extension:
 
-1. Read `graphify-out/GRAPH_REPORT.md`.
-2. Use `graphify query`, `graphify explain`, or `graphify path` to find related
-   workspace knowledge.
-3. Use `rg` and file reads to verify evidence.
-4. Read DingTalk documents through `dws doc read` when document links appear.
+1. `workspace_read`, `workspace_search`, and `workspace_list` inside configured
+   read roots, with realpath/symlink escape checks and bounded output.
+2. `execute_reviewed_read` for DWS commands whose exact installed schema effect
+   is `read`.
+3. `execute_reviewed_write` only on authorized non-dry-run Direct Agent paths,
+   and only when installed metadata classifies the exact command as a
+   non-destructive write that does not require product-level user confirmation.
+4. Friday Memory read/write tools when the reviewed bridge, Connector URL, and
+   local API key are configured. Memory scope comes from authenticated ACL;
+   `user_id`, `graph_id`, and `graph_ids` are forbidden.
+
+Lark, Xiaoqing, Exa, arbitrary bash, general file writes, authentication, and
+package-management commands are not exposed to Pi.
 
 Replies must not expose local file paths, source citations, session ids, or
 tool output details.
@@ -47,10 +57,12 @@ The decision schema classifies each message as:
 - `internal_personnel`
 - `external_candidate`
 
-Internal personnel discussions are sensitive and must be refused unless the
-operator has explicitly configured permission rules for that deployment.
-External candidate discussions may be answered when the relevant role and
-department context are available.
+Internal personnel discussions are sensitive and are answered only when the
+current conversation participants and configured responsibility rules make the
+recipient appropriate. Third-party personnel details in an unrelated direct
+chat are refused or handed off. External candidate discussions require trusted
+candidate, role, and department context; Xiaoqing-only facts remain unavailable
+until a reviewed tool exists.
 
 ## Handoff
 
@@ -77,7 +89,7 @@ Every attempt is stored locally, including:
 - send status and send error
 - audit summary
 - documents and tool events used for review
-- Codex session id and transcript line range when available
+- Pi session id and transcript line range when available
 - reviewer feedback and corrected reply
 
 The audit summary is a concise explanation of evidence and applied rules. It is
@@ -145,23 +157,23 @@ local/Chrome notification bridge. The notification contains the DingTalk
 `openConversationId`, so clicking it opens the group or direct conversation.
 Ambiguous sends do not notify until status reconciliation confirms success.
 Meeting attempt details reuse the reply-agent audit view: the page emphasizes
-the Codex tool-use timeline, including document, memory, search, and DingTalk
+the Pi tool-use timeline, including reviewed local, Memory, and DingTalk
 calls, instead of leading with raw source or decision payloads.
 
 The queue persists analysis before delivery. `no_action` is terminal;
 `ready_to_send` is persisted before any external send; `sent` records delivery.
 Retryable failures use `retry` plus `available_at`; invalid persisted source or
-delivery evidence and queue invariant violations use `failed`. Codex decision
+delivery evidence and queue invariant violations use `failed`. Pi decision
 schema and historical-source protocol violations are treated as retryable
 model-output failures before the bounded attempt limit. An ambiguous send with
 an `openTaskId` is reconciled by status lookup only, with bounded backoff and no
 resend. In dry-run mode the consumer may analyze a job but does not claim
 `ready_to_send` delivery.
 
-Every Codex invocation appends an immutable `meeting_alignment_run`. The History
+Every Pi invocation appends an immutable `meeting_alignment_run`. The History
 page merges these runs with reply attempts in one globally chronological feed,
 including common search, status filters, pagination, event chart, detail view,
-and Codex-session related history.
+and Pi-session related history.
 
 ## Task Summary
 
@@ -232,10 +244,10 @@ path, so follow-up does not need a separate reply engine.
   live-send guard as normal reply delivery.
 - Local task source scanning is limited to the configured `CEO_WORKSPACE` path.
 - DingTalk media/calendar placeholders and DingTalk internal link-only cards are
-  skipped before Codex, except approval/OA links.
+  skipped before Pi, except approval/OA links.
 - OA approval cards and reminders are routed to the OA handler. The handler uses
-  the unified structured Codex runner with `dingtalk-oa-approval` injected,
-  records the Codex session, tool events, approval URL, approval action,
+  the structured Pi runner with the reviewed OA skill injected,
+  records the Pi session, tool events, approval URL, approval action,
   approval remark, and action result on the existing reply attempt audit row,
   and does not create a separate OA audit page.
 - When a later attempt handles the same OA trigger, the older attempt detail

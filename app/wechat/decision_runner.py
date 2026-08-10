@@ -1,15 +1,15 @@
-"""Read-only Codex runner for creating a WeChat reply decision."""
+"""Tool-free Pi runner for creating a WeChat reply decision."""
 from __future__ import annotations
 
 from app.codex_decision import CodexDecisionRunner
-from app.wechat.codex_safety import make_read_only_with_memory_tools
+from app.wechat.codex_safety import make_read_only_without_tools
 
 
-WECHAT_DECISION_DEVELOPER_INSTRUCTIONS = """You are a read-only WeChat reply decision worker.
+WECHAT_DECISION_DEVELOPER_INSTRUCTIONS = """You are a tool-free WeChat reply decision worker.
 
-- Use the supplied WeChat context. When it is genuinely useful, use only the
-  configured durable-memory read tools.
-- Do not run shell commands or use web search, plugins, apps, DingTalk, Lark,
+- Use only the supplied WeChat context. This invocation exposes no Friday Memory,
+  durable-memory, DWS, or other external tools; do not call or claim to call them.
+- Do not run tools, shell commands, or use web search, plugins, apps, DingTalk, Lark,
   browser, approval, document, mail, or messaging tools.
 - Do not send, edit, approve, react, write memory, or otherwise cause an
   external side effect. The service persists the decision and owns delivery.
@@ -26,5 +26,5 @@ class WechatDecisionRunner(CodexDecisionRunner):
         kwargs.setdefault(
             "developer_instructions", WECHAT_DECISION_DEVELOPER_INSTRUCTIONS
         )
-        kwargs.setdefault("command_mutator", make_read_only_with_memory_tools)
+        kwargs.setdefault("command_mutator", make_read_only_without_tools)
         super().__init__(*args, **kwargs)

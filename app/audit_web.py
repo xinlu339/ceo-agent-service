@@ -47,7 +47,6 @@ from app.config import (
     feedback_spike_vercel_base_url,
     forbidden_path_prefixes,
     handoff_ack,
-    memory_connector_user_id,
     meeting_consumer_poll_interval_seconds,
     meeting_producer_interval_seconds,
     meeting_settle_seconds,
@@ -71,6 +70,43 @@ from app.config import (
 )
 from app.embedding import EmbeddingClient
 from app.history import safe_observability_error
+from app.pi_capabilities import probe_pi_capabilities, probe_pi_model_resolution
+from app.pi_runner import (
+    DEFAULT_PI_EXA_MCP_URL,
+    DEFAULT_PI_XIAOQING_MCP_URL,
+    DEFAULT_PI_API,
+    DEFAULT_PI_MODEL,
+    DEFAULT_PI_PROVIDER,
+    DEFAULT_PI_THINKING_LEVEL,
+    MINIMUM_PI_NODE_VERSION,
+    PI_AGENT_DIR_ENV,
+    PI_API_ENV,
+    PI_API_KEY_ENV,
+    PI_BASE_URL_ENV,
+    PI_CLI_PATH_ENV,
+    PI_EXA_MCP_URL_ENV,
+    PI_XIAOQING_ACCESS_TOKEN_ENV,
+    PI_XIAOQING_MCP_URL_ENV,
+    PI_MODEL_ENV,
+    PI_NODE_BINARY_ENV,
+    PI_PROVIDER_ENV,
+    PI_SESSION_DIR_ENV,
+    PI_THINKING_LEVEL_ENV,
+    SUPPORTED_PI_APIS,
+    SUPPORTED_PI_THINKING_LEVELS,
+    ensure_pi_runtime_config,
+    pi_agent_dir,
+    pi_cli_path,
+    pi_node_binary,
+    pi_node_version,
+    pi_session_dir,
+    validate_pi_api,
+    validate_pi_base_url,
+    validate_pi_model,
+    validate_pi_provider,
+    validate_pi_thinking_level,
+)
+from app.pi_history import RenderedPiEvent, render_local_pi_session
 from app.developer_prompt import (
     configurable_prompt_variable_pairs,
     DeveloperPromptTemplateError,
@@ -574,7 +610,7 @@ NO_AUDIT_CONTEXT_TOOLTIP = (
     "No audit documents or tool events were attached; this answer was generated from conversation context only."
 )
 NO_CODEX_SESSION_TOOLTIP = (
-    "No Codex session is linked; review this attempt using the stored audit fields only."
+    "No Pi session is linked; review this attempt using the stored audit fields only."
 )
 _BROWSER_NOTIFICATION_SUBSCRIBERS: set[asyncio.Queue[dict[str, str]]] = set()
 _BROWSER_NOTIFICATION_HISTORY: deque[dict[str, str]] = deque(maxlen=20)
@@ -1051,7 +1087,7 @@ def _tutorial_steps() -> list[_TutorialStep]:
                 "Repository path: ~/Documents/Projects/ceo-agent-service",
                 "Workspace path: ~/Documents/memory",
                 "Principal display name, mention aliases, signature, handoff acknowledgement",
-                "Memory Connector MCP URL and DingTalk KB workspace are optional",
+                "Pi provider, model, API protocol, Base URL, and API Key are configured on the Pi Agent tab",
             ],
             "commands": [
                 "sed -n '1,240p' ~/.agents/AGENT.md",
@@ -1062,37 +1098,40 @@ def _tutorial_steps() -> list[_TutorialStep]:
         {
             "phase": "Phase 1",
             "title": "准备本地依赖和 CLI",
-            "description": "确认 Python 环境、dws CLI、Codex CLI 和仓库依赖可用；HOME 必须是真实用户目录，不能指向项目目录。",
+            "description": "确认 Python 环境、Node 22.19+、同级 Pi CLI build、dws CLI 和仓库依赖可用；HOME 必须是真实用户目录，不能指向项目目录。",
             "checks": [
                 "Python 3.11+ and editable package install",
                 "dws auth status and dws doctor pass under the real user account",
-                "Codex CLI can run codex exec through the local runtime",
+                "Sibling Pi CLI exists and can run with Node 22.19 or newer",
                 "Start in dry-run mode until the audit UI is reviewed",
             ],
             "commands": [
                 "python3 -m venv .venv",
                 ".venv/bin/pip install -e '.[dev]'",
                 "dws auth status",
-                "codex --version",
+                '"$CEO_PI_NODE_BINARY" ../pi/packages/coding-agent/dist/cli.js --version',
             ],
-            "links": [("Config", "/config"), ("Logs", "/logs")],
+            "links": [("Pi Agent config", "/config?tab=agent"), ("Logs", "/logs")],
         },
         {
             "phase": "Phase 2",
-            "title": "配置 MCP 和基础环境",
-            "description": "按 README 配置 Memory Connector MCP、.env、workspace、SQLite 和 corpus 目录；MCP 身份使用已安装 Authorization header，不单独填写 user_id。",
+            "title": "配置 Pi Agent 和基础环境",
+            "description": "在 Pi Agent 页配置 Provider、Model、API protocol、Base URL 和 API Key，并准备 .env、workspace、SQLite 和 corpus 目录。DWS 与 Friday Memory 仅通过仓库内 reviewed Pi tools 使用。",
             "checks": [
                 ".env comes from .env.example and stays uncommitted",
                 "CEO_WORKSPACE, CEO_WORKER_DB, CEO_CORPUS_DIR point at local paths",
-                "Memory Connector MCP is optional but must use the authenticated OAuth identity",
+                "API Key is stored only in the mode-0600 .env and is never rendered back to the page",
+                "DWS reviewed schema and the reviewed Pi extension load successfully",
+                "Friday Memory requires the reviewed bridge, Connector URL, and a local API key",
+                "Exa uses reviewed read-only tools; Xiaoqing uses a reviewed OAuth bridge; Lark uses the reviewed official CLI adapter; Nvwa is limited to explicit work-profile review",
                 "CEO_NOT_SEND_MESSAGE=1 or CEO_DRY_RUN=1 remains enabled",
             ],
             "commands": [
                 "cp .env.example .env",
-                ".venv/bin/ceo-agent setup-memory-connector --memory-url '<memory-mcp-url>'",
+                "chmod 600 .env",
                 "mkdir -p data/corpus \"$HOME/Documents/memory\"",
             ],
-            "links": [("System config", "/config?tab=system")],
+            "links": [("Pi Agent config", "/config?tab=agent"), ("System config", "/config?tab=system")],
         },
         {
             "phase": "Phase 4",
@@ -1687,7 +1726,7 @@ def _top_nav(
         ("workers", "Workers", "/workers"),
         ("user-feedback", "用户反馈", "/user-feedback"),
         ("service-bugfix", "服务修复", "/service-bugfix-candidates"),
-        ("codex", "Codex Sessions", "/codex"),
+        ("pi", "Pi Sessions", "/pi"),
         ("config", "Config", "/config"),
         ("logs", "Logs", "/logs"),
     ]
@@ -2058,11 +2097,12 @@ def _worker_components_table(components: object) -> str:
         for component in components
         if isinstance(component, dict)
     )
+    empty_row = '<tr><td colspan="3" class="muted">No workers configured.</td></tr>'
     return (
         "<table class=\"column-sized-table worker-table\"><thead><tr>"
         "<th>Worker</th><th>Role</th><th>Cadence</th>"
         "</tr></thead><tbody>"
-        f"{rows or '<tr><td colspan=\"3\" class=\"muted\">No workers configured.</td></tr>'}"
+        f"{rows or empty_row}"
         "</tbody></table>"
     )
 
@@ -2082,12 +2122,13 @@ def _worker_queues_table(queues: object) -> str:
         for queue in queues
         if isinstance(queue, dict)
     )
+    empty_row = '<tr><td colspan="8" class="muted">No queues found.</td></tr>'
     return (
         "<table class=\"column-sized-table worker-table\"><thead><tr>"
         "<th>Queue</th><th>Status counts</th><th>Pending</th><th>Processing</th>"
         "<th>Retryable</th><th>Failed</th><th>Updated</th><th>Latest error</th>"
         "</tr></thead><tbody>"
-        f"{rows or '<tr><td colspan=\"8\" class=\"muted\">No queues found.</td></tr>'}"
+        f"{rows or empty_row}"
         "</tbody></table>"
     )
 
@@ -2105,11 +2146,16 @@ def _worker_attention_table(rows_obj: object) -> str:
         for row in rows_obj
         if isinstance(row, dict)
     )
+    empty_row = (
+        '<tr><td colspan="6" class="muted">'
+        "No pending, processing, or failed queue items."
+        "</td></tr>"
+    )
     return (
         "<table class=\"column-sized-table worker-table\"><thead><tr>"
         "<th>Item</th><th>Status</th><th>Context</th><th>Summary</th><th>Updated</th><th>Error</th>"
         "</tr></thead><tbody>"
-        f"{rows or '<tr><td colspan=\"6\" class=\"muted\">No pending, processing, or failed queue items.</td></tr>'}"
+        f"{rows or empty_row}"
         "</tbody></table>"
     )
 
@@ -2128,7 +2174,9 @@ def render_config_page(
     saved: bool = False,
     db_path: Path | None = None,
 ) -> str:
-    if active_tab == "developer":
+    if active_tab == "agent":
+        content = _render_agent_config(saved=saved)
+    elif active_tab == "developer":
         content = _render_developer_prompt_editor_content(saved=saved)
     elif active_tab == "user":
         content = _render_user_prompt_editor_content(saved=saved)
@@ -2143,7 +2191,9 @@ def render_config_page(
     else:
         active_tab = "info"
         content = _render_config_info()
-    prompt_card = "" if active_tab == "wechat" else _prompt_config_card(active_tab)
+    prompt_card = (
+        "" if active_tab in {"agent", "wechat"} else _prompt_config_card(active_tab)
+    )
     body = f"{prompt_card}{_config_tabs(active_tab)}{content}"
     pending_count = (
         AutoReplyStore(db_path).count_pending_user_feedback_items()
@@ -2347,11 +2397,6 @@ def _system_config_rows() -> list[tuple[str, str, str]]:
             "用户别名；用于展示、handoff 文案、日历/profile 等运行时文案。",
         ),
         (
-            "MEMORY_CONNECTOR_USER_ID",
-            memory_connector_user_id(),
-            "Memory Connector 的用户空间；用于 MCP header 和 prompt 中的 memory user_id。",
-        ),
-        (
             "CEO_MENTION_ALIASES",
             mention_text,
             "群聊/消息触发时识别点名 principal 的别名；影响 producer 候选生成。",
@@ -2389,7 +2434,7 @@ def _system_config_rows() -> list[tuple[str, str, str]]:
         (
             "CEO_WORKSPACE",
             str(workspace_path()),
-            "本地知识库路径；Codex agent 和 graphify 从这里读取业务材料。",
+            "本地知识库路径；Pi Agent 和 graphify 从这里读取业务材料。",
         ),
         (
             "CEO_WORKER_DB",
@@ -2499,6 +2544,205 @@ def _config_variable_inputs() -> str:
     return "<table class=\"config-variable-table\">" + "".join(rows) + "</table>"
 
 
+def _render_agent_config(*, saved: bool = False) -> str:
+    env_values = read_env_file()
+    node_configured = env_values.get(
+        PI_NODE_BINARY_ENV,
+        os.environ.get(PI_NODE_BINARY_ENV, ""),
+    )
+    node_resolved = pi_node_binary()
+    cli_value = env_values.get(
+        PI_CLI_PATH_ENV,
+        os.environ.get(PI_CLI_PATH_ENV, "") or str(pi_cli_path()),
+    )
+    provider = env_values.get(
+        PI_PROVIDER_ENV,
+        os.environ.get(PI_PROVIDER_ENV, DEFAULT_PI_PROVIDER),
+    )
+    model = env_values.get(
+        PI_MODEL_ENV,
+        os.environ.get(PI_MODEL_ENV, DEFAULT_PI_MODEL),
+    )
+    api = env_values.get(
+        PI_API_ENV,
+        os.environ.get(PI_API_ENV, DEFAULT_PI_API),
+    )
+    base_url = env_values.get(
+        PI_BASE_URL_ENV,
+        os.environ.get(PI_BASE_URL_ENV, ""),
+    )
+    exa_mcp_url = env_values.get(
+        PI_EXA_MCP_URL_ENV,
+        os.environ.get(PI_EXA_MCP_URL_ENV, DEFAULT_PI_EXA_MCP_URL),
+    )
+    xiaoqing_mcp_url = env_values.get(
+        PI_XIAOQING_MCP_URL_ENV,
+        os.environ.get(
+            PI_XIAOQING_MCP_URL_ENV,
+            DEFAULT_PI_XIAOQING_MCP_URL,
+        ),
+    )
+    thinking = env_values.get(
+        PI_THINKING_LEVEL_ENV,
+        os.environ.get(PI_THINKING_LEVEL_ENV, DEFAULT_PI_THINKING_LEVEL),
+    )
+    agent_dir_value = env_values.get(
+        PI_AGENT_DIR_ENV,
+        os.environ.get(PI_AGENT_DIR_ENV, "") or str(pi_agent_dir()),
+    )
+    session_dir_value = env_values.get(
+        PI_SESSION_DIR_ENV,
+        os.environ.get(PI_SESSION_DIR_ENV, "") or str(pi_session_dir()),
+    )
+    api_key_configured = bool(
+        env_values.get(PI_API_KEY_ENV) or os.environ.get(PI_API_KEY_ENV, "")
+    )
+    xiaoqing_token_configured = bool(
+        env_values.get(PI_XIAOQING_ACCESS_TOKEN_ENV)
+        or os.environ.get(PI_XIAOQING_ACCESS_TOKEN_ENV, "")
+    )
+    capability_report = probe_pi_capabilities(env_values=env_values)
+    status_label = "Ready" if capability_report.runtime_ready else "Needs configuration"
+    status_class = "ready" if capability_report.runtime_ready else "blocked"
+    saved_html = "<p class=\"muted\">Saved.</p>" if saved else ""
+    api_options = "".join(
+        f'<option value="{escape(value)}"'
+        f'{" selected" if value == api else ""}>{escape(value)}</option>'
+        for value in sorted(SUPPORTED_PI_APIS)
+    )
+    thinking_options = "".join(
+        f'<option value="{escape(value)}"'
+        f'{" selected" if value == thinking else ""}>{escape(value)}</option>'
+        for value in ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+        if value in SUPPORTED_PI_THINKING_LEVELS
+    )
+    key_status = "Configured" if api_key_configured else "Not configured"
+    xiaoqing_token_status = (
+        "Configured" if xiaoqing_token_configured else "Not configured"
+    )
+    capability_rows = "".join(
+        "<tr>"
+        f"<td>{escape(item.label)}</td>"
+        f"<td>{escape(item.state)}</td>"
+        f"<td>{escape(item.detail)}</td>"
+        "</tr>"
+        for item in capability_report.capabilities
+    )
+    rows = "".join(
+        [
+            _agent_config_text_row("Runtime", "Pi Agent", readonly=True),
+            _agent_config_text_row(
+                "Node binary",
+                node_configured,
+                name="pi_node_binary",
+                placeholder=node_resolved,
+            ),
+            _agent_config_text_row(
+                "Pi CLI path",
+                cli_value,
+                name="pi_cli_path",
+            ),
+            _agent_config_text_row("Provider", provider, name="pi_provider"),
+            _agent_config_text_row("Model", model, name="pi_model"),
+            "<tr><td><label for=\"pi-api\">API protocol</label></td>"
+            f'<td><select id="pi-api" name="pi_api">{api_options}</select></td></tr>',
+            _agent_config_text_row(
+                "Base URL",
+                base_url,
+                name="pi_base_url",
+                placeholder="https://api.openai.com/v1",
+            ),
+            _agent_config_text_row(
+                "Exa MCP URL",
+                exa_mcp_url,
+                name="pi_exa_mcp_url",
+                placeholder=DEFAULT_PI_EXA_MCP_URL,
+            ),
+            _agent_config_text_row(
+                "Xiaoqing MCP URL",
+                xiaoqing_mcp_url,
+                name="pi_xiaoqing_mcp_url",
+                placeholder=DEFAULT_PI_XIAOQING_MCP_URL,
+            ),
+            "<tr><td><label for=\"pi-xiaoqing-token\">Xiaoqing OAuth token</label></td>"
+            "<td>"
+            f'<span class="pill">{escape(xiaoqing_token_status)}</span><br>'
+            '<input class="config-value-input" id="pi-xiaoqing-token" type="password" '
+            'name="pi_xiaoqing_access_token" value="" autocomplete="new-password" '
+            'placeholder="留空保留现有 OAuth token">'
+            '<label><input type="checkbox" name="clear_pi_xiaoqing_access_token" value="1"> '
+            "清除已保存的 Xiaoqing OAuth token</label>"
+            "</td></tr>",
+            "<tr><td><label for=\"pi-api-key\">API Key</label></td>"
+            "<td>"
+            f'<span class="pill">{escape(key_status)}</span><br>'
+            '<input class="config-value-input" id="pi-api-key" type="password" '
+            'name="pi_api_key" value="" autocomplete="new-password" '
+            'placeholder="留空保留现有 API Key">'
+            '<label><input type="checkbox" name="clear_pi_api_key" value="1"> '
+            "清除已保存的 API Key</label>"
+            "</td></tr>",
+            "<tr><td><label for=\"pi-thinking\">Thinking level</label></td>"
+            f'<td><select id="pi-thinking" name="pi_thinking">'
+            f"{thinking_options}</select></td></tr>",
+            _agent_config_text_row(
+                "Pi agent directory",
+                agent_dir_value,
+                name="pi_agent_dir",
+            ),
+            _agent_config_text_row(
+                "Pi session directory",
+                session_dir_value,
+                name="pi_session_dir",
+            ),
+        ]
+    )
+    return (
+        '<section class="card">'
+        "<h2>Pi Agent runtime</h2>"
+        f'<p><span class="setup-step-status setup-status-{status_class}">'
+        f"{escape(status_label)}</span></p>"
+        "<p class=\"muted\">API Key 只写入本地 .env，页面永远不回显；"
+        "models.json 只保存环境变量引用。自定义 Base URL 会接收该 API Key，"
+        "只应配置可信 HTTPS endpoint；HTTP 仅允许本机 loopback。"
+        "保存后新启动的 Agent 调用立即使用新配置。</p>"
+        f"{saved_html}"
+        '<form method="post" action="/config/agent">'
+        '<table class="system-config-table">'
+        "<tr><th>Field</th><th>Value</th></tr>"
+        f"{rows}</table>"
+        "<p><button type=\"submit\">Save Pi Agent config</button></p>"
+        "</form>"
+        "<h3>Runtime check</h3>"
+        '<table class="system-config-table">'
+        "<tr><th>Check</th><th>Status</th><th>Detail</th></tr>"
+        f"{capability_rows}"
+        "</table>"
+        "<p class=\"muted\">状态会区分缺少本地配置、缺少 OAuth/CLI 登录和工具不可用；"
+        "系统不会回退到 bash、旧 Codex MCP 配置或未审查的 CLI 调用。</p>"
+        "</section>"
+    )
+
+
+def _agent_config_text_row(
+    label: str,
+    value: str,
+    *,
+    name: str = "",
+    placeholder: str = "",
+    readonly: bool = False,
+) -> str:
+    if readonly:
+        input_html = f'<code class="config-value">{escape(value)}</code>'
+    else:
+        input_html = (
+            '<input class="config-value-input" type="text" '
+            f'name="{escape(name)}" value="{escape(value)}" '
+            f'placeholder="{escape(placeholder)}" aria-label="{escape(label)}">'
+        )
+    return f"<tr><td>{escape(label)}</td><td>{input_html}</td></tr>"
+
+
 def _variable_input_row(key: str, value: str) -> str:
     env_key = prompt_variable_env_key(key)
     return (
@@ -2580,7 +2824,6 @@ def _editable_system_config_keys() -> set[str]:
     return {
         "CEO_PRINCIPAL_NAME",
         "USER_ALIAS",
-        "MEMORY_CONNECTOR_USER_ID",
         "CEO_MENTION_ALIASES",
         "CEO_AGENT_NAMES",
         "CEO_BROADCAST_MENTION_ALIASES",
@@ -3507,7 +3750,7 @@ def _history_session_search_html(results) -> str:
             "<article class=\"attempt-item history-session-result\">"
             "<div class=\"attempt-head\">"
             "<div class=\"attempt-title\">"
-            f"<a class=\"attempt-id\" href=\"/codex/{escape(result.session_id)}\">Codex</a>"
+            f"<a class=\"attempt-id\" href=\"/pi/{escape(result.session_id)}\">Pi</a>"
             f"{score_html}"
             f"<div class=\"attempt-main\">{escape(result.title or result.session_id)}</div>"
             f"<div class=\"attempt-meta\">{escape(result.source_type)}</div>"
@@ -3523,7 +3766,7 @@ def _history_session_search_html(results) -> str:
         )
     return (
         "<section class=\"card history-session-search\">"
-        "<h2>相似 Codex sessions</h2>"
+        "<h2>相似 Pi sessions</h2>"
         "<p class=\"muted\">基于 session search index 的 BM25/embedding 检索结果。</p>"
         "<section class=\"attempt-feed\">"
         f"{''.join(items)}"
@@ -4849,6 +5092,54 @@ def render_task_project_detail(store: AutoReplyStore, project_id: int) -> tuple[
         _unlinked_follow_up_drafts(todos, drafts),
         conversation_titles,
     )
+    todos_html = todo_panel if todos else '<p class="muted">No TODOs recorded.</p>'
+    facts_html = (
+        _simple_table(
+            ("Description", "Source", "Created", "Updated"),
+            facts,
+            column_widths={"Source": "118px", "Created": "132px", "Updated": "132px"},
+        )
+        if facts
+        else '<p class="muted">No facts recorded.</p>'
+    )
+    updates_html = (
+        _simple_table(
+            ("Time", "Source", "Summary", "Changes", "Reason", "Confidence"),
+            update_rows,
+            column_widths={
+                "Time": "148px",
+                "Source": "118px",
+                "Summary": "240px",
+                "Changes": "220px",
+                "Reason": "180px",
+                "Confidence": "96px",
+            },
+        )
+        if update_rows
+        else '<p class="muted">No updates recorded.</p>'
+    )
+    follow_ups_html = ""
+    if draft_rows:
+        follow_ups_html = (
+            '<section class="card"><h2>Unlinked follow-ups</h2>'
+            + _simple_table(
+                ("Time", "Owner", "TODO", "Target", "Status", "Question", "Risk", "Result"),
+                draft_rows,
+                column_widths={
+                    "Time": "148px",
+                    "Owner": "110px",
+                    "TODO": "88px",
+                    "Target": "112px",
+                    "Status": "104px",
+                    "Question": "240px",
+                    "Risk": "170px",
+                    "Result": "180px",
+                },
+                html_columns={"TODO"},
+            )
+            + "</section>"
+        )
+    memory_html = _collapsible_json_card("Memory context", project.memory_context_json)
 
     body = (
         "<section class=\"card\"><div class=\"card-head\">"
@@ -4874,22 +5165,16 @@ def render_task_project_detail(store: AutoReplyStore, project_id: int) -> tuple[
         f"{_task_project_detail_table(detail_rows)}"
         "</section>"
         "<section class=\"card\"><h2>TODOs</h2>"
-        f"{todo_panel if todos else '<p class=\"muted\">No TODOs recorded.</p>'}"
+        f"{todos_html}"
         "</section>"
         "<section class=\"card\"><h2>Facts</h2>"
-        f"{_simple_table(('Description', 'Source', 'Created', 'Updated'), facts, column_widths={'Source': '118px', 'Created': '132px', 'Updated': '132px'}) if facts else '<p class=\"muted\">No facts recorded.</p>'}"
+        f"{facts_html}"
         "</section>"
         "<section class=\"card\"><h2>Updates</h2>"
-        f"{_simple_table(('Time', 'Source', 'Summary', 'Changes', 'Reason', 'Confidence'), update_rows, column_widths={'Time': '148px', 'Source': '118px', 'Summary': '240px', 'Changes': '220px', 'Reason': '180px', 'Confidence': '96px'}) if update_rows else '<p class=\"muted\">No updates recorded.</p>'}"
+        f"{updates_html}"
         "</section>"
-        + (
-            "<section class=\"card\"><h2>Unlinked follow-ups</h2>"
-            f"{_simple_table(('Time', 'Owner', 'TODO', 'Target', 'Status', 'Question', 'Risk', 'Result'), draft_rows, column_widths={'Time': '148px', 'Owner': '110px', 'TODO': '88px', 'Target': '112px', 'Status': '104px', 'Question': '240px', 'Risk': '170px', 'Result': '180px'}, html_columns={'TODO'})}"
-            "</section>"
-            if draft_rows
-            else ""
-        )
-        + f"{_collapsible_json_card('Memory context', project.memory_context_json)}"
+        + follow_ups_html
+        + memory_html
     )
     return (
         200,
@@ -5781,7 +6066,7 @@ def render_meeting_attempt_detail(
         pills_html=_agent_status_pill(run_status),
         trigger_title="Trigger",
         trigger_text="\n".join(trigger_lines),
-        reason_title="Codex reason",
+        reason_title="Pi reason",
         reason_text=run.audit_summary,
         reply_title="生成回复",
         reply_text=job.final_message or "No generated reply recorded.",
@@ -5882,20 +6167,20 @@ def render_codex_session_list(store: AutoReplyStore) -> str:
             f"<td>{escape(conversation.title)}</td>"
             f"<td>{escape(conversation.conversation_id)}</td>"
             f"<td>{escape('single' if conversation.single_chat else 'group')}</td>"
-            f"<td><a href=\"/codex/{escape(session_id)}\">{escape(session_id)}</a></td>"
+            f"<td><a href=\"/pi/{escape(session_id)}\">{escape(session_id)}</a></td>"
             f"<td>{history_cell}</td>"
             "</tr>"
         )
     table = (
         "<table><thead><tr><th>Conversation</th><th>ID</th><th>Type</th>"
-        "<th>Codex session</th><th>History</th></tr></thead><tbody>"
+        "<th>Pi session</th><th>History</th></tr></thead><tbody>"
         + "".join(rows)
         + "</tbody></table>"
     )
     return render_page(
-        "Codex Sessions",
+        "Pi Sessions",
         table,
-        active_nav="codex",
+        active_nav="pi",
         user_feedback_pending_count=store.count_pending_user_feedback_items(),
     )
 
@@ -5905,7 +6190,11 @@ def render_codex_session_detail(
     codex_home: Path | None = None,
     store: AutoReplyStore | None = None,
 ) -> tuple[int, str]:
-    rendered = render_local_codex_session(session_id, codex_home=codex_home)
+    rendered = (
+        render_local_codex_session(session_id, codex_home=codex_home)
+        if codex_home is not None
+        else render_local_pi_session(session_id)
+    )
     related_reply_attempts = (
         store.list_reply_attempts_for_codex_session(session_id) if store else []
     )
@@ -5917,25 +6206,25 @@ def render_codex_session_detail(
     if rendered.missing:
         if related_reply_attempts or related_meeting_runs:
             body = (
-                "<section class=\"card\"><h2>Codex session unavailable</h2>"
-                "<p class=\"muted\">The local Codex transcript file for this session "
+                "<section class=\"card\"><h2>Pi session unavailable</h2>"
+                "<p class=\"muted\">The local Pi transcript file for this session "
                 "is no longer available on this machine.</p>"
                 f"<p class=\"muted\">{escape(session_id)}</p></section>"
                 f"{_related_history_card(related_reply_attempts, session_id=session_id, store=store) if related_reply_attempts else ''}"
                 f"{_meeting_related_history_card(related_meeting_runs, store) if store else ''}"
             )
             return 200, render_page(
-                "Codex session unavailable",
+                "Pi session unavailable",
                 body,
-                active_nav="codex",
+                active_nav="pi",
                 user_feedback_pending_count=(
                     store.count_pending_user_feedback_items() if store else None
                 ),
             )
         return 404, render_page(
-            "Codex session not found",
-            f"<p>Codex session not found: {escape(session_id)}</p>",
-            active_nav="codex",
+            "Pi session not found",
+            f"<p>Pi session not found: {escape(session_id)}</p>",
+            active_nav="pi",
             user_feedback_pending_count=(
                 store.count_pending_user_feedback_items() if store else None
             ),
@@ -5962,9 +6251,9 @@ def render_codex_session_detail(
         f"{events}"
     )
     return 200, render_page(
-        f"Codex Session {session_id}",
+        f"Pi Session {session_id}",
         body,
-        active_nav="codex",
+        active_nav="pi",
         user_feedback_pending_count=(
             store.count_pending_user_feedback_items() if store else None
         ),
@@ -6170,6 +6459,7 @@ def _operation_status_class(status: str) -> str:
 
 def _config_tabs(active_tab: str) -> str:
     info_class = "prompt-tab active" if active_tab == "info" else "prompt-tab"
+    agent_class = "prompt-tab active" if active_tab == "agent" else "prompt-tab"
     system_class = "prompt-tab active" if active_tab == "system" else "prompt-tab"
     channels_class = (
         "prompt-tab active" if active_tab == "channels" else "prompt-tab"
@@ -6182,6 +6472,7 @@ def _config_tabs(active_tab: str) -> str:
     return (
         "<nav class=\"prompt-tabs\" aria-label=\"Config sections\">"
         f"<a class=\"{info_class}\" href=\"/config?tab=info\">Info</a>"
+        f"<a class=\"{agent_class}\" href=\"/config?tab=agent\">Pi Agent</a>"
         f"<a class=\"{system_class}\" href=\"/config?tab=system\">"
         "System Config</a>"
         f"<a class=\"{channels_class}\" href=\"/config?tab=channels\">Channels</a>"
@@ -6410,6 +6701,125 @@ def handle_system_config_post(body: bytes) -> tuple[int, dict[str, str], str]:
     }
     write_env_values(updates)
     return 303, {"Location": "/config?tab=system&saved=1"}, ""
+
+
+def handle_agent_config_post(body: bytes) -> tuple[int, dict[str, str], str]:
+    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    try:
+        provider = validate_pi_provider(parsed.get("pi_provider", [""])[0])
+        model = validate_pi_model(parsed.get("pi_model", [""])[0])
+        api = validate_pi_api(parsed.get("pi_api", [""])[0])
+        base_url = validate_pi_base_url(parsed.get("pi_base_url", [""])[0])
+        exa_mcp_url = parsed.get("pi_exa_mcp_url", [""])[0].strip().rstrip("/")
+        from app.pi_exa_bridge import PiExaBridgeError
+        from app.pi_exa_bridge import exa_mcp_url as validate_exa_mcp_url
+
+        try:
+            exa_mcp_url = validate_exa_mcp_url(
+                {PI_EXA_MCP_URL_ENV: exa_mcp_url or DEFAULT_PI_EXA_MCP_URL}
+            )
+        except PiExaBridgeError as exc:
+            raise ValueError(str(exc)) from exc
+        xiaoqing_mcp_url = (
+            parsed.get("pi_xiaoqing_mcp_url", [""])[0].strip().rstrip("/")
+        )
+        from app.pi_xiaoqing_bridge import PiXiaoqingBridgeError
+        from app.pi_xiaoqing_bridge import (
+            xiaoqing_mcp_url as validate_xiaoqing_mcp_url,
+        )
+
+        try:
+            xiaoqing_mcp_url = validate_xiaoqing_mcp_url(
+                {
+                    PI_XIAOQING_MCP_URL_ENV: (
+                        xiaoqing_mcp_url or DEFAULT_PI_XIAOQING_MCP_URL
+                    )
+                }
+            )
+        except PiXiaoqingBridgeError as exc:
+            raise ValueError(str(exc)) from exc
+        thinking = validate_pi_thinking_level(
+            parsed.get("pi_thinking", [""])[0]
+        )
+        node_input = parsed.get("pi_node_binary", [""])[0].strip()
+        node_candidate = (
+            str(Path(os.path.expandvars(node_input)).expanduser())
+            if node_input
+            else pi_node_binary()
+        )
+        node_version = pi_node_version(node_candidate)
+        if node_version is None or node_version < MINIMUM_PI_NODE_VERSION:
+            raise ValueError("Pi Agent requires Node.js 22.19.0 or newer")
+        cli_input = parsed.get("pi_cli_path", [""])[0].strip()
+        cli_path = (
+            Path(os.path.expandvars(cli_input)).expanduser()
+            if cli_input
+            else pi_cli_path()
+        )
+        if not cli_path.is_file():
+            raise ValueError("Pi CLI path does not exist")
+        model_ready, model_detail = probe_pi_model_resolution(
+            node_binary=node_candidate,
+            cli_path=cli_path,
+            provider=provider,
+            model=model,
+            api=api,
+            base_url=base_url,
+        )
+        if not model_ready:
+            raise ValueError(model_detail)
+        agent_dir_input = parsed.get("pi_agent_dir", [""])[0].strip()
+        session_dir_input = parsed.get("pi_session_dir", [""])[0].strip()
+        api_key = parsed.get("pi_api_key", [""])[0]
+        if any(character in api_key for character in ("\x00", "\r", "\n")):
+            raise ValueError("API Key contains invalid control characters")
+        if len(api_key) > 16_384:
+            raise ValueError("API Key is too long")
+        xiaoqing_access_token = parsed.get(
+            "pi_xiaoqing_access_token",
+            [""],
+        )[0]
+        if any(
+            character in xiaoqing_access_token
+            for character in ("\x00", "\r", "\n")
+        ):
+            raise ValueError("Xiaoqing OAuth token contains invalid control characters")
+        if len(xiaoqing_access_token) > 32_768:
+            raise ValueError("Xiaoqing OAuth token is too long")
+    except ValueError as exc:
+        return 400, {}, render_page(
+            "Pi Agent config error",
+            '<section class="card"><h2>Pi Agent config error</h2>'
+            f"<p>{escape(str(exc))}</p>"
+            '<p><a href="/config?tab=agent">Back to Pi Agent config</a></p>'
+            "</section>",
+            active_nav="config",
+        )
+
+    updates = {
+        PI_NODE_BINARY_ENV: node_input,
+        PI_CLI_PATH_ENV: str(cli_path),
+        PI_PROVIDER_ENV: provider,
+        PI_MODEL_ENV: model,
+        PI_API_ENV: api,
+        PI_BASE_URL_ENV: base_url,
+        PI_EXA_MCP_URL_ENV: exa_mcp_url,
+        PI_XIAOQING_MCP_URL_ENV: xiaoqing_mcp_url,
+        PI_THINKING_LEVEL_ENV: thinking,
+        PI_AGENT_DIR_ENV: agent_dir_input,
+        PI_SESSION_DIR_ENV: session_dir_input,
+    }
+    if parsed.get("clear_pi_api_key", [""])[0] == "1":
+        updates[PI_API_KEY_ENV] = ""
+    elif api_key:
+        updates[PI_API_KEY_ENV] = api_key
+    if parsed.get("clear_pi_xiaoqing_access_token", [""])[0] == "1":
+        updates[PI_XIAOQING_ACCESS_TOKEN_ENV] = ""
+    elif xiaoqing_access_token:
+        updates[PI_XIAOQING_ACCESS_TOKEN_ENV] = xiaoqing_access_token
+    write_env_values(updates)
+    ensure_pi_runtime_config()
+    return 303, {"Location": "/config?tab=agent&saved=1"}, ""
 
 
 def handle_user_prompt_post(body: bytes) -> tuple[int, dict[str, str], str]:
@@ -6692,7 +7102,7 @@ def _is_valid_rerun_trigger_json(
 
 def _safe_action_return_to(return_to: str, attempt_id: int) -> str:
     cleaned = return_to.strip()
-    if cleaned.startswith("/codex/") or cleaned == f"/attempts/{attempt_id}":
+    if cleaned.startswith(("/pi/", "/codex/")) or cleaned == f"/attempts/{attempt_id}":
         return cleaned
     return f"/attempts/{attempt_id}"
 
@@ -6842,6 +7252,16 @@ def _require_trusted_json_mutation(request: Request) -> None:
     media_type = request.headers.get("content-type", "").split(";", 1)[0]
     if media_type.strip().casefold() != "application/json":
         raise HTTPException(status_code=415, detail="application/json required")
+
+
+def _require_trusted_form_mutation(request: Request) -> None:
+    _require_trusted_mutation(request)
+    media_type = request.headers.get("content-type", "").split(";", 1)[0]
+    if media_type.strip().casefold() != "application/x-www-form-urlencoded":
+        raise HTTPException(
+            status_code=415,
+            detail="application/x-www-form-urlencoded required",
+        )
 
 
 def _render_history_busy_page() -> str:
@@ -7097,17 +7517,25 @@ def create_audit_app(
     def error_list(request: Request) -> str:
         return log_list(request)
 
-    @app.get("/codex", response_class=HTMLResponse)
-    def codex_session_list() -> str:
+    @app.get("/pi", response_class=HTMLResponse)
+    def pi_session_list() -> str:
         return render_codex_session_list(AutoReplyStore(db_path))
 
-    @app.get("/codex/{session_id}", response_class=HTMLResponse)
-    def codex_session_detail(session_id: str) -> HTMLResponse:
+    @app.get("/pi/{session_id}", response_class=HTMLResponse)
+    def pi_session_detail(session_id: str) -> HTMLResponse:
         status, html = render_codex_session_detail(
             session_id,
             store=AutoReplyStore(db_path),
         )
         return HTMLResponse(html, status_code=status)
+
+    @app.get("/codex", response_class=HTMLResponse)
+    def legacy_codex_session_list() -> RedirectResponse:
+        return RedirectResponse("/pi", status_code=303)
+
+    @app.get("/codex/{session_id}", response_class=HTMLResponse)
+    def legacy_codex_session_detail(session_id: str) -> RedirectResponse:
+        return RedirectResponse(f"/pi/{quote(session_id, safe='')}", status_code=303)
 
     @app.get("/developer-prompt", response_class=HTMLResponse)
     def developer_prompt_editor(request: Request) -> str:
@@ -7268,6 +7696,7 @@ def create_audit_app(
 
     @app.post("/developer-prompt")
     async def developer_prompt_save(request: Request):
+        _require_trusted_form_mutation(request)
         if request.query_params.get("tab") == "user":
             status, headers, html = handle_user_prompt_post(await request.body())
         else:
@@ -7276,6 +7705,7 @@ def create_audit_app(
 
     @app.post("/config")
     async def config_save(request: Request):
+        _require_trusted_form_mutation(request)
         if request.query_params.get("tab") == "user":
             status, headers, html = handle_user_prompt_post(await request.body())
         else:
@@ -7284,12 +7714,20 @@ def create_audit_app(
 
     @app.post("/config/variables")
     async def config_variables_save(request: Request):
+        _require_trusted_form_mutation(request)
         status, headers, html = handle_prompt_variables_post(await request.body())
         return _fastapi_post_response(status, headers, html)
 
     @app.post("/config/system")
     async def config_system_save(request: Request):
+        _require_trusted_form_mutation(request)
         status, headers, html = handle_system_config_post(await request.body())
+        return _fastapi_post_response(status, headers, html)
+
+    @app.post("/config/agent")
+    async def config_agent_save(request: Request):
+        _require_trusted_form_mutation(request)
+        status, headers, html = handle_agent_config_post(await request.body())
         return _fastapi_post_response(status, headers, html)
 
     @app.post("/attempts/{attempt_id}/recall")
@@ -7454,7 +7892,7 @@ def _attempt_detail_body(
         pills_html=_attempt_action_pills(attempt, later_attempt=later_attempt),
         trigger_title="Trigger",
         trigger_text=_trigger_text(attempt),
-        reason_title="Codex reason",
+        reason_title="Pi reason",
         reason_text=attempt.codex_reason,
         reply_title="生成回复",
         reply_text=_attempt_detail_reply_text(attempt),
@@ -7470,7 +7908,7 @@ def _attempt_detail_body(
             f"{_calendar_metadata_card(attempt)}"
             f"{_text_card('Audit summary', attempt.audit_summary)}"
             f"{_audit_tool_uses_card(attempt)}"
-            f"{_text_card('Draft reply (raw Codex reply)', attempt.draft_reply_text)}"
+            f"{_text_card('Draft reply (raw Pi reply)', attempt.draft_reply_text)}"
         ),
     )
 
@@ -7529,7 +7967,7 @@ def _agent_detail_banner(
         else ""
     )
     agent_log = (
-        f"<a class=\"agent-log-button\" href=\"/codex/{escape(codex_session_id)}\">"
+        f"<a class=\"agent-log-button\" href=\"/pi/{escape(codex_session_id)}\">"
         "agent 执行记录</a>"
         if codex_session_id
         else "<span class=\"muted\">No agent execution record</span>"
@@ -8128,7 +8566,7 @@ def _related_history_card(
     if not attempts:
         return (
             "<section class=\"card\"><h2>Related history</h2>"
-            "<p class=\"muted\">No reply attempts recorded for this Codex session.</p>"
+            "<p class=\"muted\">No reply attempts recorded for this Pi session.</p>"
             "</section>"
         )
     rows = []
@@ -8187,7 +8625,7 @@ def _attempt_row_actions(
     *,
     session_id: str = "",
 ) -> str:
-    return_to = f"/codex/{quote(session_id, safe='')}" if session_id else f"/attempts/{attempt.id}"
+    return_to = f"/pi/{quote(session_id, safe='')}" if session_id else f"/attempts/{attempt.id}"
     return_to_query = quote(return_to, safe="/")
     dingtalk_href = (
         "/open-dingtalk-popup?"
@@ -8215,7 +8653,7 @@ def _attempt_row_actions(
     )
 
 
-def _codex_event_card(event: RenderedCodexEvent) -> str:
+def _codex_event_card(event: RenderedCodexEvent | RenderedPiEvent) -> str:
     open_attr = " open" if event.expanded else ""
     preview = _excerpt(event.body, 140)
     return (

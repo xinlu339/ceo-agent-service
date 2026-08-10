@@ -1,37 +1,35 @@
-# Codex session history lookup
+# Pi session history lookup
 
-The reply worker stores Codex transcript line offsets so review pages can show
-which files and commands were used for one decision. Runtime lookup must find
-the transcript file quickly and must not scan the full local Codex history.
+The reply worker stores Pi transcript line offsets so review pages can show
+which files and commands were used for one decision. Runtime lookup only scans
+the dedicated Pi session directory.
 
 ## Request path
 
 Session lookup uses this order:
 
-1. Read the small local `session_path_index.jsonl` file.
-2. If the index misses, find files whose name already contains the session id.
-3. If that misses too, return missing immediately.
+1. Validate the requested session ID against the safe ID pattern.
+2. Scan only `CEO_PI_SESSION_DIR` for `*.jsonl` files.
+3. Read the leading Pi `{"type":"session","id":"..."}` header and require an
+   exact ID match.
+4. If no exact header match exists, return missing.
 
-The request path does not inspect every transcript file. Full transcript scans
-only happen when explicitly refreshing the index.
+The request path never scans unrelated user directories or the old global
+Codex history.
 
-## Index contents
+## Session contents
 
-Each index row stores:
+Pi session files contain:
 
-- `session_id`
-- relative or absolute transcript `path`
-- file `mtime_ns`
-- file `size`
-- optional `line_count`
-
-The file metadata is checked before using an index row. If the transcript has
-changed, the row is ignored and rebuilt from the filename path when possible.
+- a versioned session header with `id`, `timestamp`, and `cwd`;
+- persisted `message` entries for user, assistant, and reviewed tool results;
+- assistant `toolCall` blocks and tool results used to render audit cards.
 
 ## Reading transcripts
 
-Line counts are cached when available. When a fresh count is needed, the code
-streams the file line by line.
+Line counts stream the file line by line. Audit extraction reads only the
+requested line range with streaming iteration instead of loading the whole
+transcript into memory.
 
-Audit extraction reads only the requested line range with streaming iteration,
-instead of loading the whole transcript into memory.
+The Web UI is available at `/pi` and `/pi/{session_id}`. Legacy `/codex` routes
+redirect to the Pi pages.

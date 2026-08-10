@@ -15,7 +15,8 @@ def test_prompt_keeps_context_in_same_conversation():
     prompt = build_wechat_turn_prompt(trigger, [_msg("c", "same chat context")])
     assert "same chat" in prompt
     assert "other chat" not in prompt
-    assert "memory_recall" in prompt
+    assert "invocation exposes no tools" in prompt
+    assert "do not call or claim to call Friday Memory" in prompt
     assert "trigger here" in prompt
 
 

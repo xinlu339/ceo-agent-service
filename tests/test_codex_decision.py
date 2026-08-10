@@ -618,21 +618,16 @@ def test_invalid_json_retries_once(tmp_path: Path):
 
     assert decision.action == CodexAction.NO_REPLY
     assert len(executor.commands) == 2
-    assert executor.commands[0][:4] == [
-        "codex",
-        "exec",
-        "resume",
-        "--json",
-    ]
-    assert executor.commands[0][-2:] == ["session-1", "-"]
-    assert 'approvals_reviewer="auto_review"' in executor.commands[0]
-    assert executor.commands[1][:4] == [
-        "codex",
-        "exec",
-        "resume",
-        "--json",
-    ]
-    assert executor.commands[1][-2] == "session-1"
+    assert executor.commands[0][1].endswith("/pi/packages/coding-agent/dist/cli.js")
+    assert executor.commands[0][executor.commands[0].index("--mode") + 1] == "json"
+    assert executor.commands[0][executor.commands[0].index("--session-id") + 1] == (
+        "session-1"
+    )
+    assert "--offline" in executor.commands[0]
+    assert "--no-context-files" in executor.commands[0]
+    assert executor.commands[1][executor.commands[1].index("--session-id") + 1] == (
+        "session-1"
+    )
     assert "只输出合法 JSON" in executor.prompts[1]
     assert '"kind":"reply|okr_review|no_action|error"' in executor.prompts[1]
     assert '"mode":"send_reply|ask_clarifying_question|handoff_to_human|no_reply"' in executor.prompts[1]
@@ -840,8 +835,14 @@ def test_decide_forwards_images_to_initial_and_repair_turns(tmp_path: Path):
     )
 
     assert decision.reply_text == "这张图可以放官网。"
-    assert executor.commands[0][-4:] == ["--image", str(image), "session-1", "-"]
-    assert executor.commands[1][-4:] == ["--image", str(image), "session-1", "-"]
+    assert f"@{image}" in executor.commands[0]
+    assert f"@{image}" in executor.commands[1]
+    assert executor.commands[0][executor.commands[0].index("--session-id") + 1] == (
+        "session-1"
+    )
+    assert executor.commands[1][executor.commands[1].index("--session-id") + 1] == (
+        "session-1"
+    )
 
 
 def test_first_turn_invalid_json_retries_with_extracted_session_id(tmp_path: Path):
@@ -866,20 +867,13 @@ def test_first_turn_invalid_json_retries_with_extracted_session_id(tmp_path: Pat
 
     assert decision.action == CodexAction.NO_REPLY
     assert runner.last_session_id == "new-session"
-    assert executor.commands[0][:3] == [
-        "codex",
-        "exec",
-        "--json",
-    ]
-    assert executor.commands[0][-3:] == ["--cd", str(tmp_path), "-"]
-    assert 'approvals_reviewer="auto_review"' in executor.commands[0]
-    assert executor.commands[1][:4] == [
-        "codex",
-        "exec",
-        "resume",
-        "--json",
-    ]
-    assert executor.commands[1][-2] == "new-session"
+    assert executor.commands[0][1].endswith("/pi/packages/coding-agent/dist/cli.js")
+    assert "--session-id" not in executor.commands[0]
+    assert "--offline" in executor.commands[0]
+    assert "--no-context-files" in executor.commands[0]
+    assert executor.commands[1][executor.commands[1].index("--session-id") + 1] == (
+        "new-session"
+    )
 
 
 def test_first_turn_invalid_json_retries_with_thread_started_id(tmp_path: Path):
@@ -909,20 +903,13 @@ def test_first_turn_invalid_json_retries_with_thread_started_id(tmp_path: Path):
 
     assert decision.action == CodexAction.NO_REPLY
     assert runner.last_session_id == "thread-1"
-    assert executor.commands[0][:3] == [
-        "codex",
-        "exec",
-        "--json",
-    ]
-    assert executor.commands[0][-3:] == ["--cd", str(tmp_path), "-"]
-    assert 'approvals_reviewer="auto_review"' in executor.commands[0]
-    assert executor.commands[1][:4] == [
-        "codex",
-        "exec",
-        "resume",
-        "--json",
-    ]
-    assert executor.commands[1][-2] == "thread-1"
+    assert executor.commands[0][1].endswith("/pi/packages/coding-agent/dist/cli.js")
+    assert "--session-id" not in executor.commands[0]
+    assert "--offline" in executor.commands[0]
+    assert "--no-context-files" in executor.commands[0]
+    assert executor.commands[1][executor.commands[1].index("--session-id") + 1] == (
+        "thread-1"
+    )
 
 
 def test_parse_codex_json_accepts_item_completed_message_output_text():
@@ -1139,7 +1126,8 @@ def test_subprocess_executor_passes_timeout(tmp_path: Path, monkeypatch):
     assert calls[0][1]["total_timeout_seconds"] == 7
     assert calls[0][1]["idle_timeout_seconds"] == 3
     assert calls[0][1]["prompt"] == "decide"
-    assert "--ignore-user-config" in calls[0][0]
+    assert "--offline" in calls[0][0]
+    assert "--no-context-files" in calls[0][0]
 
 
 def test_subprocess_timeout_returns_stop_with_error(tmp_path: Path, monkeypatch):
@@ -1434,5 +1422,5 @@ def test_subprocess_nonzero_warning_only_stderr_uses_generic_failure_reason(
     decision = runner.decide(prompt="decide", session_id=None)
 
     assert decision.action == CodexAction.STOP_WITH_ERROR
-    assert decision.reason == "codex exec failed without a valid AgentEnvelope"
+    assert decision.reason == "Pi process failed without a valid AgentEnvelope"
     assert "failed to unwatch" not in decision.reason

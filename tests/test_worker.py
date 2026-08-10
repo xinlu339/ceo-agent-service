@@ -5197,8 +5197,8 @@ def test_consume_once_codex_provider_auth_failure_waits_for_authorization(
             "select attempts, error, available_at from reply_tasks"
         ).fetchone()
     assert attempts == 0
-    assert error.startswith("codex_provider_auth_failed:")
-    assert "configured Codex model provider rejected its API key" in error
+    assert error.startswith("pi_provider_auth_failed:")
+    assert "configured Pi model provider rejected its API key" in error
     assert available_at == "2026-05-13 17:15:00"
     error_kinds = [error.kind for error in worker.store.list_errors(limit=10)]
     assert "reply_task_authorization" in error_kinds
@@ -5212,6 +5212,8 @@ def test_consume_once_codex_provider_auth_failure_waits_for_authorization(
 def test_consume_once_native_codex_missing_auth_header_waits_for_provider_recovery(
     tmp_path: Path, monkeypatch
 ):
+    monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
+
     notifications = []
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
@@ -5245,7 +5247,7 @@ def test_consume_once_native_codex_missing_auth_header_waits_for_provider_recove
             "select attempts, error, available_at from reply_tasks"
         ).fetchone()
     assert attempts == 0
-    assert error.startswith("codex_provider_unavailable:")
+    assert error.startswith("pi_provider_unavailable:")
     assert "omitted the authenticated request header" in error
     assert available_at == "2026-05-13 17:01:00"
     error_kinds = [error.kind for error in worker.store.list_errors(limit=10)]
@@ -5253,7 +5255,7 @@ def test_consume_once_native_codex_missing_auth_header_waits_for_provider_recove
     assert "reply_task_authorization" not in error_kinds
     assert any(
         notification["title"]
-        == "CEO task waiting for Codex provider recovery: Friday"
+        == "CEO task waiting for Pi provider recovery: Friday"
         for notification in notifications
     )
 
@@ -5261,14 +5263,14 @@ def test_consume_once_native_codex_missing_auth_header_waits_for_provider_recove
 def test_explicit_codex_provider_missing_auth_header_still_requires_authorization(
     monkeypatch,
 ):
-    monkeypatch.setenv("CEO_CODEX_MODEL_PROVIDER", "custom-responses")
+    monkeypatch.setenv("CEO_PI_PROVIDER", "custom-responses")
 
     normalized = worker_module._normalize_codex_stop_error_reason(
         "unexpected status 401 Unauthorized: Missing bearer or basic "
         "authentication in header, url: https://api.example.invalid/v1/responses"
     )
 
-    assert normalized.startswith("codex_provider_auth_failed:")
+    assert normalized.startswith("pi_provider_auth_failed:")
 
 
 def test_consume_once_chatgpt_codex_forbidden_waits_for_authorization(
@@ -5303,8 +5305,8 @@ def test_consume_once_chatgpt_codex_forbidden_waits_for_authorization(
             "select attempts, error, available_at from reply_tasks"
         ).fetchone()
     assert attempts == 0
-    assert error.startswith("codex_provider_auth_failed:")
-    assert "ChatGPT Codex backend rejected the service session" in error
+    assert error.startswith("pi_provider_auth_failed:")
+    assert "legacy ChatGPT Codex backend rejected the service session" in error
     assert available_at == "2026-05-13 17:15:00"
     error_kinds = [error.kind for error in worker.store.list_errors(limit=10)]
     assert "reply_task_authorization" in error_kinds
@@ -5346,7 +5348,7 @@ def test_consume_once_codex_provider_transport_failure_waits_for_recovery(
             "select attempts, error, available_at from reply_tasks"
         ).fetchone()
     assert attempts == 0
-    assert error.startswith("codex_provider_unavailable:")
+    assert error.startswith("pi_provider_unavailable:")
     assert "disconnected before completion" in error
     assert available_at == "2026-05-13 17:01:00"
     error_kinds = [error.kind for error in worker.store.list_errors(limit=10)]
@@ -5354,7 +5356,7 @@ def test_consume_once_codex_provider_transport_failure_waits_for_recovery(
     assert "reply_task_authorization" not in error_kinds
     assert any(
         notification["title"]
-        == "CEO task waiting for Codex provider recovery: Friday"
+        == "CEO task waiting for Pi provider recovery: Friday"
         for notification in notifications
     )
 
@@ -5442,7 +5444,7 @@ def test_consume_once_native_codex_transport_fallback_auth_failure_waits_for_rec
     assert worker.consume_once(max_tasks=1) == 0
     with sqlite3.connect(tmp_path / "worker.sqlite3") as db:
         error = db.execute("select error from reply_tasks").fetchone()[0]
-    assert error.startswith("codex_provider_unavailable:")
+    assert error.startswith("pi_provider_unavailable:")
     assert "omitted the authenticated request header" in error
 
 
@@ -10028,7 +10030,7 @@ def test_session_lock_wait_defers_task_without_consuming_attempt(
     assert worker.consume_once(max_tasks=1) == 0
     pending = worker.store.list_reply_tasks(statuses=("pending",), limit=1)[0]
     assert pending.attempts == 0
-    assert pending.error == "codex_session_locked"
+    assert pending.error == "pi_session_locked"
     assert pending.available_at
     assert worker.store.count_reply_tasks(status="failed") == 0
 

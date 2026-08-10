@@ -371,7 +371,7 @@ def _check_okr_reviews(
     _add(violations, source="okr_review_requests", code="processing_stale", count=_count(
         db, "select count(*) from okr_review_requests where lower(status)='processing' and datetime(updated_at) < datetime(?)",
         (_cutoff(now, OKR_PROCESSING_STALE_SECONDS),),
-    ), severity="error", detail="OKR review exceeded the Codex timeout")
+    ), severity="error", detail="OKR review exceeded the Pi timeout")
     _add(attention, source="okr_review_requests", code="active", count=_count(
         db, "select count(*) from okr_review_requests where lower(status) in ('pending','processing')"
     ), severity="info", detail="OKR review work is pending")

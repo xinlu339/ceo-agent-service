@@ -12,8 +12,11 @@ class MemoryWriteOutcomeUnknown(RuntimeError):
 class CodexMemoryWriteBackend:
     def __init__(self, workspace: Path, codex_bin: str = "codex", executor=None,
                  timeout_seconds: int = 1200, idle_timeout_seconds: int = 900):
-        from app.codex_runner import CodexRunner
-        self.runner = CodexRunner(workspace=workspace, codex_bin=codex_bin)
+        from app.pi_runner import PiRunner
+        self.runner = PiRunner(
+            workspace=workspace,
+            node_binary=None if codex_bin == "codex" else codex_bin,
+        )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
@@ -28,19 +31,22 @@ class CodexMemoryWriteBackend:
                           "source_time_start": source_time_start,
                           "source_time_end": source_time_end}, ensure_ascii=False)
         )
-        command = self.runner.build_command(prompt, None, output_schema_path=WRITE_SCHEMA_PATH,
-                                            ignore_user_config=True)
-        from app.wechat.codex_safety import disable_configured_mcp_servers
-        disable_configured_mcp_servers(
-            command, except_names=frozenset({"memory_connector"}))
-        command[-1:-1] = [
-            "-c", 'mcp_servers.memory_connector.enabled_tools=["memory_write"]',
-            "-c", 'mcp_servers.memory_connector.disabled_tools=["memory_recall"]',
-        ]
+        command = self.runner.build_command(
+            prompt,
+            None,
+            output_schema_path=WRITE_SCHEMA_PATH,
+            use_output_schema=False,
+            ignore_user_config=True,
+            approval_policy="untrusted",
+        )
+        from app.wechat.codex_safety import _set_pi_tools
+
+        _set_pi_tools(command, ("memory_write",))
         if self.executor is not None:
             raw = self.executor(command, prompt)
         else:
             from app.codex_decision import _subprocess_failure_reason
+            from app.pi_runner import pi_process_failure_reason
             from app.process_runner import run_process_with_idle_timeout
             completed = run_process_with_idle_timeout(
                 command, prompt=prompt, env=self.runner.build_env(),
@@ -53,6 +59,14 @@ class CodexMemoryWriteBackend:
                 reason = _subprocess_failure_reason(completed.stderr, completed.stdout)
                 raise MemoryWriteOutcomeUnknown(
                     f"memory write outcome unknown: {reason}"
+                )
+            pi_failure = pi_process_failure_reason(
+                completed.stdout,
+                completed.stderr,
+            )
+            if pi_failure:
+                raise MemoryWriteOutcomeUnknown(
+                    f"memory write outcome unknown: {pi_failure}"
                 )
             raw = completed.stdout
         return self._memory_id_from_audit(
@@ -99,6 +113,14 @@ class CodexMemoryWriteBackend:
         output = call.get("result")
         if output is None:
             raise MemoryWriteOutcomeUnknown("memory write outcome unknown: missing tool result")
+        from app.wechat.codex_safety import confirmed_pi_memory_write_receipt
+
+        pi_receipt = confirmed_pi_memory_write_receipt(
+            output,
+            arguments=arguments,
+        )
+        if pi_receipt is not None:
+            return pi_receipt["episode_uuid"]
         output_text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
         parsed = AutoReplyStore._parse_memory_write_output(output_text)
         if parsed.get("status") == "failed":
