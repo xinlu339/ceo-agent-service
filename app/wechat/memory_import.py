@@ -186,7 +186,7 @@ class CodexMemoryExtractionRunner:
             ignore_user_config=True,
             approval_policy="never",
         )
-        from app.wechat.codex_safety import make_read_only_without_tools
+        from app.pi_safety import make_read_only_without_tools
         make_read_only_without_tools(command)
         if self.executor is not None:
             raw = self.executor(command, prompt)
@@ -207,8 +207,8 @@ class CodexMemoryExtractionRunner:
             if pi_failure:
                 raise RuntimeError(pi_failure)
             raw = completed.stdout
-        from app.wechat.codex_safety import has_any_tool_event
-        if has_any_tool_event(raw):
+        from app.pi_safety import has_any_pi_tool_event
+        if has_any_pi_tool_event(raw):
             raise RuntimeError("WeChat Memory extraction must not call tools")
         return _parse_output(raw)
 
@@ -281,9 +281,9 @@ class CodexMemoryRecallMatcher:
             ignore_user_config=True,
             approval_policy="never",
         )
-        from app.wechat.codex_safety import _set_pi_tools
+        from app.pi_safety import set_pi_tools
 
-        _set_pi_tools(command, ("memory_recall",))
+        set_pi_tools(command, ("memory_recall",))
         raw = self._execute(command, prompt)
         recalled_memories = self._validate_audit(raw, expected_query=statement)
         payload = self._result_payload(raw)
@@ -345,16 +345,15 @@ class CodexMemoryRecallMatcher:
     @staticmethod
     def _validate_audit(raw: str, *, expected_query: str) -> list[dict]:
         from app.store import AutoReplyStore
-        from app.wechat.codex_safety import completed_mcp_tool_calls, completed_tool_events
+        from app.pi_safety import completed_pi_tool_calls
 
-        calls = completed_mcp_tool_calls(raw)
+        calls = completed_pi_tool_calls(raw)
         def is_recall(name: str) -> bool:
             normalized = name.strip()
             return normalized == "memory_recall" or normalized.endswith(
                 (".memory_recall", "__memory_recall", " memory_recall"))
         if (
-            len(completed_tool_events(raw)) != 1
-            or len(calls) != 1
+            len(calls) != 1
             or any(not is_recall(str(call.get("tool") or "")) for call in calls)
         ):
             raise RuntimeError("durable Memory matcher may use only memory_recall")

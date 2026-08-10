@@ -7,11 +7,11 @@ from typing import Callable, Iterable
 
 import httpx
 
-from app.codex_runner import (
+from app.memory_connector_config import (
     MEMORY_CONNECTOR_ENV_FILE,
     MEMORY_CONNECTOR_ENV_KEYS,
-    _memory_connector_env_from_config,
-    _parse_export_env_file,
+    memory_connector_env_from_config,
+    parse_export_env_file,
 )
 from app.notification import send_macos_notification
 from app.pi_capabilities import PiCapabilityReport, probe_pi_capabilities
@@ -250,11 +250,11 @@ def _memory_environment(config_path: Path | None) -> dict[str, str]:
     if config_path is None:
         return pi_memory_connector_env()
     config_path = config_path.expanduser()
-    file_env = _parse_export_env_file(config_path.parent / MEMORY_CONNECTOR_ENV_FILE)
+    file_env = parse_export_env_file(config_path.parent / MEMORY_CONNECTOR_ENV_FILE)
     whitelisted_file_env = {
         key: value for key, value in file_env.items() if key in MEMORY_CONNECTOR_ENV_KEYS
     }
-    configured = _memory_connector_env_from_config(config_path)
+    configured = memory_connector_env_from_config(config_path)
     process_env = {
         key: os.environ[key]
         for key in MEMORY_CONNECTOR_ENV_KEYS

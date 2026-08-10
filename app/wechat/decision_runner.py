@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from app.codex_decision import CodexDecisionRunner
-from app.wechat.codex_safety import make_read_only_without_tools
+from app.pi_safety import make_read_only_without_tools
 
 
 WECHAT_DECISION_DEVELOPER_INSTRUCTIONS = """You are a tool-free WeChat reply decision worker.

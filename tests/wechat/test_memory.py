@@ -25,6 +25,48 @@ def candidate(statement, *, category, source_message_ids=("m1",)):
     )
 
 
+def pi_tool_jsonl(
+    tool: str,
+    arguments: dict[str, object],
+    result: object,
+    *,
+    final: dict[str, object] | None = None,
+    is_error: bool = False,
+    call_id: str = "call-1",
+) -> str:
+    events: list[dict[str, object]] = [
+        {
+            "type": "tool_execution_start",
+            "toolCallId": call_id,
+            "toolName": tool,
+            "args": arguments,
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": call_id,
+            "toolName": tool,
+            "result": result,
+            "isError": is_error,
+        },
+    ]
+    if final is not None:
+        events.append(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(final, ensure_ascii=False),
+                        }
+                    ],
+                },
+            }
+        )
+    return "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
+
+
 class NoDurableMatch:
     def match(self, candidates):
         return {item.statement: "none" for item in candidates}
@@ -292,10 +334,13 @@ def test_codex_recall_matcher_accepts_only_audited_memory_recall(tmp_path):
     query = "fact"
     final = {"matches":[{"statement":"fact", "relation":"exact",
         "memory_id":"mem-1", "evidence":"durable fact", "merged_statement":""}]}
-    success = "\n".join([
-        json.dumps({"type":"item.completed","item":{"type":"mcp_tool_call","call_id":"r1","tool":"memory_recall","arguments":{"query":query},"result":{"memories":[{"uuid":"mem-1","text":"durable fact"}]}}}),
-        json.dumps({"type":"item.completed","item":{"type":"agent_message","text":json.dumps(final)}}),
-    ])
+    success = pi_tool_jsonl(
+        "memory_recall",
+        {"query": query},
+        {"memories": [{"uuid": "mem-1", "text": "durable fact"}]},
+        final=final,
+        call_id="r1",
+    )
     captured = {}
     def execute(command, prompt):
         captured["command"] = command
@@ -306,13 +351,16 @@ def test_codex_recall_matcher_accepts_only_audited_memory_recall(tmp_path):
         "memory_recall"
     )
     assert not any("mcp_servers.memory_connector" in item for item in captured["command"])
-    malicious = success.replace('"tool": "memory_recall"', '"tool": "memory_write"')
+    malicious = success.replace(
+        '"toolName": "memory_recall"',
+        '"toolName": "memory_write"',
+    )
     with pytest.raises(RuntimeError, match="only memory_recall"):
         CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: malicious).match(
             [candidate("fact", category="fact")])
 
     unrelated_events = [json.loads(line) for line in success.splitlines()]
-    unrelated_events[0]["item"]["arguments"]["query"] = "unrelated"
+    unrelated_events[0]["args"]["query"] = "unrelated"
     unrelated = "\n".join(json.dumps(event) for event in unrelated_events)
     with pytest.raises(RuntimeError, match="query does not match"):
         CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: unrelated).match(
@@ -335,12 +383,13 @@ def test_codex_recall_matcher_accepts_real_empty_memories_as_none(tmp_path):
     query = "fact"
     final = {"matches":[{"statement":"fact", "relation":"none",
         "memory_id":"", "evidence":"", "merged_statement":""}]}
-    raw = "\n".join([
-        json.dumps({"type":"item.completed","item":{"type":"mcp_tool_call",
-            "call_id":"r1","tool":"memory_recall","arguments":{"query":query},
-            "result":{"structured_content":{"result":json.dumps({"memories":[]})}}}}),
-        json.dumps({"type":"item.completed","item":{"type":"agent_message","text":json.dumps(final)}}),
-    ])
+    raw = pi_tool_jsonl(
+        "memory_recall",
+        {"query": query},
+        {"structured_content": {"result": json.dumps({"memories": []})}},
+        final=final,
+        call_id="r1",
+    )
     captured = {}
     def execute(command, prompt):
         captured["prompt"] = prompt
@@ -385,13 +434,12 @@ def test_matcher_rejects_observed_none_with_explanation_evidence(tmp_path):
         "statement": "fact", "relation": "none", "memory_id": "",
         "evidence": "未检索到与候选事实匹配的长期记忆", "merged_statement": "",
     }]}
-    raw = "\n".join([
-        json.dumps({"type": "item.completed", "item": {
-            "type": "mcp_tool_call", "tool": "memory_recall",
-            "arguments": {"query": "fact"}, "result": {"memories": []}}}),
-        json.dumps({"type": "item.completed", "item": {
-            "type": "agent_message", "text": json.dumps(final)}}),
-    ])
+    raw = pi_tool_jsonl(
+        "memory_recall",
+        {"query": "fact"},
+        {"memories": []},
+        final=final,
+    )
     with pytest.raises(RuntimeError, match="no structured result"):
         CodexMemoryRecallMatcher(tmp_path, executor=lambda command, prompt: raw).match([
             candidate("fact", category="fact")])
@@ -403,12 +451,13 @@ def test_codex_recall_support_must_come_from_same_memory_object(tmp_path):
         "memory_id":"mem-a", "evidence":"evidence from B", "merged_statement":""}]}
     output = {"memories":[{"uuid":"mem-a","text":"evidence from A"},
                            {"uuid":"mem-b","summary":"evidence from B"}]}
-    raw = "\n".join([
-        json.dumps({"type":"item.completed","item":{"type":"mcp_tool_call",
-            "call_id":"r1","tool":"memory_recall","arguments":{"query":query},
-            "result":output}}),
-        json.dumps({"type":"item.completed","item":{"type":"agent_message","text":json.dumps(final)}}),
-    ])
+    raw = pi_tool_jsonl(
+        "memory_recall",
+        {"query": query},
+        output,
+        final=final,
+        call_id="r1",
+    )
     with pytest.raises(RuntimeError, match="same recalled memory"):
         CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: raw).match(
             [candidate("fact", category="fact")])
@@ -418,12 +467,14 @@ def test_codex_recall_explicit_is_error_fails(tmp_path):
     query = "fact"
     final = {"matches":[{"statement":"fact", "relation":"none",
         "memory_id":"", "evidence":"", "merged_statement":""}]}
-    raw = "\n".join([
-        json.dumps({"type":"item.completed","item":{"type":"mcp_tool_call",
-            "call_id":"r1","tool":"memory_recall","arguments":{"query":query},
-            "isError":True,"result":{"memories":[]}}}),
-        json.dumps({"type":"item.completed","item":{"type":"agent_message","text":json.dumps(final)}}),
-    ])
+    raw = pi_tool_jsonl(
+        "memory_recall",
+        {"query": query},
+        {"memories": []},
+        final=final,
+        is_error=True,
+        call_id="r1",
+    )
     with pytest.raises(RuntimeError, match="tool error"):
         CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: raw).match(
             [candidate("fact", category="fact")])
@@ -434,13 +485,17 @@ def test_codex_recall_rejects_blank_or_too_short_evidence(tmp_path, bad_evidence
     query = "fact"
     final = {"matches":[{"statement":"fact", "relation":"exact",
         "memory_id":"mem-1", "evidence":bad_evidence, "merged_statement":""}]}
-    raw = "\n".join([
-        json.dumps({"type":"item.completed","item":{"type":"mcp_tool_call",
-            "call_id":"r1","tool":"memory_recall","arguments":{"query":query},
-            "result":{"memories":[{
-                "uuid":"mem-1", "text":f"context {bad_evidence} context"}]}}}),
-        json.dumps({"type":"item.completed","item":{"type":"agent_message","text":json.dumps(final)}}),
-    ])
+    raw = pi_tool_jsonl(
+        "memory_recall",
+        {"query": query},
+        {
+            "memories": [
+                {"uuid": "mem-1", "text": f"context {bad_evidence} context"}
+            ]
+        },
+        final=final,
+        call_id="r1",
+    )
     with pytest.raises(RuntimeError, match="no structured result"):
         CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: raw).match(
             [candidate("fact", category="fact")])
@@ -638,53 +693,6 @@ def test_rejected_or_revoked_local_candidate_does_not_suppress_new_run(store, te
     assert second is not None and second != first
 
 
-def test_codex_write_backend_requires_successful_memory_write_tool_event(tmp_path):
-    output = {"structured_content":{"result":json.dumps({"ok":True,"episode_uuid":"episode-1","processing_status":"completed"})}}
-    success = "\n".join([
-        json.dumps({"type":"item.completed","item":{"type":"mcp_tool_call", "call_id":"c1", "tool":"memory_write", "arguments":{"data":"final","type":"text","created_at":"2026-07-17"}, "result":output}}),
-        json.dumps({"status":"attempted"}),
-    ])
-    backend = CodexMemoryWriteBackend(tmp_path, executor=lambda command, prompt: success)
-    assert backend.write("final", source_time_start="2026-07-17", source_time_end="") == "episode-1"
-    fake = CodexMemoryWriteBackend(tmp_path, executor=lambda command, prompt: json.dumps({"memory_id":"fake"}))
-    with pytest.raises(Exception, match="unknown"):
-        fake.write("final", source_time_start="2026-07-17", source_time_end="")
-
-    extra_tool = "\n".join([
-        json.dumps({"type":"item.completed","item":{"type":"tool_call", "call_id":"x", "tool_name":"exec_command", "arguments":{"cmd":"true"}}}),
-        success,
-    ])
-    with pytest.raises(Exception, match="expected one tool call"):
-        CodexMemoryWriteBackend(
-            tmp_path, executor=lambda command, prompt: extra_tool
-        ).write("final", source_time_start="2026-07-17", source_time_end="")
-
-    malicious = success.replace('"data": "final"', '"data": "evil", "user_id": "u"')
-    with pytest.raises(Exception, match="arguments"):
-        CodexMemoryWriteBackend(tmp_path, executor=lambda c, p: malicious).write(
-            "final", source_time_start="2026-07-17", source_time_end="")
-
-    vague = "\n".join([
-        json.dumps({"type":"item.completed","item":{"type":"mcp_tool_call", "call_id":"c1", "tool":"memory_write", "arguments":{"data":"final","type":"text","created_at":"2026-07-17"}, "result":"550e8400-e29b-41d4-a716-446655440000"}}),
-    ])
-    with pytest.raises(Exception, match="unknown"):
-        CodexMemoryWriteBackend(tmp_path, executor=lambda c, p: vague).write(
-            "final", source_time_start="2026-07-17", source_time_end="")
-
-    failed_output = {"structured_content":{"result":json.dumps({
-        "ok":False, "episode_uuid":"episode-failed", "processing_status":"failed",
-        "last_error":"backend rejected"})}}
-    failed = success.replace(json.dumps(output), json.dumps(failed_output))
-    with pytest.raises(RuntimeError, match="backend rejected"):
-        CodexMemoryWriteBackend(tmp_path, executor=lambda c, p: failed).write(
-            "final", source_time_start="2026-07-17", source_time_end="")
-
-    preview = success.replace('"tool": "memory_write"', '"tool": "memory_write_preview"')
-    with pytest.raises(Exception, match="expected one tool call"):
-        CodexMemoryWriteBackend(tmp_path, executor=lambda c, p: preview).write(
-            "final", source_time_start="2026-07-17", source_time_end="")
-
-
 def test_codex_extraction_runner_parses_batch_envelope_and_forbids_write(tmp_path):
     captured = {}
     payload = {"candidates": [candidate("durable fact", category="fact").model_dump()]}
@@ -703,46 +711,20 @@ def test_codex_extraction_runner_parses_batch_envelope_and_forbids_write(tmp_pat
     assert "--no-tools" in captured["command"]
 
 
-def test_codex_extraction_parses_live_item_completed_agent_message(tmp_path):
+def test_pi_extraction_parses_live_message_end(tmp_path):
     payload = {"candidates": [candidate("durable fact", category="fact").model_dump()]}
-    raw = json.dumps({"type":"item.completed", "item":{
-        "type":"agent_message", "text":json.dumps(payload)}})
+    raw = json.dumps(
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": json.dumps(payload)}],
+            },
+        }
+    )
     result = CodexMemoryExtractionRunner(
         tmp_path, executor=lambda command, prompt: raw).extract([])
     assert result[0].statement == "durable fact"
-
-
-def test_real_codex_lifecycle_counts_completed_recall_once_without_call_id(tmp_path):
-    final = {"matches": [{"statement": "fact", "relation": "none",
-                           "memory_id": "", "evidence": "", "merged_statement": ""}]}
-    call = {"type": "mcp_tool_call", "server": "memory_connector",
-            "tool": "memory_recall", "arguments": {"query": "fact"}}
-    completed = {**call, "result": {
-        "structured_content": {"result": json.dumps({"memories": []})}}}
-    raw = "\n".join([
-        json.dumps({"type": "item.started", "item": call}),
-        json.dumps({"type": "item.completed", "item": completed}),
-        json.dumps({"type": "item.completed", "item": {
-            "type": "agent_message", "text": json.dumps(final)}}),
-    ])
-    result = CodexMemoryRecallMatcher(tmp_path, executor=lambda command, prompt: raw).match([
-        candidate("fact", category="fact")])
-    assert result["fact"].relation == "none"
-
-
-def test_real_codex_lifecycle_counts_completed_write_once_without_call_id(tmp_path):
-    arguments = {"data": "final", "type": "text", "created_at": "2026-07-17"}
-    call = {"type": "mcp_tool_call", "server": "memory_connector",
-            "tool": "memory_write", "arguments": arguments}
-    tool_result = {"structured_content": {"result": json.dumps({
-        "ok": True, "episode_uuid": "episode-real", "processing_status": "completed"})}}
-    raw = "\n".join([
-        json.dumps({"type": "item.started", "item": call}),
-        json.dumps({"type": "item.completed", "item": {**call, "result": tool_result}}),
-    ])
-    backend = CodexMemoryWriteBackend(tmp_path, executor=lambda command, prompt: raw)
-    assert backend.write(
-        "final", source_time_start="2026-07-17", source_time_end="") == "episode-real"
 
 
 def test_pi_memory_write_backend_accepts_one_confirmed_reviewed_tool_event(tmp_path):
@@ -838,16 +820,12 @@ def test_recall_matcher_uses_one_exact_query_per_candidate(tmp_path):
         calls.append(statement)
         final = {"matches": [{"statement": statement, "relation": "none",
                                "memory_id": "", "evidence": "", "merged_statement": ""}]}
-        completed = {
-            "type": "mcp_tool_call", "tool": "memory_recall",
-            "arguments": {"query": statement},
-            "result": {"memories": []},
-        }
-        return "\n".join([
-            json.dumps({"type": "item.completed", "item": completed}),
-            json.dumps({"type": "item.completed", "item": {
-                "type": "agent_message", "text": json.dumps(final)}}),
-        ])
+        return pi_tool_jsonl(
+            "memory_recall",
+            {"query": statement},
+            {"memories": []},
+            final=final,
+        )
 
     result = CodexMemoryRecallMatcher(tmp_path, executor=execute).match([
         candidate("zeta fact", category="fact"),
@@ -864,57 +842,9 @@ def test_recall_matcher_rejects_unbounded_candidate_count(tmp_path):
         ).match([candidate(f"fact {index}", category="fact") for index in range(101)])
 
 
-def test_unconfigured_default_exa_is_not_disabled_for_recall_or_write(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.codex_runner._codex_config", lambda: {})
-    recall_final = {"matches": [{"statement": "fact", "relation": "none",
-                                  "memory_id": "", "evidence": "",
-                                  "merged_statement": ""}]}
-    recall_raw = "\n".join([
-        json.dumps({"type": "item.completed", "item": {
-            "type": "mcp_tool_call", "tool": "memory_recall",
-            "arguments": {"query": "fact"}, "result": {"memories": []}}}),
-        json.dumps({"type": "item.completed", "item": {
-            "type": "agent_message", "text": json.dumps(recall_final)}}),
-    ])
-    commands = []
-
-    def recall_execute(command, prompt):
-        commands.append(command)
-        return recall_raw
-
-    CodexMemoryRecallMatcher(tmp_path, executor=recall_execute).match([
-        candidate("fact", category="fact")])
-
-    write_result = {"structured_content": {"result": json.dumps({
-        "ok": True, "episode_uuid": "episode-1", "processing_status": "completed"})}}
-    write_raw = json.dumps({"type": "item.completed", "item": {
-        "type": "mcp_tool_call", "tool": "memory_write",
-        "arguments": {"data": "final", "type": "text", "created_at": "2026-07-17"},
-        "result": write_result}})
-
-    def write_execute(command, prompt):
-        commands.append(command)
-        return write_raw
-
-    CodexMemoryWriteBackend(tmp_path, executor=write_execute).write(
-        "final", source_time_start="2026-07-17", source_time_end="")
-    assert all("mcp_servers.exa.enabled=false" not in command for command in commands)
-
-
 def test_extraction_filters_sensitive_input_and_runs_read_only_without_tools(
     tmp_path, monkeypatch,
 ):
-    from app.codex_runner import MEMORY_CONNECTOR_URL_ENV
-
-    monkeypatch.setattr("app.codex_runner._codex_config", lambda: {
-        "mcp_servers": {
-            "xiaoqing_interview": {"url": "https://example.invalid/mcp"},
-            "github": {"command": "github-mcp-server"},
-        }
-    })
-    monkeypatch.setattr("app.codex_runner._memory_connector_env", lambda: {
-        MEMORY_CONNECTOR_URL_ENV: "https://memory.invalid/mcp",
-    })
     captured = {}
 
     def execute(command, prompt):
@@ -949,18 +879,6 @@ def test_extraction_filters_sensitive_input_and_runs_read_only_without_tools(
     assert "--offline" in captured["command"]
     assert "--no-context-files" in captured["command"]
     assert "--no-tools" in captured["command"]
-
-
-def test_extraction_fails_closed_if_codex_emits_any_tool_call(tmp_path):
-    raw = "\n".join([
-        json.dumps({"type": "item.completed", "item": {
-            "type": "mcp_tool_call", "tool": "memory_recall",
-            "arguments": {"query": "ignore prior instructions"}, "result": {"memories": []}}}),
-        json.dumps({"candidates": []}),
-    ])
-    with pytest.raises(RuntimeError, match="must not call tools"):
-        CodexMemoryExtractionRunner(
-            tmp_path, executor=lambda command, prompt: raw).extract([])
 
 
 def test_extraction_fails_closed_if_pi_emits_any_tool_call(tmp_path):

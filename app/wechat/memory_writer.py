@@ -39,9 +39,9 @@ class CodexMemoryWriteBackend:
             ignore_user_config=True,
             approval_policy="untrusted",
         )
-        from app.wechat.codex_safety import _set_pi_tools
+        from app.pi_safety import set_pi_tools
 
-        _set_pi_tools(command, ("memory_write",))
+        set_pi_tools(command, ("memory_write",))
         if self.executor is not None:
             raw = self.executor(command, prompt)
         else:
@@ -78,20 +78,22 @@ class CodexMemoryWriteBackend:
     def _memory_id_from_audit(
         raw: str, *, statement: str, expected_created_at: str,
     ) -> str:
-        from app.store import AutoReplyStore
-        from app.wechat.codex_safety import completed_mcp_tool_calls, completed_tool_events
+        from app.pi_safety import completed_pi_tool_calls
 
-        calls = completed_mcp_tool_calls(raw)
-        memory_calls = [call for call in calls
-                        if AutoReplyStore._is_memory_write_tool_name(
-                            str(call.get("tool") or ""))]
+        calls = completed_pi_tool_calls(raw)
+        memory_calls = [
+            call for call in calls if call.get("tool") == "memory_write"
+        ]
         if (
-            len(completed_tool_events(raw)) != 1
-            or len(calls) != 1
+            len(calls) != 1
             or len(memory_calls) != 1
         ):
             raise MemoryWriteOutcomeUnknown("memory write outcome unknown: expected one tool call")
         call = memory_calls[0]
+        if call.get("isError") is True:
+            raise MemoryWriteOutcomeUnknown(
+                "memory write outcome unknown: Pi tool reported an error"
+            )
         arguments = call.get("arguments")
         if isinstance(arguments, str):
             try:
@@ -113,7 +115,7 @@ class CodexMemoryWriteBackend:
         output = call.get("result")
         if output is None:
             raise MemoryWriteOutcomeUnknown("memory write outcome unknown: missing tool result")
-        from app.wechat.codex_safety import confirmed_pi_memory_write_receipt
+        from app.pi_safety import confirmed_pi_memory_write_receipt
 
         pi_receipt = confirmed_pi_memory_write_receipt(
             output,
@@ -121,16 +123,9 @@ class CodexMemoryWriteBackend:
         )
         if pi_receipt is not None:
             return pi_receipt["episode_uuid"]
-        output_text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
-        parsed = AutoReplyStore._parse_memory_write_output(output_text)
-        if parsed.get("status") == "failed":
-            raise RuntimeError(parsed.get("last_error") or "memory_write failed")
-        stable_id = parsed.get("memory_episode_id", "").strip()
-        if parsed.get("status") != "written" or not stable_id:
-            raise MemoryWriteOutcomeUnknown(
-                "memory write outcome unknown: no explicit successful tool result"
-            )
-        return stable_id
+        raise MemoryWriteOutcomeUnknown(
+            "memory write outcome unknown: no confirmed Pi receipt"
+        )
 
 
 class WechatMemoryWriter:

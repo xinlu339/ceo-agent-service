@@ -150,9 +150,9 @@ class MeetingAlignmentCodexRunner:
             output_schema_path=MEETING_ALIGNMENT_DECISION_SCHEMA_PATH,
             approval_policy="never",
         )
-        from app.wechat.codex_safety import _set_pi_tools
+        from app.pi_safety import set_pi_tools
 
-        _set_pi_tools(
+        set_pi_tools(
             command,
             (
                 "workspace_read",

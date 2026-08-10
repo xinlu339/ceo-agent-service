@@ -15,7 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.pi_events import summarize_pi_stream
 from app.pi_runner import PiRunner, pi_cli_path, pi_process_failure_reason
-from app.wechat.codex_safety import _set_pi_tools
+from app.pi_safety import set_pi_tools
 
 
 def _free_port() -> int:
@@ -257,7 +257,7 @@ def test_real_pi_exa_e2e_uses_fake_provider_and_fake_mcp(tmp_path, monkeypatch):
                 approval_policy="never",
                 developer_instructions="Use only web_search_exa, then return JSON.",
             )
-            _set_pi_tools(command, ("web_search_exa",))
+            set_pi_tools(command, ("web_search_exa",))
             completed = subprocess.run(
                 command,
                 input=prompt,

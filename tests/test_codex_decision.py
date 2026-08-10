@@ -9,7 +9,7 @@ from app.codex_decision import (
     extract_codex_session_id,
     parse_codex_json,
 )
-from app.codex_runner import memory_connector_config_issue
+from app.memory_connector_config import memory_connector_config_issue
 from app.dingtalk_models import (
     CalendarResponseStatus,
     CodexAction,

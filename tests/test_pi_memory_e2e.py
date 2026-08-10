@@ -15,9 +15,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.pi_events import summarize_pi_stream
 from app.pi_runner import PiRunner, pi_cli_path, pi_process_failure_reason
-from app.wechat.codex_safety import (
-    _set_pi_tools,
-    completed_mcp_tool_calls,
+from app.pi_safety import (
+    set_pi_tools,
+    completed_pi_tool_calls,
     confirmed_pi_memory_write_receipt,
 )
 
@@ -292,7 +292,7 @@ def test_real_pi_memory_write_e2e_uses_fake_provider_and_fake_mcp(
                 approval_policy="untrusted",
                 developer_instructions="Use only memory_write, then return JSON.",
             )
-            _set_pi_tools(command, ("memory_write",))
+            set_pi_tools(command, ("memory_write",))
             completed = subprocess.run(
                 command,
                 input=prompt,
@@ -344,7 +344,7 @@ def test_real_pi_memory_write_e2e_uses_fake_provider_and_fake_mcp(
     )
     assert "fake-provider-secret" not in json.dumps(memory_headers)
 
-    calls = completed_mcp_tool_calls(completed.stdout)
+    calls = completed_pi_tool_calls(completed.stdout)
     assert len(calls) == 1
     call = calls[0]
     assert call["tool"] == "memory_write"

@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app.pi_events import summarize_pi_stream
 from app.pi_runner import PiRunner, pi_cli_path, pi_process_failure_reason
-from app.wechat.codex_safety import _set_pi_tools
+from app.pi_safety import set_pi_tools
 
 
 def _free_port() -> int:
@@ -231,7 +231,7 @@ json.dump({
             approval_policy="never",
             developer_instructions="Use only search_candidates, then return JSON.",
         )
-        _set_pi_tools(command, ("search_candidates",))
+        set_pi_tools(command, ("search_candidates",))
         completed = subprocess.run(
             command,
             input=prompt,

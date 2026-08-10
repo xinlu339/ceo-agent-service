@@ -3142,7 +3142,6 @@ def test_task_agent_schema_uses_strict_object_shapes_required_by_codex():
 def test_task_agent_codex_runner_uses_process_runner_signature(tmp_path):
     from app.task_agent import TaskAgentCodexRunner
     from app.task_agent import TASK_AGENT_DECISION_SCHEMA_PATH
-    from app.codex_runner import CODEX_DECISION_SCHEMA_PATH
 
     calls = []
 
@@ -3188,7 +3187,6 @@ def test_task_agent_codex_runner_uses_process_runner_signature(tmp_path):
     assert "--no-context-files" in command
     assert "--output-schema" not in command
     assert str(TASK_AGENT_DECISION_SCHEMA_PATH) not in command
-    assert str(CODEX_DECISION_SCHEMA_PATH) not in command
 
 
 def test_task_agent_codex_runner_reads_audit_events_from_session(tmp_path):

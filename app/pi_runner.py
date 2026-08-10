@@ -99,9 +99,9 @@ def pi_memory_connector_config_issue() -> str:
 
 
 def pi_memory_connector_env() -> dict[str, str]:
-    from app.codex_runner import _memory_connector_env
+    from app.memory_connector_config import memory_connector_env
 
-    source = _memory_connector_env()
+    source = memory_connector_env()
     return {
         key: source[key]
         for key in {

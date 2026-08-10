@@ -13,7 +13,7 @@ from app.codex_history import (
     extract_codex_audit_events_from_session,
     find_codex_session_path,
 )
-from app.codex_runner import codex_developer_instructions
+from app.agent_instructions import agent_developer_instructions
 from app.config import assistant_signature, forbidden_path_prefixes
 from app.dingtalk_models import CodexAction, CodexDecision
 from app.pi_events import (
@@ -822,7 +822,7 @@ class CodexDecisionRunner:
             ignore_user_config=True,
             approval_policy=self.approval_policy,
             developer_instructions=(
-                self.developer_instructions or codex_developer_instructions()
+                self.developer_instructions or agent_developer_instructions()
             ),
             use_approval_bypass=self.use_approval_bypass,
         )
