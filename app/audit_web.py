@@ -88,6 +88,7 @@ from app.pi_runner import (
     PI_XIAOQING_ACCESS_TOKEN_ENV,
     PI_XIAOQING_MCP_URL_ENV,
     PI_MODEL_ENV,
+    PI_MODEL_SOURCE_ENV,
     PI_NODE_BINARY_ENV,
     PI_PROVIDER_ENV,
     PI_SESSION_DIR_ENV,
@@ -2567,6 +2568,10 @@ def _render_agent_config(*, saved: bool = False) -> str:
         PI_MODEL_ENV,
         os.environ.get(PI_MODEL_ENV, DEFAULT_PI_MODEL),
     )
+    model_source = env_values.get(
+        PI_MODEL_SOURCE_ENV,
+        os.environ.get(PI_MODEL_SOURCE_ENV, ""),
+    )
     api = env_values.get(
         PI_API_ENV,
         os.environ.get(PI_API_ENV, DEFAULT_PI_API),
@@ -2666,6 +2671,17 @@ def _render_agent_config(*, saved: bool = False) -> str:
             ),
             _agent_config_text_row("Provider", provider, name="pi_provider"),
             _agent_config_text_row("Model", model, name="pi_model"),
+            _agent_config_text_row(
+                "Model metadata",
+                (
+                    "Pi built-in model metadata"
+                    if model_source == "builtin"
+                    else "Custom model metadata"
+                    if model_source == "custom"
+                    else "Selected automatically when saved"
+                ),
+                readonly=True,
+            ),
             "<tr><td><label for=\"pi-api\">API protocol</label></td>"
             f'<td><select id="pi-api" name="pi_api">{api_options}</select></td></tr>',
             _agent_config_text_row(
@@ -2728,6 +2744,8 @@ def _render_agent_config(*, saved: bool = False) -> str:
         "<p class=\"muted\">API Key 只写入本地 .env，页面永远不回显；"
         "models.json 只保存环境变量引用。自定义 Base URL 会接收该 API Key，"
         "只应配置可信 HTTPS endpoint；HTTP 仅允许本机 loopback。"
+        "匹配 Pi 内置模型和协议时会保留其 reasoning、图片、上下文及输出能力；"
+        "只有真正的自定义模型或协议才生成独立模型定义。"
         "未填写 Base URL 时，API protocol 必须与 Pi 内置模型的真实协议一致；"
         "不一致的配置会在保存前拒绝，避免页面配置与实际请求协议不同。"
         "保存后新启动的 Agent 调用立即使用新配置。</p>"
@@ -6789,14 +6807,24 @@ def handle_agent_config_post(body: bytes) -> tuple[int, dict[str, str], str]:
         )
         if not cli_path.is_file():
             raise ValueError("Pi CLI path does not exist")
-        model_ready, model_detail = probe_pi_model_resolution(
-            node_binary=node_candidate,
-            cli_path=cli_path,
-            provider=provider,
-            model=model,
-            api=api,
-            base_url=base_url,
-        )
+        model_ready = False
+        model_detail = "Pi model configuration could not be resolved"
+        model_source = ""
+        for candidate in (("builtin", "custom") if base_url else ("builtin",)):
+            candidate_ready, candidate_detail = probe_pi_model_resolution(
+                node_binary=node_candidate,
+                cli_path=cli_path,
+                provider=provider,
+                model=model,
+                model_source=candidate,
+                api=api,
+                base_url=base_url,
+            )
+            model_detail = candidate_detail
+            if candidate_ready:
+                model_ready = True
+                model_source = candidate
+                break
         if not model_ready:
             raise ValueError(model_detail)
         agent_dir_input = parsed.get("pi_agent_dir", [""])[0].strip()
@@ -6832,6 +6860,7 @@ def handle_agent_config_post(body: bytes) -> tuple[int, dict[str, str], str]:
         PI_CLI_PATH_ENV: str(cli_path),
         PI_PROVIDER_ENV: provider,
         PI_MODEL_ENV: model,
+        PI_MODEL_SOURCE_ENV: model_source,
         PI_API_ENV: api,
         PI_BASE_URL_ENV: base_url,
         PI_EXA_MCP_URL_ENV: exa_mcp_url,

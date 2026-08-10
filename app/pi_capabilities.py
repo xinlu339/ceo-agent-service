@@ -35,6 +35,7 @@ from app.pi_runner import (
     PI_XIAOQING_MCP_URL_ENV,
     PI_MEMORY_BRIDGE_PATH_ENV,
     PI_MODEL_ENV,
+    PI_MODEL_SOURCE_ENV,
     PI_NODE_BINARY_ENV,
     PI_PROVIDER_ENV,
     pi_cli_path,
@@ -49,6 +50,7 @@ from app.pi_runner import (
     validate_pi_api,
     validate_pi_base_url,
     validate_pi_model,
+    validate_pi_model_source,
     validate_pi_provider,
 )
 
@@ -222,11 +224,21 @@ def probe_pi_capabilities(
         DEFAULT_PI_PROVIDER,
     )
     model_raw = _configured_raw(env_values, PI_MODEL_ENV, DEFAULT_PI_MODEL)
+    model_source_raw = _configured_raw(
+        env_values,
+        PI_MODEL_SOURCE_ENV,
+        "",
+    ).strip()
     api_raw = _configured_raw(env_values, PI_API_ENV, DEFAULT_PI_API)
     base_url_raw = _configured_raw(env_values, PI_BASE_URL_ENV, "")
     try:
         provider = validate_pi_provider(provider_raw)
         model = validate_pi_model(model_raw)
+        model_source = (
+            validate_pi_model_source(model_source_raw)
+            if model_source_raw
+            else None
+        )
         api = validate_pi_api(api_raw)
         base_url = validate_pi_base_url(base_url_raw)
     except ValueError as exc:
@@ -238,6 +250,7 @@ def probe_pi_capabilities(
             cli_path=cli_path,
             provider=provider,
             model=model,
+            model_source=model_source,
             api=api,
             base_url=base_url,
             prerequisites_ready=node_ready and cli_ready,
@@ -478,6 +491,7 @@ def probe_pi_model_resolution(
     cli_path: Path,
     provider: str,
     model: str,
+    model_source: str | None = None,
     api: str,
     base_url: str,
     prerequisites_ready: bool = True,
@@ -489,17 +503,37 @@ def probe_pi_model_resolution(
     if not runtime_path.is_file() or not resolver_path.is_file():
         return False, "Pi model resolver modules are missing"
     try:
-        return _probe_pi_model_resolution_cached(
-            node_binary,
-            str(runtime_path.resolve()),
-            str(resolver_path.resolve()),
-            provider,
-            model,
-            api,
-            base_url,
-            runtime_path.stat().st_mtime_ns,
-            resolver_path.stat().st_mtime_ns,
+        sources = (
+            (validate_pi_model_source(model_source),)
+            if model_source
+            else (("builtin", "custom") if base_url else ("builtin",))
         )
+    except ValueError as exc:
+        return False, str(exc)
+    try:
+        failures: list[str] = []
+        for source in sources:
+            ready, detail = _probe_pi_model_resolution_cached(
+                node_binary,
+                str(runtime_path.resolve()),
+                str(resolver_path.resolve()),
+                provider,
+                model,
+                source,
+                api,
+                base_url,
+                runtime_path.stat().st_mtime_ns,
+                resolver_path.stat().st_mtime_ns,
+            )
+            if ready:
+                label = (
+                    "Pi built-in model metadata"
+                    if source == "builtin"
+                    else "custom model metadata"
+                )
+                return True, f"{detail} · {label}"
+            failures.append(detail)
+        return False, failures[-1]
     except OSError as exc:
         return False, f"Pi model resolution failed: {type(exc).__name__}"
 
@@ -511,6 +545,7 @@ def _probe_pi_model_resolution_cached(
     resolver_path: str,
     provider: str,
     model: str,
+    model_source: str,
     api: str,
     base_url: str,
     runtime_mtime_ns: int,
@@ -520,6 +555,7 @@ def _probe_pi_model_resolution_cached(
     config = pi_models_config_for_values(
         provider=provider,
         model=model,
+        model_source=model_source,
         api=api,
         base_url=base_url,
     )

@@ -5,6 +5,7 @@ import pytest
 
 from app.pi_runner import (
     PI_API_KEY_ENV,
+    PI_MODEL_SOURCE_ENV,
     PiRunner,
     ensure_pi_runtime_config,
     pi_allowed_read_roots,
@@ -22,6 +23,7 @@ def _configure_runtime(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     monkeypatch.setenv("CEO_PI_SESSION_DIR", str(session_dir))
     monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
     monkeypatch.setenv("CEO_PI_MODEL", "gpt-5.6-sol")
+    monkeypatch.setenv(PI_MODEL_SOURCE_ENV, "builtin")
     monkeypatch.setenv("CEO_PI_API", "openai-responses")
     monkeypatch.setenv("CEO_PI_BASE_URL", "")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
@@ -151,7 +153,7 @@ def test_pi_runner_profile_distillation_rejects_effectful_general_policy(
         )
 
 
-def test_pi_runtime_models_config_references_env_key_instead_of_secret(
+def test_pi_runtime_models_config_preserves_builtin_model_metadata(
     tmp_path: Path, monkeypatch
 ):
     agent_dir, session_dir = _configure_runtime(monkeypatch, tmp_path)
@@ -164,11 +166,30 @@ def test_pi_runtime_models_config_references_env_key_instead_of_secret(
 
     assert path == agent_dir / "models.json"
     assert provider["baseUrl"] == "https://gateway.example/v1"
-    assert provider["api"] == "openai-responses"
     assert provider["apiKey"] == f"${PI_API_KEY_ENV}"
-    assert provider["models"][0]["id"] == "gpt-5.6-sol"
+    assert "api" not in provider
+    assert "models" not in provider
     assert "super-secret-key" not in path.read_text(encoding="utf-8")
     assert session_dir.is_dir()
+
+
+def test_pi_runtime_models_config_defines_genuinely_custom_model(
+    tmp_path: Path, monkeypatch
+):
+    agent_dir, _session_dir = _configure_runtime(monkeypatch, tmp_path)
+    monkeypatch.setenv(PI_MODEL_SOURCE_ENV, "custom")
+    monkeypatch.setenv("CEO_PI_PROVIDER", "custom-provider")
+    monkeypatch.setenv("CEO_PI_MODEL", "custom-model")
+    monkeypatch.setenv("CEO_PI_BASE_URL", "https://gateway.example/v1")
+
+    path = ensure_pi_runtime_config()
+    provider = json.loads(path.read_text(encoding="utf-8"))["providers"][
+        "custom-provider"
+    ]
+
+    assert path == agent_dir / "models.json"
+    assert provider["api"] == "openai-responses"
+    assert provider["models"] == [{"id": "custom-model", "name": "custom-model"}]
 
 
 def test_pi_models_config_keeps_builtin_provider_when_base_url_is_empty(

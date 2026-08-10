@@ -216,6 +216,7 @@ cp .env.example .env
 | `CEO_PI_NODE_BINARY` | 可选的 Node 22.19+ 绝对路径；留空时自动发现 PATH 和 `~/.nvm/versions/node` 中的兼容版本 |
 | `CEO_PI_CLI_PATH` | Pi CLI 路径，默认 `../pi/packages/coding-agent/dist/cli.js` |
 | `CEO_PI_PROVIDER` / `CEO_PI_MODEL` | Provider 和模型；默认 `openai` / `gpt-5.5` |
+| `CEO_PI_MODEL_SOURCE` | 配置页自动保存为 `builtin` 或 `custom`；匹配 Pi 内置模型时保留 reasoning、图片、上下文窗口和最大输出等原生能力 |
 | `CEO_PI_API` | API protocol：`openai-responses`、`openai-completions`、`anthropic-messages` 或 `google-generative-ai` |
 | `CEO_PI_BASE_URL` | 可选自定义 Base URL；必须是无用户名、密码、query、fragment 的绝对 HTTP(S) URL |
 | `CEO_PI_API_KEY` | Provider API Key；只保存到权限为 `0600` 的 `.env`，不进入命令参数、页面回显或 `models.json` 明文 |

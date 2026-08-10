@@ -11,6 +11,7 @@ from app.config import read_env_file
 from app.pi_runner import (
     PI_API_KEY_ENV,
     PI_EXA_MCP_URL_ENV,
+    PI_MODEL_SOURCE_ENV,
     PI_XIAOQING_ACCESS_TOKEN_ENV,
     PI_XIAOQING_MCP_URL_ENV,
     pi_models_config_for_values,
@@ -57,6 +58,7 @@ def test_pi_agent_config_page_never_renders_existing_api_key(
     html = render_config_page(active_tab="agent")
 
     assert "Pi Agent runtime" in html
+    assert "Model metadata" in html
     assert "Configured" in html
     assert "super-secret-key" not in html
     assert "xiaoqing-secret" not in html
@@ -116,6 +118,11 @@ def test_pi_agent_config_preserves_blank_api_key_and_writes_reference_only(
     assert json.loads(models_text)["providers"]["openai"]["apiKey"] == (
         f"${PI_API_KEY_ENV}"
     )
+    assert (
+        read_env_file(env_path)[PI_MODEL_SOURCE_ENV]
+        == "builtin"
+    )
+    assert "models" not in json.loads(models_text)["providers"]["openai"]
     assert (
         f"{PI_EXA_MCP_URL_ENV}=https://mcp.exa.ai/mcp"
         in env_path.read_text(encoding="utf-8")
@@ -243,12 +250,62 @@ def test_custom_model_config_uses_pi_conservative_defaults():
     config = pi_models_config_for_values(
         provider="custom-provider",
         model="custom-model",
+        model_source="custom",
         api="openai-responses",
         base_url="https://gateway.example/v1",
     )
 
     model = config["providers"]["custom-provider"]["models"][0]
     assert model == {"id": "custom-model", "name": "custom-model"}
+
+
+def test_builtin_model_config_overrides_endpoint_without_replacing_metadata():
+    config = pi_models_config_for_values(
+        provider="openai",
+        model="gpt-5.5",
+        model_source="builtin",
+        api="openai-responses",
+        base_url="https://gateway.example/v1",
+    )
+
+    provider = config["providers"]["openai"]
+    assert provider == {
+        "apiKey": f"${PI_API_KEY_ENV}",
+        "baseUrl": "https://gateway.example/v1",
+    }
+
+
+def test_pi_agent_config_selects_custom_metadata_only_when_builtin_model_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    env_path = tmp_path / ".env"
+    monkeypatch.setenv("CEO_ENV_FILE", str(env_path))
+
+    def fake_resolution(**kwargs):
+        if kwargs["model_source"] == "builtin":
+            return False, "builtin model not found"
+        return True, "custom model resolved"
+
+    monkeypatch.setattr(
+        "app.audit_web.probe_pi_model_resolution",
+        fake_resolution,
+    )
+
+    status, _, _ = handle_agent_config_post(
+        _agent_form(
+            tmp_path,
+            pi_provider="custom-provider",
+            pi_model="custom-model",
+        )
+    )
+
+    assert status == 303
+    assert read_env_file(env_path)[PI_MODEL_SOURCE_ENV] == "custom"
+    provider = json.loads(
+        (tmp_path / "pi-agent" / "models.json").read_text(encoding="utf-8")
+    )["providers"]["custom-provider"]
+    assert provider["models"] == [{"id": "custom-model", "name": "custom-model"}]
 
 
 def test_pi_agent_config_rejects_api_protocol_that_would_be_silently_ignored(

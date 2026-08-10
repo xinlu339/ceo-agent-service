@@ -211,6 +211,7 @@ json.dump({
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "isolated-codex-home"))
         monkeypatch.setenv("CEO_PI_PROVIDER", "pi-e2e-provider")
         monkeypatch.setenv("CEO_PI_MODEL", "pi-e2e-model")
+        monkeypatch.setenv("CEO_PI_MODEL_SOURCE", "custom")
         monkeypatch.setenv("CEO_PI_API", "openai-responses")
         monkeypatch.setenv("CEO_PI_BASE_URL", provider_url)
         monkeypatch.setenv("CEO_PI_API_KEY", "fake-provider-secret")

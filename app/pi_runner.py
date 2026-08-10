@@ -17,6 +17,7 @@ PI_NODE_BINARY_ENV = "CEO_PI_NODE_BINARY"
 PI_CLI_PATH_ENV = "CEO_PI_CLI_PATH"
 PI_PROVIDER_ENV = "CEO_PI_PROVIDER"
 PI_MODEL_ENV = "CEO_PI_MODEL"
+PI_MODEL_SOURCE_ENV = "CEO_PI_MODEL_SOURCE"
 PI_API_ENV = "CEO_PI_API"
 PI_BASE_URL_ENV = "CEO_PI_BASE_URL"
 PI_API_KEY_ENV = "CEO_PI_API_KEY"
@@ -36,6 +37,7 @@ PI_WORK_PROFILE_PATH_ENV = "CEO_PI_WORK_PROFILE_PATH"
 
 DEFAULT_PI_PROVIDER = "openai"
 DEFAULT_PI_MODEL = "gpt-5.5"
+DEFAULT_PI_MODEL_SOURCE = "builtin"
 DEFAULT_PI_API = "openai-responses"
 DEFAULT_PI_THINKING_LEVEL = "medium"
 DEFAULT_PI_EXA_MCP_URL = "https://mcp.exa.ai/mcp"
@@ -51,6 +53,7 @@ SUPPORTED_PI_APIS = frozenset(
 SUPPORTED_PI_THINKING_LEVELS = frozenset(
     {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 )
+SUPPORTED_PI_MODEL_SOURCES = frozenset({"builtin", "custom"})
 READ_ONLY_PI_TOOLS = (
     "workspace_read",
     "workspace_search",
@@ -328,6 +331,22 @@ def validate_pi_model(raw_value: str) -> str:
     return value
 
 
+def selected_pi_model_source() -> str:
+    configured = os.environ.get(PI_MODEL_SOURCE_ENV, "").strip()
+    if configured:
+        return validate_pi_model_source(configured)
+    if selected_pi_base_url():
+        return "custom"
+    return DEFAULT_PI_MODEL_SOURCE
+
+
+def validate_pi_model_source(raw_value: str) -> str:
+    value = raw_value.strip() or DEFAULT_PI_MODEL_SOURCE
+    if value not in SUPPORTED_PI_MODEL_SOURCES:
+        raise ValueError(f"unsupported Pi model source: {value}")
+    return value
+
+
 def selected_pi_api() -> str:
     return validate_pi_api(os.environ.get(PI_API_ENV, DEFAULT_PI_API))
 
@@ -378,6 +397,7 @@ def pi_models_config() -> dict[str, object]:
     return pi_models_config_for_values(
         provider=selected_pi_provider(),
         model=selected_pi_model(),
+        model_source=selected_pi_model_source(),
         api=selected_pi_api(),
         base_url=selected_pi_base_url(),
     )
@@ -387,29 +407,32 @@ def pi_models_config_for_values(
     *,
     provider: str,
     model: str,
+    model_source: str = "custom",
     api: str,
     base_url: str,
 ) -> dict[str, object]:
     provider = validate_pi_provider(provider)
     model = validate_pi_model(model)
+    model_source = validate_pi_model_source(model_source)
     api = validate_pi_api(api)
     base_url = validate_pi_base_url(base_url)
     provider_config: dict[str, object] = {
         "apiKey": f"${PI_API_KEY_ENV}",
     }
     if base_url:
-        provider_config.update(
-            {
-                "baseUrl": base_url,
-                "api": api,
-                "models": [
-                    {
-                        "id": model,
-                        "name": model,
-                    }
-                ],
-            }
-        )
+        provider_config["baseUrl"] = base_url
+        if model_source == "custom":
+            provider_config.update(
+                {
+                    "api": api,
+                    "models": [
+                        {
+                            "id": model,
+                            "name": model,
+                        }
+                    ],
+                }
+            )
     return {"providers": {provider: provider_config}}
 
 
