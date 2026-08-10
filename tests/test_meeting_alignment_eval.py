@@ -5,7 +5,7 @@ import pytest
 
 from app.meeting_alignment_agent import (
     MeetingAlignmentAgent,
-    MeetingAlignmentCodexRunner,
+    MeetingAlignmentPiRunner,
 )
 from app.meeting_alignment_models import MeetingSource
 
@@ -47,7 +47,7 @@ def _source(case: dict) -> MeetingSource:
 def test_live_meeting_alignment_semantics(case: dict):
     workspace = Path(__file__).resolve().parents[1]
     decision = MeetingAlignmentAgent(
-        MeetingAlignmentCodexRunner(workspace=workspace)
+        MeetingAlignmentPiRunner(workspace=workspace)
     ).decide(_source(case))
     fixture_id = case["id"]
 

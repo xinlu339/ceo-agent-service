@@ -2,18 +2,18 @@
 
 from app.wechat.memory_import import (
     ALLOWED_CATEGORIES,
-    CodexMemoryExtractionRunner,
-    CodexMemoryRecallMatcher,
+    PiMemoryExtractionRunner,
+    PiMemoryRecallMatcher,
     ExtractedMemoryCandidate,
     WechatMemoryImporter,
 )
-from app.wechat.memory_writer import CodexMemoryWriteBackend, WechatMemoryWriter
+from app.wechat.memory_writer import PiMemoryWriteBackend, WechatMemoryWriter
 
 __all__ = [
     "ALLOWED_CATEGORIES",
-    "CodexMemoryExtractionRunner",
-    "CodexMemoryRecallMatcher",
-    "CodexMemoryWriteBackend",
+    "PiMemoryExtractionRunner",
+    "PiMemoryRecallMatcher",
+    "PiMemoryWriteBackend",
     "ExtractedMemoryCandidate",
     "WechatMemoryImporter",
     "WechatMemoryWriter",

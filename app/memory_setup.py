@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-def codex_config_has_memory_connector(config_path: Path) -> bool:
+def legacy_config_has_memory_connector(config_path: Path) -> bool:
     if not config_path.exists():
         return False
     text = config_path.read_text(encoding="utf-8")
@@ -19,7 +19,7 @@ def codex_config_has_memory_connector(config_path: Path) -> bool:
     return isinstance(mcp_servers, dict) and "memory_connector" in mcp_servers
 
 
-def codex_memory_connector_url(config_path: Path) -> str:
+def legacy_memory_connector_url(config_path: Path) -> str:
     if not config_path.exists():
         return ""
     try:
@@ -46,7 +46,7 @@ def claude_config_has_memory_connector(config_path: Path) -> bool:
     return "memory_connector" in (payload.get("mcpServers") or {})
 
 
-def ensure_codex_memory_connector_config(
+def ensure_legacy_memory_connector_config(
     config_path: Path,
     *,
     url: str,
@@ -57,7 +57,7 @@ def ensure_codex_memory_connector_config(
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     backup_path = _backup_path(config_path)
     backup_path.write_text(existing, encoding="utf-8")
-    if codex_config_has_memory_connector(config_path):
+    if legacy_config_has_memory_connector(config_path):
         return backup_path
 
     block = f"""

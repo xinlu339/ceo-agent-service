@@ -1,6 +1,6 @@
 from app.dingtalk_models import (
-    CodexAction,
-    CodexDecision,
+    AgentAction,
+    AgentDecision,
     DingTalkMessage,
     SensitivityKind,
 )
@@ -38,8 +38,8 @@ def test_internal_personnel_private_requester_cannot_receive_other_person_reply(
             raise RuntimeError("manager chain should not be called")
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="subject-user-1",
         ),
@@ -63,8 +63,8 @@ def test_internal_personnel_unknown_subject_id_errors_instead_of_refusing():
             raise RuntimeError("profile not found")
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="calendar-uid-2287838390",
         ),
@@ -85,8 +85,8 @@ def test_internal_personnel_hr_private_requester_can_receive_other_person_reply(
             return True
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="subject-user-1",
         ),
@@ -105,8 +105,8 @@ def test_internal_personnel_hr_private_requester_can_review_multiple_subjects():
             return True
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
         ),
         trigger(),
@@ -132,8 +132,8 @@ def test_internal_personnel_management_requester_can_review_without_subject_id()
             return Profile()
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
         ),
         trigger(),
@@ -152,8 +152,8 @@ def test_internal_personnel_private_request_without_subject_errors_instead_of_re
             return False
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
         ),
         trigger(),
@@ -176,8 +176,8 @@ def test_internal_personnel_subject_can_receive_reply_about_self():
             raise RuntimeError("manager chain should not be needed")
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="hr-user-1",
         ),
@@ -196,8 +196,8 @@ def test_internal_personnel_sender_resolution_failure_is_error():
             raise RuntimeError("HR membership should not be needed")
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="subject-user-1",
         ),
@@ -214,8 +214,8 @@ def test_internal_personnel_sender_resolution_failure_without_subject_is_error()
             raise RuntimeError("sender identity source is not configured")
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
         ),
         trigger(),
@@ -238,8 +238,8 @@ def test_candidate_empty_requester_departments_is_error():
             return set()
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.EXTERNAL_CANDIDATE,
             candidate_context_known=True,
             candidate_department_ids=["dept-sales"],
@@ -253,8 +253,8 @@ def test_candidate_empty_requester_departments_is_error():
 
 def test_candidate_unknown_context_is_left_to_agent():
     result = PermissionGate(object()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.EXTERNAL_CANDIDATE,
         ),
         trigger(),
@@ -270,8 +270,8 @@ def test_candidate_known_context_without_department_ids_allows():
             raise RuntimeError("not cached")
 
     result = PermissionGate(Dws()).evaluate(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             sensitivity_kind=SensitivityKind.EXTERNAL_CANDIDATE,
             candidate_context_known=True,
         ),

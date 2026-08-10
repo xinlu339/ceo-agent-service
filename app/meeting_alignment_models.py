@@ -242,3 +242,15 @@ class MeetingAlignmentRun(StrictModel):
     status: str
     error: str
     created_at: str
+
+    @property
+    def agent_session_id(self) -> str:
+        return self.codex_session_id
+
+    @property
+    def transcript_start_line(self) -> int:
+        return self.codex_transcript_start_line
+
+    @property
+    def transcript_end_line(self) -> int:
+        return self.codex_transcript_end_line

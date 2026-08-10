@@ -34,7 +34,7 @@ from app.history import HistoryItem
 FAST_PATH_UNREAD_BACKOFF_TASK_ERROR = "waiting_fast_path_unread_backoff"
 SQLITE_BUSY_TIMEOUT_SECONDS = 30
 SQLITE_BUSY_TIMEOUT_MILLISECONDS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
-CODEX_SESSION_LOCK_STALE_SECONDS = 20 * 60
+AGENT_SESSION_LOCK_STALE_SECONDS = 20 * 60
 MAX_AGENT_RUN_EVENT_BYTES = 256 * 1024
 MAX_RECONCILIATION_EVENTS = 256
 _INITIALIZED_STORE_PATHS: set[Path] = set()
@@ -266,8 +266,12 @@ class ConversationRecord(BaseModel):
     single_chat: bool
     codex_session_id: str | None = None
 
+    @property
+    def agent_session_id(self) -> str | None:
+        return self.codex_session_id
 
-class CodexSessionSearchResult(BaseModel):
+
+class AgentSessionSearchResult(BaseModel):
     session_id: str
     source_type: str
     source_id: str
@@ -278,6 +282,10 @@ class CodexSessionSearchResult(BaseModel):
     bm25_score: float | None = None
     score: float = 0.0
     updated_at: str = ""
+
+
+# Compatibility name for the legacy database search-index API.
+CodexSessionSearchResult = AgentSessionSearchResult
 
 
 class ReplyTask(BaseModel):
@@ -326,6 +334,10 @@ class AgentRun(BaseModel):
     completed_at: str = ""
     created_at: str
     updated_at: str
+
+    @property
+    def agent_session_id(self) -> str:
+        return self.codex_session_id
 
 
 class AgentExecutionReceipt(BaseModel):
@@ -522,7 +534,32 @@ class OkrReviewRequest(BaseModel):
     updated_at: str = ""
 
 
+class AgentSessionLock:
+    def __init__(self, store, conversation_id: str, owner: str):
+        self.store = store
+        self.conversation_id = conversation_id
+        self.owner = owner
+
+    def __enter__(self):
+        if not self.store.acquire_agent_session_lock(self.conversation_id, self.owner):
+            raise RuntimeError(f"pi session locked: {self.conversation_id}")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        released = self.store.release_agent_session_lock(
+            self.conversation_id,
+            self.owner,
+        )
+        if not released and exc_type is None:
+            raise RuntimeError(
+                f"pi session lock release failed: {self.conversation_id}"
+            )
+        return False
+
+
 class CodexSessionLock:
+    """Compatibility wrapper for callers that still use the legacy store API."""
+
     def __init__(self, store, conversation_id: str, owner: str):
         self.store = store
         self.conversation_id = conversation_id
@@ -6018,6 +6055,12 @@ class AutoReplyStore:
             ).fetchall()
         return [self._meeting_alignment_run_from_row(row) for row in rows]
 
+    def list_meeting_alignment_runs_for_agent_session(
+        self,
+        session_id: str,
+    ) -> list[MeetingAlignmentRun]:
+        return self.list_meeting_alignment_runs_for_codex_session(session_id)
+
     def create_okr_review_request(
         self,
         *,
@@ -6152,7 +6195,7 @@ class AutoReplyStore:
                    )
                 order by updated_at, id
                 """,
-                (*params, f"-{CODEX_SESSION_LOCK_STALE_SECONDS} seconds"),
+                (*params, f"-{AGENT_SESSION_LOCK_STALE_SECONDS} seconds"),
             ).fetchall()
             request_ids = [row["id"] for row in rows]
             if not request_ids:
@@ -6327,6 +6370,10 @@ class AutoReplyStore:
             ).fetchone()
             return None if row is None else row["codex_session_id"]
 
+    def get_agent_session_id(self, conversation_id: str) -> str | None:
+        """Return the current Pi session stored in the legacy database column."""
+        return self.get_codex_session_id(conversation_id)
+
     def acquire_codex_session_lock(self, conversation_id: str, owner: str) -> bool:
         if not conversation_id.strip():
             raise ValueError("missing conversation_id")
@@ -6341,7 +6388,7 @@ class AutoReplyStore:
                 """,
                 (
                     conversation_id,
-                    f"-{CODEX_SESSION_LOCK_STALE_SECONDS} seconds",
+                    f"-{AGENT_SESSION_LOCK_STALE_SECONDS} seconds",
                 ),
             )
             cursor = db.execute(
@@ -6352,6 +6399,10 @@ class AutoReplyStore:
                 (conversation_id, owner),
             )
             return cursor.rowcount == 1
+
+    def acquire_agent_session_lock(self, conversation_id: str, owner: str) -> bool:
+        """Acquire a Pi session lock backed by the legacy lock table."""
+        return self.acquire_codex_session_lock(conversation_id, owner)
 
     def release_codex_session_lock(self, conversation_id: str, owner: str) -> bool:
         if not conversation_id.strip():
@@ -6367,6 +6418,13 @@ class AutoReplyStore:
                 (conversation_id, owner),
             )
             return cursor.rowcount == 1
+
+    def release_agent_session_lock(self, conversation_id: str, owner: str) -> bool:
+        """Release a Pi session lock backed by the legacy lock table."""
+        return self.release_codex_session_lock(conversation_id, owner)
+
+    def agent_session_lock(self, conversation_id: str, owner: str) -> AgentSessionLock:
+        return AgentSessionLock(self, conversation_id, owner)
 
     def codex_session_lock(self, conversation_id: str, owner: str) -> CodexSessionLock:
         return CodexSessionLock(self, conversation_id, owner)
@@ -6531,6 +6589,10 @@ class AutoReplyStore:
             )
             return cursor.rowcount
 
+    def reset_agent_sessions(self) -> int:
+        """Clear Pi session references stored in the legacy database column."""
+        return self.reset_codex_sessions()
+
     def clear_codex_session(self, conversation_id: str) -> int:
         with self._connect() as db:
             cursor = db.execute(
@@ -6542,6 +6604,10 @@ class AutoReplyStore:
                 (conversation_id,),
             )
             return cursor.rowcount
+
+    def clear_agent_session(self, conversation_id: str) -> int:
+        """Clear a Pi session reference stored in the legacy database column."""
+        return self.clear_codex_session(conversation_id)
 
     def clear_agent_run_session(
         self,
@@ -6578,6 +6644,9 @@ class AutoReplyStore:
                 )
                 for row in rows
             ]
+
+    def list_agent_conversations(self) -> list[ConversationRecord]:
+        return self.list_codex_conversations()
 
     def list_recent_single_chat_conversations(
         self,
@@ -8780,6 +8849,13 @@ class AutoReplyStore:
             rows = db.execute(query, args).fetchall()
             return [ReplyAttempt.model_validate(dict(row)) for row in rows]
 
+    def list_reply_attempts_for_agent_session(
+        self,
+        session_id: str,
+        limit: int | None = None,
+    ) -> list[ReplyAttempt]:
+        return self.list_reply_attempts_for_codex_session(session_id, limit=limit)
+
     def upsert_codex_session_search_index(
         self,
         *,
@@ -8881,13 +8957,16 @@ class AutoReplyStore:
                 (row_id, title, summary_text, fts_text),
             )
 
+    def upsert_agent_session_search_index(self, **kwargs) -> None:
+        self.upsert_codex_session_search_index(**kwargs)
+
     def search_codex_sessions(
         self,
         *,
         fts_query: str,
         query_embedding: list[float] | None = None,
         limit: int = 3,
-    ) -> list[CodexSessionSearchResult]:
+    ) -> list[AgentSessionSearchResult]:
         fts_scores: dict[int, float] = {}
         with self._connect() as db:
             if fts_query.strip():
@@ -8933,7 +9012,7 @@ class AutoReplyStore:
             )
             score = 0.55 * embedding_score + 0.30 * bm25_normalized
             results.append(
-                CodexSessionSearchResult(
+                AgentSessionSearchResult(
                     session_id=row["session_id"],
                     source_type=row["source_type"],
                     source_id=row["source_id"],
@@ -8948,6 +9027,19 @@ class AutoReplyStore:
             )
         results.sort(key=lambda result: result.score, reverse=True)
         return results[:limit]
+
+    def search_agent_sessions(
+        self,
+        *,
+        fts_query: str,
+        query_embedding: list[float] | None = None,
+        limit: int = 3,
+    ) -> list[AgentSessionSearchResult]:
+        return self.search_codex_sessions(
+            fts_query=fts_query,
+            query_embedding=query_embedding,
+            limit=limit,
+        )
 
     def list_reviewed_reply_attempts(
         self, limit: int | None = None

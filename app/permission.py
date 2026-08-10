@@ -3,7 +3,7 @@ from enum import StrEnum
 from pydantic import BaseModel
 
 from app.dingtalk_models import (
-    CodexDecision,
+    AgentDecision,
     DingTalkMessage,
     SensitivityKind,
 )
@@ -32,7 +32,7 @@ class PermissionGate:
         self.dws = dws
 
     def evaluate(
-        self, decision: CodexDecision, trigger: DingTalkMessage
+        self, decision: AgentDecision, trigger: DingTalkMessage
     ) -> PermissionResult:
         if decision.sensitivity_kind == SensitivityKind.GENERAL:
             return PermissionResult(action=PermissionAction.ALLOW)
@@ -46,7 +46,7 @@ class PermissionGate:
         )
 
     def _evaluate_internal_personnel(
-        self, decision: CodexDecision, trigger: DingTalkMessage
+        self, decision: AgentDecision, trigger: DingTalkMessage
     ) -> PermissionResult:
         if not trigger.single_chat:
             return PermissionResult(action=PermissionAction.ALLOW)
@@ -120,7 +120,7 @@ class PermissionGate:
         return ""
 
     def _evaluate_external_candidate(
-        self, decision: CodexDecision, trigger: DingTalkMessage
+        self, decision: AgentDecision, trigger: DingTalkMessage
     ) -> PermissionResult:
         if not trigger.single_chat:
             return PermissionResult(action=PermissionAction.ALLOW)

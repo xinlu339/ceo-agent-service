@@ -93,7 +93,7 @@ _APPMSG_URL = re.compile(r"<url>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</url>", re.S)
 def decode_message(content, ct_flag, local_type) -> str:
     """Human-readable text for any message. Text (base type 1) is returned as-is;
     a shared link/article (appmsg — v4 encodes it as ``(subtype<<32)|49``) becomes
-    ``[链接]《title》 des <url>`` so context readers (the Codex prompt + article
+    ``[链接]《title》 des <url>`` so context readers (the Pi prompt + article
     enrichment) see what was shared and can fetch it, instead of an empty string —
     for intel/news groups that non-text content is most of the signal."""
     raw = decode_content(content, ct_flag)

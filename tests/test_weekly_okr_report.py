@@ -6,7 +6,7 @@ import pytest
 
 from app.weekly_okr_report import (
     CeoAttentionItem,
-    CodexWeeklyOkrAgent,
+    PiWeeklyOkrAgent,
     DEFAULT_ARCHIVE_DIR_NAME,
     LATEST_ARCHIVE_INDEX_NAME,
     LATEST_ARCHIVE_RAW_NAME,
@@ -705,7 +705,7 @@ def test_codex_agent_analyzes_each_manager_in_a_bounded_source_file(tmp_path):
         seen.append(name)
         return json.dumps(_weekly_payload_for(name), ensure_ascii=False)
 
-    analysis = CodexWeeklyOkrAgent(
+    analysis = PiWeeklyOkrAgent(
         workspace=tmp_path,
         executor=executor,
     ).analyze(
@@ -727,7 +727,7 @@ def test_codex_agent_analyzes_each_manager_in_a_bounded_source_file(tmp_path):
         json.dumps(refreshed_source, ensure_ascii=False),
         encoding="utf-8",
     )
-    cached = CodexWeeklyOkrAgent(
+    cached = PiWeeklyOkrAgent(
         workspace=tmp_path,
         executor=executor,
     ).analyze(

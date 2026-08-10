@@ -301,7 +301,6 @@ def pi_allowed_read_roots(workspace: Path) -> tuple[Path, ...]:
             repo_root(),
             work_profile_path().parent,
             Path.home() / ".agents" / "skills",
-            Path.home() / ".codex" / "skills",
         ]
     return tuple(dict.fromkeys(path.resolve() for path in candidates))
 

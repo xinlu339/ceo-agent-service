@@ -4,7 +4,7 @@ from app.oa_approval import extract_oa_url
 
 def test_oa_module_exposes_only_reference_parsing_not_legacy_agent_runner():
     assert not hasattr(oa_approval, "OaApprovalSpecHandler")
-    assert not hasattr(oa_approval, "StructuredCodexRunner")
+    assert not hasattr(oa_approval, "StructuredPiRunner")
 
 
 def test_oa_module_has_no_dedicated_result_parser():

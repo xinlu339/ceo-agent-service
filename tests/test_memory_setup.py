@@ -3,8 +3,8 @@ import json
 from app.memory_setup import (
     claude_memory_connector_status,
     claude_config_has_memory_connector,
-    codex_config_has_memory_connector,
-    ensure_codex_memory_connector_config,
+    ensure_legacy_memory_connector_config,
+    legacy_config_has_memory_connector,
 )
 
 
@@ -12,9 +12,9 @@ def test_codex_config_detection_and_update(tmp_path):
     config = tmp_path / "config.toml"
     config.write_text('[mcp_servers.other]\nurl = "https://other"\n', encoding="utf-8")
 
-    assert codex_config_has_memory_connector(config) is False
+    assert legacy_config_has_memory_connector(config) is False
 
-    backup_path = ensure_codex_memory_connector_config(
+    backup_path = ensure_legacy_memory_connector_config(
         config,
         url="https://memory.example/mcp/",
         bearer_token_env_var="CONNECTOR_API_KEY",
@@ -37,7 +37,7 @@ def test_codex_config_update_is_idempotent(tmp_path):
         encoding="utf-8",
     )
 
-    ensure_codex_memory_connector_config(config, url="https://memory.example/mcp/")
+    ensure_legacy_memory_connector_config(config, url="https://memory.example/mcp/")
 
     assert config.read_text(encoding="utf-8").count(
         "[mcp_servers.memory_connector]"
@@ -51,9 +51,9 @@ def test_codex_config_detects_dotted_key_memory_connector(tmp_path):
         encoding="utf-8",
     )
 
-    assert codex_config_has_memory_connector(config) is True
+    assert legacy_config_has_memory_connector(config) is True
 
-    ensure_codex_memory_connector_config(config, url="https://memory.example/mcp/")
+    ensure_legacy_memory_connector_config(config, url="https://memory.example/mcp/")
 
     assert "[mcp_servers.memory_connector]" not in config.read_text(encoding="utf-8")
 

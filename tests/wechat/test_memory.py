@@ -8,10 +8,10 @@ from pydantic import ValidationError
 
 from app.store import AutoReplyStore
 from app.wechat.memory import (
-    CodexMemoryExtractionRunner, CodexMemoryWriteBackend,
+    PiMemoryExtractionRunner, PiMemoryWriteBackend,
     ExtractedMemoryCandidate, WechatMemoryImporter, WechatMemoryWriter,
 )
-from app.wechat.memory_import import CodexMemoryRecallMatcher, DurableMemoryMatch
+from app.wechat.memory_import import PiMemoryRecallMatcher, DurableMemoryMatch
 from app.wechat.models import WechatMessage
 
 
@@ -190,7 +190,7 @@ def test_run_persists_pending_candidates(store):
     account = WechatAccount(account_id="acct-1", display_name="Derek", self_user_id="self",
                             account_dir="/a", db_dir="/a/db", app_version="4")
     importer = WechatMemoryImporter(
-        store, reader=FakeReader(), codex=FakeCodex(), matcher=NoDurableMatch())
+        store, reader=FakeReader(), backend=FakeCodex(), matcher=NoDurableMatch())
     result = importer.run(account=account, target_ids=["u1"],
                           since="2026-07-01", until="2026-07-31", limit=100)
     assert result["candidates"] == 1
@@ -214,7 +214,7 @@ def test_import_does_not_change_scope_watermark(store):
     account = WechatAccount(account_id="acct-1", display_name="D", self_user_id="self",
                             account_dir="/a", db_dir="/a/db", app_version="4")
     reader = type("R", (), {"read_messages": lambda self, account, **kw: []})()
-    WechatMemoryImporter(store, reader=reader, codex=type("C", (), {"extract": lambda s, m: []})(), matcher=NoDurableMatch()).run(
+    WechatMemoryImporter(store, reader=reader, backend=type("C", (), {"extract": lambda s, m: []})(), matcher=NoDurableMatch()).run(
         account=account, target_ids=["u1"], since="2026-07-01", until="", limit=10)
     assert store.get_wechat_reply_scope("acct-1", "direct", "u1").last_active_at == before
 
@@ -295,7 +295,7 @@ def test_import_filters_non_text_before_extraction(store):
 
 
 def test_import_rejects_invalid_date_bounds_before_read(store):
-    importer = WechatMemoryImporter(store, reader=object(), codex=object())
+    importer = WechatMemoryImporter(store, reader=object(), backend=object())
     with pytest.raises(ValueError, match="invalid since"):
         importer.run(account_id="acct", target_ids=["u"], since="yesterday", until="", limit=10)
 
@@ -322,7 +322,7 @@ def test_durable_exact_match_skips_pending_candidate(store):
 
 
 def test_import_fails_closed_without_durable_matcher(store):
-    importer = WechatMemoryImporter(store, reader=object(), codex=object())
+    importer = WechatMemoryImporter(store, reader=object(), backend=object())
     from app.wechat.models import WechatAccount
     account = WechatAccount(account_id="a", display_name="D", self_user_id="self",
                             account_dir="/a", db_dir="/a/db", app_version="4")
@@ -345,7 +345,7 @@ def test_codex_recall_matcher_accepts_only_audited_memory_recall(tmp_path):
     def execute(command, prompt):
         captured["command"] = command
         return success
-    matcher = CodexMemoryRecallMatcher(tmp_path, executor=execute)
+    matcher = PiMemoryRecallMatcher(tmp_path, executor=execute)
     assert matcher.match([candidate("fact", category="fact")])["fact"].relation == "exact"
     assert captured["command"][captured["command"].index("--tools") + 1] == (
         "memory_recall"
@@ -356,26 +356,26 @@ def test_codex_recall_matcher_accepts_only_audited_memory_recall(tmp_path):
         '"toolName": "memory_write"',
     )
     with pytest.raises(RuntimeError, match="only memory_recall"):
-        CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: malicious).match(
+        PiMemoryRecallMatcher(tmp_path, executor=lambda c, p: malicious).match(
             [candidate("fact", category="fact")])
 
     unrelated_events = [json.loads(line) for line in success.splitlines()]
     unrelated_events[0]["args"]["query"] = "unrelated"
     unrelated = "\n".join(json.dumps(event) for event in unrelated_events)
     with pytest.raises(RuntimeError, match="query does not match"):
-        CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: unrelated).match(
+        PiMemoryRecallMatcher(tmp_path, executor=lambda c, p: unrelated).match(
             [candidate("fact", category="fact")])
     missing_memories = success.replace('"memories":', '"items":')
     with pytest.raises(RuntimeError, match="memories list"):
-        CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: missing_memories).match(
+        PiMemoryRecallMatcher(tmp_path, executor=lambda c, p: missing_memories).match(
             [candidate("fact", category="fact")])
     fabricated = success.replace("durable fact", "unrelated evidence", 1)
     with pytest.raises(RuntimeError, match="same recalled memory"):
-        CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: fabricated).match(
+        PiMemoryRecallMatcher(tmp_path, executor=lambda c, p: fabricated).match(
             [candidate("fact", category="fact")])
     fabricated_id = success.replace("mem-1", "other-id", 1)
     with pytest.raises(RuntimeError, match="same recalled memory"):
-        CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: fabricated_id).match(
+        PiMemoryRecallMatcher(tmp_path, executor=lambda c, p: fabricated_id).match(
             [candidate("fact", category="fact")])
 
 
@@ -394,7 +394,7 @@ def test_codex_recall_matcher_accepts_real_empty_memories_as_none(tmp_path):
     def execute(command, prompt):
         captured["prompt"] = prompt
         return raw
-    result = CodexMemoryRecallMatcher(tmp_path, executor=execute).match(
+    result = PiMemoryRecallMatcher(tmp_path, executor=execute).match(
         [candidate("fact", category="fact")])
     assert result["fact"].relation == "none"
     assert "relation=none 时 memory_id、evidence、merged_statement 必须全部为空字符串" in (
@@ -441,7 +441,7 @@ def test_matcher_rejects_observed_none_with_explanation_evidence(tmp_path):
         final=final,
     )
     with pytest.raises(RuntimeError, match="no structured result"):
-        CodexMemoryRecallMatcher(tmp_path, executor=lambda command, prompt: raw).match([
+        PiMemoryRecallMatcher(tmp_path, executor=lambda command, prompt: raw).match([
             candidate("fact", category="fact")])
 
 
@@ -459,7 +459,7 @@ def test_codex_recall_support_must_come_from_same_memory_object(tmp_path):
         call_id="r1",
     )
     with pytest.raises(RuntimeError, match="same recalled memory"):
-        CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: raw).match(
+        PiMemoryRecallMatcher(tmp_path, executor=lambda c, p: raw).match(
             [candidate("fact", category="fact")])
 
 
@@ -476,7 +476,7 @@ def test_codex_recall_explicit_is_error_fails(tmp_path):
         call_id="r1",
     )
     with pytest.raises(RuntimeError, match="tool error"):
-        CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: raw).match(
+        PiMemoryRecallMatcher(tmp_path, executor=lambda c, p: raw).match(
             [candidate("fact", category="fact")])
 
 
@@ -497,7 +497,7 @@ def test_codex_recall_rejects_blank_or_too_short_evidence(tmp_path, bad_evidence
         call_id="r1",
     )
     with pytest.raises(RuntimeError, match="no structured result"):
-        CodexMemoryRecallMatcher(tmp_path, executor=lambda c, p: raw).match(
+        PiMemoryRecallMatcher(tmp_path, executor=lambda c, p: raw).match(
             [candidate("fact", category="fact")])
 
 
@@ -704,7 +704,7 @@ def test_codex_extraction_runner_parses_batch_envelope_and_forbids_write(tmp_pat
         sender_display_name="U", conversation_type="direct", direction="inbound",
         sent_at="2026-07-17T10:00:00+08:00", kind="text", text="hello",
         source_version="4")
-    result = CodexMemoryExtractionRunner(tmp_path, executor=execute).extract([message])
+    result = PiMemoryExtractionRunner(tmp_path, executor=execute).extract([message])
     assert [item.statement for item in result] == ["durable fact"]
     assert "不会提供 memory_write" in captured["prompt"]
     assert "--output-schema" not in captured["command"]
@@ -722,7 +722,7 @@ def test_pi_extraction_parses_live_message_end(tmp_path):
             },
         }
     )
-    result = CodexMemoryExtractionRunner(
+    result = PiMemoryExtractionRunner(
         tmp_path, executor=lambda command, prompt: raw).extract([])
     assert result[0].statement == "durable fact"
 
@@ -801,7 +801,7 @@ def test_pi_memory_write_backend_accepts_one_confirmed_reviewed_tool_event(tmp_p
         captured.update(command=command, prompt=prompt)
         return raw
 
-    backend = CodexMemoryWriteBackend(tmp_path, executor=execute)
+    backend = PiMemoryWriteBackend(tmp_path, executor=execute)
 
     assert backend.write(
         "final", source_time_start="2026-07-17", source_time_end=""
@@ -827,7 +827,7 @@ def test_recall_matcher_uses_one_exact_query_per_candidate(tmp_path):
             final=final,
         )
 
-    result = CodexMemoryRecallMatcher(tmp_path, executor=execute).match([
+    result = PiMemoryRecallMatcher(tmp_path, executor=execute).match([
         candidate("zeta fact", category="fact"),
         candidate("alpha fact", category="fact", source_message_ids=("m2",)),
     ])
@@ -837,7 +837,7 @@ def test_recall_matcher_uses_one_exact_query_per_candidate(tmp_path):
 
 def test_recall_matcher_rejects_unbounded_candidate_count(tmp_path):
     with pytest.raises(ValueError, match="at most 100"):
-        CodexMemoryRecallMatcher(
+        PiMemoryRecallMatcher(
             tmp_path, executor=lambda command, prompt: pytest.fail("must not execute")
         ).match([candidate(f"fact {index}", category="fact") for index in range(101)])
 
@@ -858,7 +858,7 @@ def test_extraction_filters_sensitive_input_and_runs_read_only_without_tools(
             sent_at="2026-07-17T10:00:00+08:00", kind=kind, text=text,
             source_version="4")
 
-    CodexMemoryExtractionRunner(tmp_path, executor=execute).extract([
+    PiMemoryExtractionRunner(tmp_path, executor=execute).extract([
         message("credential", "password is hunter2"),
         message("medical", "诊断为高血压"),
         message("financial", "账户余额 1000000"),
@@ -896,7 +896,7 @@ def test_extraction_fails_closed_if_pi_emits_any_tool_call(tmp_path):
         ]
     )
     with pytest.raises(RuntimeError, match="must not call tools"):
-        CodexMemoryExtractionRunner(
+        PiMemoryExtractionRunner(
             tmp_path, executor=lambda command, prompt: raw
         ).extract([])
 

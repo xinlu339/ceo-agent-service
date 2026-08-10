@@ -177,14 +177,14 @@ def test_import_memory_uses_unique_ready_account_and_explicit_bounds(tmp_path, m
         app_version="4.1.10", self_user_id="self-1", capability_status="ready")
     captured = {}
     class Importer:
-        def __init__(self, store, reader, codex, matcher):
-            captured.update(store=store, reader=reader, codex=codex, matcher=matcher)
+        def __init__(self, store, reader, backend, matcher):
+            captured.update(store=store, reader=reader, backend=backend, matcher=matcher)
         def run(self, **kwargs):
             captured.update(kwargs)
             return {"import_run_id":"run", "messages":3, "candidates":1}
     monkeypatch.setattr(cli, "WechatMemoryImporter", Importer)
-    monkeypatch.setattr(cli, "CodexMemoryExtractionRunner", lambda workspace: "runner")
-    monkeypatch.setattr(cli, "CodexMemoryRecallMatcher", lambda workspace: "matcher")
+    monkeypatch.setattr(cli, "PiMemoryExtractionRunner", lambda workspace: "runner")
+    monkeypatch.setattr(cli, "PiMemoryRecallMatcher", lambda workspace: "matcher")
     monkeypatch.setattr(cli, "_reader", lambda **kwargs: "reader")
     args = SimpleNamespace(db=str(db), account_id="acct-1", target_id=["u1", "g@chatroom"],
                            since="2026-07-01", until="2026-07-20", limit=50)
@@ -255,7 +255,7 @@ def test_produce_once_builds_direction_aware_reader(tmp_path, monkeypatch):
 
 
 def test_consume_once_builds_direction_aware_reader(tmp_path, monkeypatch):
-    from app import codex_decision
+    from app.wechat import decision_runner
 
     db = tmp_path / "worker.sqlite3"
     store = AutoReplyStore(db)
@@ -266,7 +266,7 @@ def test_consume_once_builds_direction_aware_reader(tmp_path, monkeypatch):
     reader = object()
     built_with = []
     captured = []
-    monkeypatch.setattr(codex_decision, "CodexDecisionRunner", lambda **kwargs: object())
+    monkeypatch.setattr(decision_runner, "WechatDecisionRunner", lambda **kwargs: object())
     monkeypatch.setattr(
         cli, "_reader",
         lambda: built_with.append(True) or reader,

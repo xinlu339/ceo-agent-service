@@ -84,11 +84,11 @@ def mcp_doctor_state_path(db_path: Path) -> Path:
 
 def check_mcp_statuses(
     *,
-    codex_config_path: Path | None = None,
+    memory_config_path: Path | None = None,
     verify_live: bool = False,
     memory_reachability_checker: Callable[[str], None] | None = None,
 ) -> list[McpStatus]:
-    memory_env = _memory_environment(codex_config_path)
+    memory_env = _memory_environment(memory_config_path)
     report = probe_pi_capabilities(memory_env=memory_env)
     return [
         _memory_connector_status(
@@ -146,12 +146,12 @@ def record_and_notify_mcp_doctor(
 def mcp_doctor_report(
     *,
     db_path: Path,
-    codex_config_path: Path | None = None,
+    memory_config_path: Path | None = None,
     verify_live: bool = False,
     notify: bool = False,
 ) -> dict[str, object]:
     statuses = check_mcp_statuses(
-        codex_config_path=codex_config_path,
+        memory_config_path=memory_config_path,
         verify_live=verify_live,
     )
     if notify:

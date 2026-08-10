@@ -64,7 +64,7 @@ class DingTalkMessage(BaseModel):
         return str(value).strip().casefold()
 
 
-class CodexAction(StrEnum):
+class AgentAction(StrEnum):
     SEND_REPLY = "send_reply"
     ASK_CLARIFYING_QUESTION = "ask_clarifying_question"
     HANDOFF_TO_HUMAN = "handoff_to_human"
@@ -85,8 +85,8 @@ class CalendarResponseStatus(StrEnum):
     DECLINED = "declined"
 
 
-class CodexDecision(BaseModel):
-    action: CodexAction
+class AgentDecision(BaseModel):
+    action: AgentAction
     reply_text: str = ""
     reason: str = ""
     ding_self: bool = False

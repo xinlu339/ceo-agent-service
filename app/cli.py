@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, NonNegativeInt, PositiveInt
 
-from app.codex_decision import CodexDecisionRunner
+from app.agent_decision import AgentDecisionRunner
 from app.database_backup import (
     BACKUP_CHECK_INTERVAL_SECONDS,
     backup_database_if_due,
@@ -73,16 +73,16 @@ from app.meeting_alignment import (
     queue_recent_meeting_alignment_replay,
     recover_meeting_alignment_jobs,
 )
-from app.meeting_alignment_agent import MeetingAlignmentCodexRunner
+from app.meeting_alignment_agent import MeetingAlignmentPiRunner
 from app.org_cache import (
     CachedDwsClient,
     CachedOrgDirectory,
     refresh_org_cache,
 )
 from app.store import AutoReplyStore
-from app.task_agent import TaskAgentCodexRunner, TaskAgentRunner, process_work_item
+from app.task_agent import TaskAgentPiRunner, TaskAgentRunner, process_work_item
 from app.task_memory_backfill import (
-    ProjectMemoryContextCodexRunner,
+    ProjectMemoryContextPiRunner,
     validate_project_memory_context,
 )
 from app.task_models import ProjectMemoryContext
@@ -102,8 +102,8 @@ from app.work_profile import (
 )
 from app.worker import (
     DingTalkAutoReplyWorker,
-    _is_codex_authorization_wait_reason,
-    _normalize_codex_stop_error_reason,
+    _is_agent_authorization_wait_reason,
+    _normalize_agent_stop_error_reason,
 )
 from app.weekly_okr_report import (
     DEFAULT_SCHEDULE_HOUR,
@@ -126,11 +126,13 @@ WORK_SUMMARY_TRANSIENT_ERROR_MARKERS = (
     "connection refused",
     "pi process timed out",
     "task agent pi timed out",
-    "codex exec timed out",
-    "task agent codex timed out",
     "non-discard task decision requires memory_recall tool event",
     "unexpected status 401 unauthorized",
     "missing bearer or basic authentication",
+)
+LEGACY_WORK_SUMMARY_TRANSIENT_ERROR_MARKERS = (
+    "codex exec timed out",
+    "task agent codex timed out",
 )
 
 WORK_SUMMARY_DISCARDABLE_ERROR_MARKERS = (
@@ -151,8 +153,12 @@ DEFAULT_WORKSPACE = Path.home() / "Documents" / "memory"
 OKR_LIVE_SOURCE_COMMAND_ENV = "CEO_OKR_LIVE_SOURCE_COMMAND"
 OKR_SOURCE_KIND_ENV = "CEO_OKR_SOURCE_KIND"
 OKR_OBJECTIVE_RULE_ID_ENV = "CEO_OKR_OBJECTIVE_RULE_ID"
-OKR_REVIEW_CODEX_TIMEOUT_SECONDS = 1200
-OKR_REVIEW_CODEX_IDLE_TIMEOUT_SECONDS = 900
+OKR_REVIEW_PI_TIMEOUT_SECONDS = 1200
+OKR_REVIEW_PI_IDLE_TIMEOUT_SECONDS = 900
+LEGACY_CODEX_TIMEOUT_ENV = "CEO_CODEX_TIMEOUT_SECONDS"
+LEGACY_CODEX_IDLE_TIMEOUT_ENV = "CEO_CODEX_IDLE_TIMEOUT_SECONDS"
+LEGACY_TASK_CODEX_TIMEOUT_ENV = "CEO_TASK_CODEX_TIMEOUT_SECONDS"
+LEGACY_TASK_CODEX_IDLE_TIMEOUT_ENV = "CEO_TASK_CODEX_IDLE_TIMEOUT_SECONDS"
 WORK_SUMMARY_INPUT_STALE_GRACE_SECONDS = 60
 run_audit_web = None
 
@@ -181,10 +187,10 @@ class WorkerSettings(BaseModel):
     ding_receiver_user_id: str | None = None
     dws_transient_retry_attempts: PositiveInt = 3
     dws_transient_retry_delay_seconds: float = 1.0
-    codex_timeout_seconds: PositiveInt = 1200
-    codex_idle_timeout_seconds: PositiveInt = 900
-    task_codex_timeout_seconds: PositiveInt = 1200
-    task_codex_idle_timeout_seconds: PositiveInt = 900
+    pi_timeout_seconds: PositiveInt = 1200
+    pi_idle_timeout_seconds: PositiveInt = 900
+    task_pi_timeout_seconds: PositiveInt = 1200
+    task_pi_idle_timeout_seconds: PositiveInt = 900
     task_work_item_interval_seconds: PositiveInt = 60
     task_daily_interval_seconds: PositiveInt = 86_400
     task_follow_up_interval_seconds: PositiveInt = 60
@@ -379,12 +385,12 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument(
             "--pi-timeout-seconds",
             "--codex-timeout-seconds",
-            dest="codex_timeout_seconds",
+            dest="pi_timeout_seconds",
             type=_positive_int,
             default=_positive_int(
                 os.getenv(
                     "CEO_PI_TIMEOUT_SECONDS",
-                    os.getenv("CEO_CODEX_TIMEOUT_SECONDS", str(defaults.codex_timeout_seconds)),
+                    os.getenv(LEGACY_CODEX_TIMEOUT_ENV, str(defaults.pi_timeout_seconds)),
                 )
             ),
             help="maximum seconds to wait for one Pi decision; the Codex option is a compatibility alias",
@@ -392,14 +398,14 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument(
             "--pi-idle-timeout-seconds",
             "--codex-idle-timeout-seconds",
-            dest="codex_idle_timeout_seconds",
+            dest="pi_idle_timeout_seconds",
             type=_positive_int,
             default=_positive_int(
                 os.getenv(
                     "CEO_PI_IDLE_TIMEOUT_SECONDS",
                     os.getenv(
-                        "CEO_CODEX_IDLE_TIMEOUT_SECONDS",
-                        str(defaults.codex_idle_timeout_seconds),
+                        LEGACY_CODEX_IDLE_TIMEOUT_ENV,
+                        str(defaults.pi_idle_timeout_seconds),
                     ),
                 )
             ),
@@ -408,14 +414,14 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument(
             "--task-pi-timeout-seconds",
             "--task-codex-timeout-seconds",
-            dest="task_codex_timeout_seconds",
+            dest="task_pi_timeout_seconds",
             type=_positive_int,
             default=_positive_int(
                 os.getenv(
                     "CEO_TASK_PI_TIMEOUT_SECONDS",
                     os.getenv(
-                        "CEO_TASK_CODEX_TIMEOUT_SECONDS",
-                        str(defaults.task_codex_timeout_seconds),
+                        LEGACY_TASK_CODEX_TIMEOUT_ENV,
+                        str(defaults.task_pi_timeout_seconds),
                     ),
                 )
             ),
@@ -424,14 +430,14 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument(
             "--task-pi-idle-timeout-seconds",
             "--task-codex-idle-timeout-seconds",
-            dest="task_codex_idle_timeout_seconds",
+            dest="task_pi_idle_timeout_seconds",
             type=_positive_int,
             default=_positive_int(
                 os.getenv(
                     "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS",
                     os.getenv(
-                        "CEO_TASK_CODEX_IDLE_TIMEOUT_SECONDS",
-                        str(defaults.task_codex_idle_timeout_seconds),
+                        LEGACY_TASK_CODEX_IDLE_TIMEOUT_ENV,
+                        str(defaults.task_pi_idle_timeout_seconds),
                     ),
                 )
             ),
@@ -469,12 +475,14 @@ def build_parser() -> argparse.ArgumentParser:
                 help="memory connector MCP URL",
             )
             subparser.add_argument(
+                "--legacy-memory-config",
                 "--codex-config",
+                dest="memory_config",
                 default=str(
                     Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser()
                     / "config.toml"
                 ),
-                help="Codex config.toml path",
+                help="legacy MCP config.toml path; --codex-config is a compatibility alias",
             )
             subparser.add_argument(
                 "--claude-config",
@@ -489,12 +497,14 @@ def build_parser() -> argparse.ArgumentParser:
             )
         if command == "doctor-mcp":
             subparser.add_argument(
+                "--memory-config",
                 "--codex-config",
+                dest="memory_config",
                 default=str(
                     Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser()
                     / "config.toml"
                 ),
-                help="Codex config.toml path",
+                help="Memory Connector config.toml path; --codex-config is a compatibility alias",
             )
             subparser.add_argument(
                 "--verify-live",
@@ -762,10 +772,10 @@ def settings_from_args(args: argparse.Namespace) -> WorkerSettings:
         ding_receiver_user_id=os.getenv("CEO_DING_RECEIVER_USER_ID"),
         dws_transient_retry_attempts=args.dws_transient_retry_attempts,
         dws_transient_retry_delay_seconds=args.dws_transient_retry_delay_seconds,
-        codex_timeout_seconds=args.codex_timeout_seconds,
-        codex_idle_timeout_seconds=args.codex_idle_timeout_seconds,
-        task_codex_timeout_seconds=args.task_codex_timeout_seconds,
-        task_codex_idle_timeout_seconds=args.task_codex_idle_timeout_seconds,
+        pi_timeout_seconds=args.pi_timeout_seconds,
+        pi_idle_timeout_seconds=args.pi_idle_timeout_seconds,
+        task_pi_timeout_seconds=args.task_pi_timeout_seconds,
+        task_pi_idle_timeout_seconds=args.task_pi_idle_timeout_seconds,
         task_work_item_interval_seconds=getattr(
             args,
             "task_work_item_interval_seconds",
@@ -811,17 +821,17 @@ def create_worker(settings: WorkerSettings) -> DingTalkAutoReplyWorker:
         transient_retry_delay_seconds=settings.dws_transient_retry_delay_seconds,
     )
     cached_dws = CachedDwsClient(dws=dws, org_directory=CachedOrgDirectory(store))
-    codex = CodexDecisionRunner(
+    agent = AgentDecisionRunner(
         workspace=settings.workspace,
-        timeout_seconds=settings.codex_timeout_seconds,
-        idle_timeout_seconds=settings.codex_idle_timeout_seconds,
+        timeout_seconds=settings.pi_timeout_seconds,
+        idle_timeout_seconds=settings.pi_idle_timeout_seconds,
     )
     style_profile = _load_style_profile(settings.corpus_dir)
     style_records = load_corpus_records(settings.corpus_dir / "style_corpus.csv")
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=cached_dws,
-        codex=codex,
+        agent=agent,
         dry_run=settings.dry_run,
         style_profile=style_profile,
         style_records=style_records,
@@ -981,10 +991,10 @@ def process_work_items_command(settings: WorkerSettings) -> int:
         _work_summary_processing_stale_seconds(settings)
     )
     runner = TaskAgentRunner(
-        TaskAgentCodexRunner(
+        TaskAgentPiRunner(
             workspace=settings.workspace,
-            timeout_seconds=settings.task_codex_timeout_seconds,
-            idle_timeout_seconds=settings.task_codex_idle_timeout_seconds,
+            timeout_seconds=settings.task_pi_timeout_seconds,
+            idle_timeout_seconds=settings.task_pi_idle_timeout_seconds,
         )
     )
     dws = None
@@ -1007,7 +1017,7 @@ def process_work_items_command(settings: WorkerSettings) -> int:
             processed += 1
         except Exception as exc:
             raw_error = str(exc)
-            error = _normalize_codex_stop_error_reason(raw_error)
+            error = _normalize_agent_stop_error_reason(raw_error)
             if _should_retry_work_summary_input(exc, work_input.attempts):
                 store.schedule_work_summary_input_retry(
                     work_input.id,
@@ -1029,13 +1039,19 @@ def _should_retry_work_summary_input(error: Exception | str, attempts: int) -> b
     if isinstance(error, Exception) and is_external_dependency_error(error):
         return True
     error_text = str(error)
-    normalized_error = _normalize_codex_stop_error_reason(error_text)
-    if _is_codex_authorization_wait_reason(normalized_error):
+    normalized_error = _normalize_agent_stop_error_reason(error_text)
+    if _is_agent_authorization_wait_reason(normalized_error):
         return True
     if attempts >= WORK_SUMMARY_TRANSIENT_RETRY_ATTEMPTS:
         return False
     normalized = error_text.lower()
-    return any(marker in normalized for marker in WORK_SUMMARY_TRANSIENT_ERROR_MARKERS)
+    return any(
+        marker in normalized
+        for marker in (
+            *WORK_SUMMARY_TRANSIENT_ERROR_MARKERS,
+            *LEGACY_WORK_SUMMARY_TRANSIENT_ERROR_MARKERS,
+        )
+    )
 
 
 def _should_discard_work_summary_input(error: str) -> bool:
@@ -1059,10 +1075,10 @@ def _work_summary_retry_available_at(attempts: int) -> str:
 def backfill_task_memory_context_command(settings: WorkerSettings) -> int:
     store = AutoReplyStore(settings.db_path)
     limit = 20 if settings.max_batches is None else settings.max_batches
-    runner = ProjectMemoryContextCodexRunner(
+    runner = ProjectMemoryContextPiRunner(
         workspace=settings.workspace,
-        timeout_seconds=settings.codex_timeout_seconds,
-        idle_timeout_seconds=settings.codex_idle_timeout_seconds,
+        timeout_seconds=settings.pi_timeout_seconds,
+        idle_timeout_seconds=settings.pi_idle_timeout_seconds,
     )
     updated = 0
     failed = 0
@@ -1143,7 +1159,7 @@ def backfill_routine_process_todos_command(
 
 def process_okr_reviews_command(settings: WorkerSettings) -> int:
     from app.okr_review import process_okr_review_request
-    from app.structured_agent import AgentSpec, StructuredCodexRunner
+    from app.structured_agent import AgentSpec, StructuredPiRunner
 
     store = AutoReplyStore(settings.db_path)
     recovered_requests = store.reset_recoverable_okr_review_requests(
@@ -1175,16 +1191,16 @@ def process_okr_reviews_command(settings: WorkerSettings) -> int:
             "Return only AgentEnvelope JSON."
         ),
     )
-    runner = StructuredCodexRunner(
+    runner = StructuredPiRunner(
         store=store,
         workspace=settings.workspace,
         spec=spec,
         timeout_seconds=max(
-            settings.codex_timeout_seconds, OKR_REVIEW_CODEX_TIMEOUT_SECONDS
+            settings.pi_timeout_seconds, OKR_REVIEW_PI_TIMEOUT_SECONDS
         ),
         idle_timeout_seconds=max(
-            settings.codex_idle_timeout_seconds,
-            OKR_REVIEW_CODEX_IDLE_TIMEOUT_SECONDS,
+            settings.pi_idle_timeout_seconds,
+            OKR_REVIEW_PI_IDLE_TIMEOUT_SECONDS,
         ),
         persist_conversation_session=False,
     )
@@ -1473,12 +1489,12 @@ def daily_task_maintenance_command(settings: WorkerSettings) -> dict[str, int]:
 def setup_memory_connector_command(
     *,
     memory_url: str,
-    codex_config: str,
+    memory_config: str,
     claude_config: str,
 ) -> dict[str, str]:
     from app.memory_setup import (
         claude_memory_connector_status,
-        ensure_codex_memory_connector_config,
+        ensure_legacy_memory_connector_config,
     )
 
     if not memory_url.strip():
@@ -1487,16 +1503,16 @@ def setup_memory_connector_command(
         )
 
     url = memory_url.strip()
-    codex_config_path = Path(codex_config).expanduser()
+    legacy_config_path = Path(memory_config).expanduser()
     claude_config_path = Path(claude_config).expanduser()
-    codex_backup = ensure_codex_memory_connector_config(
-        codex_config_path,
+    legacy_backup = ensure_legacy_memory_connector_config(
+        legacy_config_path,
         url=url,
     )
     claude_status = claude_memory_connector_status(claude_config_path)
     result = {
-        "codex_config": str(codex_config_path),
-        "codex_backup": str(codex_backup),
+        "codex_config": str(legacy_config_path),
+        "codex_backup": str(legacy_backup),
         "claude_config": str(claude_config_path),
         "claude_status": claude_status["status"],
         "claude_manual_action": claude_status["manual_action"],
@@ -1516,7 +1532,7 @@ def setup_memory_connector_command(
 def doctor_mcp_command(
     settings: WorkerSettings,
     *,
-    codex_config: str,
+    memory_config: str,
     verify_live: bool = False,
     notify: bool = False,
 ) -> dict[str, object]:
@@ -1524,7 +1540,7 @@ def doctor_mcp_command(
 
     report = mcp_doctor_report(
         db_path=settings.db_path,
-        codex_config_path=Path(codex_config).expanduser(),
+        memory_config_path=Path(memory_config).expanduser(),
         verify_live=verify_live,
         notify=notify,
     )
@@ -1950,7 +1966,7 @@ def export_feedback_command(
 
 def reset_pi_sessions_command(settings: WorkerSettings) -> int:
     store = AutoReplyStore(settings.db_path)
-    cleared = store.reset_codex_sessions()
+    cleared = store.reset_agent_sessions()
     print(f"reset-pi-sessions cleared={cleared}", flush=True)
     return cleared
 
@@ -2233,10 +2249,10 @@ def run_meeting_consumer_loop(
 ) -> None:
     store = AutoReplyStore(settings.db_path)
     dws = _create_meeting_dws(settings)
-    runner = MeetingAlignmentCodexRunner(
+    runner = MeetingAlignmentPiRunner(
         workspace=settings.workspace,
-        timeout_seconds=settings.codex_timeout_seconds,
-        idle_timeout_seconds=settings.codex_idle_timeout_seconds,
+        timeout_seconds=settings.pi_timeout_seconds,
+        idle_timeout_seconds=settings.pi_idle_timeout_seconds,
     )
     embedding_client = (
         EmbeddingClient(
@@ -2442,8 +2458,8 @@ def _run_wechat_loop(settings: WorkerSettings, role: str) -> None:
 
         runner = WechatDecisionRunner(
             workspace=settings.workspace,
-            timeout_seconds=settings.codex_timeout_seconds,
-            idle_timeout_seconds=settings.codex_idle_timeout_seconds,
+            timeout_seconds=settings.pi_timeout_seconds,
+            idle_timeout_seconds=settings.pi_idle_timeout_seconds,
         )
     wsender = None
     if role == "sender":
@@ -2517,7 +2533,7 @@ def run_service(
     _recover_meeting_alignment_jobs_on_service_start(settings)
     doctor_mcp_command(
         settings,
-        codex_config=str(
+        memory_config=str(
             Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"
         ),
         notify=True,
@@ -2679,8 +2695,8 @@ def _recover_okr_review_requests_on_service_start(settings: WorkerSettings) -> i
 def _work_summary_processing_stale_seconds(settings: WorkerSettings) -> int:
     return (
         max(
-            int(settings.task_codex_timeout_seconds),
-            int(settings.task_codex_idle_timeout_seconds),
+            int(settings.task_pi_timeout_seconds),
+            int(settings.task_pi_idle_timeout_seconds),
         )
         + WORK_SUMMARY_INPUT_STALE_GRACE_SECONDS
     )
@@ -2689,10 +2705,10 @@ def _work_summary_processing_stale_seconds(settings: WorkerSettings) -> int:
 def _okr_review_processing_stale_seconds(settings: WorkerSettings) -> int:
     return (
         max(
-            int(settings.codex_timeout_seconds),
-            int(settings.codex_idle_timeout_seconds),
-            OKR_REVIEW_CODEX_TIMEOUT_SECONDS,
-            OKR_REVIEW_CODEX_IDLE_TIMEOUT_SECONDS,
+            int(settings.pi_timeout_seconds),
+            int(settings.pi_idle_timeout_seconds),
+            OKR_REVIEW_PI_TIMEOUT_SECONDS,
+            OKR_REVIEW_PI_IDLE_TIMEOUT_SECONDS,
         )
         + WORK_SUMMARY_INPUT_STALE_GRACE_SECONDS
     )
@@ -2981,7 +2997,7 @@ def main() -> None:
     elif args.command == "doctor-mcp":
         doctor_mcp_command(
             settings,
-            codex_config=args.codex_config,
+            memory_config=args.memory_config,
             verify_live=args.verify_live,
             notify=args.notify,
         )
@@ -2990,7 +3006,7 @@ def main() -> None:
     elif args.command == "setup-memory-connector":
         setup_memory_connector_command(
             memory_url=args.memory_url,
-            codex_config=args.codex_config,
+            memory_config=args.memory_config,
             claude_config=args.claude_config,
         )
     elif args.command == "build-corpus":

@@ -266,7 +266,7 @@ def _direct_agent_pipeline(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=ContextOnlyDws(trigger),
-        codex=object(),
+        agent=object(),
         direct_agent_runner=runner,
         channel_gates={
             "dingtalk": ReadyGate("dingtalk"),

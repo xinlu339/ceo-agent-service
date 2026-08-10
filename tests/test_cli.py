@@ -345,7 +345,7 @@ def test_parser_supports_setup_memory_connector():
 
     assert args.command == "setup-memory-connector"
     assert args.memory_url == "https://memory.example/mcp/"
-    assert args.codex_config == "/tmp/codex.toml"
+    assert args.memory_config == "/tmp/codex.toml"
     assert args.claude_config == "/tmp/claude.json"
 
 
@@ -358,7 +358,7 @@ def test_setup_memory_connector_command_updates_codex_and_reports_claude(
 
     result = cli.setup_memory_connector_command(
         memory_url="https://memory.example/mcp/",
-        codex_config=str(codex_config),
+        memory_config=str(codex_config),
         claude_config=str(claude_config),
     )
 
@@ -378,7 +378,7 @@ def test_setup_memory_connector_command_requires_memory_url(tmp_path):
     with pytest.raises(SystemExit):
         cli.setup_memory_connector_command(
             memory_url="",
-            codex_config=str(tmp_path / "config.toml"),
+            memory_config=str(tmp_path / "config.toml"),
             claude_config=str(tmp_path / "claude.json"),
         )
 
@@ -697,7 +697,7 @@ def test_process_okr_reviews_command_processes_and_sends_reply(
         store.mark_okr_review_request_done(request.id, codex_session_id="session-okr")
         return "韩露 2026 Q2 OKR 审核结果"
 
-    monkeypatch.setattr("app.structured_agent.StructuredCodexRunner", FakeStructuredRunner)
+    monkeypatch.setattr("app.structured_agent.StructuredPiRunner", FakeStructuredRunner)
     monkeypatch.setattr("app.okr_review.process_okr_review_request", fake_process)
     monkeypatch.setattr(cli, "DwsClient", FakeDwsClient)
 
@@ -785,7 +785,7 @@ def test_process_okr_reviews_command_dry_run_does_not_send_reply(
         store.mark_okr_review_request_done(request.id, codex_session_id="session-okr")
         return "韩露 2026 Q2 OKR 审核结果"
 
-    monkeypatch.setattr("app.structured_agent.StructuredCodexRunner", FakeStructuredRunner)
+    monkeypatch.setattr("app.structured_agent.StructuredPiRunner", FakeStructuredRunner)
     monkeypatch.setattr("app.okr_review.process_okr_review_request", fake_process)
     monkeypatch.setattr(cli, "DwsClient", FakeDwsClient)
 
@@ -845,7 +845,7 @@ def test_process_okr_reviews_command_marks_process_failure_and_reraises(
     def fake_process(*, store, runner, request, single_chat):
         raise RuntimeError("codex schema failed")
 
-    monkeypatch.setattr("app.structured_agent.StructuredCodexRunner", FakeStructuredRunner)
+    monkeypatch.setattr("app.structured_agent.StructuredPiRunner", FakeStructuredRunner)
     monkeypatch.setattr("app.okr_review.process_okr_review_request", fake_process)
     monkeypatch.setattr(cli, "DwsClient", FakeDwsClient)
 
@@ -915,7 +915,7 @@ def test_process_okr_reviews_command_requeues_stale_processing_request(
         store.mark_okr_review_request_done(request.id, codex_session_id="session-okr")
         return "卢鑫 2026 Q3 OKR 审核结果"
 
-    monkeypatch.setattr("app.structured_agent.StructuredCodexRunner", FakeStructuredRunner)
+    monkeypatch.setattr("app.structured_agent.StructuredPiRunner", FakeStructuredRunner)
     monkeypatch.setattr("app.okr_review.process_okr_review_request", fake_process)
     monkeypatch.setattr(cli, "DwsClient", FakeDwsClient)
 
@@ -1095,7 +1095,7 @@ def test_create_worker_wires_explicit_agoal_api_okr_live_source(
 
 
 def test_process_work_items_command_processes_claimed_input(tmp_path, monkeypatch, capsys):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_transcript_start_line = 0
         last_transcript_end_line = 0
@@ -1134,7 +1134,7 @@ def test_process_work_items_command_processes_claimed_input(tmp_path, monkeypatc
                 }
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1188,7 +1188,7 @@ def test_process_work_items_command_reclaims_stale_processing_input(
     monkeypatch,
     capsys,
 ):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = [{"tool": "memory_recall"}]
         last_transcript_start_line = 0
@@ -1228,7 +1228,7 @@ def test_process_work_items_command_reclaims_stale_processing_input(
                 }
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1283,7 +1283,7 @@ def test_process_work_items_command_does_not_batch_claim_after_failure(
     monkeypatch,
     capsys,
 ):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
         last_transcript_start_line = 0
@@ -1295,7 +1295,7 @@ def test_process_work_items_command_does_not_batch_claim_after_failure(
         def decide(self, *, prompt, session_id=None):
             raise RuntimeError("task agent unavailable")
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     first = WorkItem.model_validate(
@@ -1367,7 +1367,7 @@ def test_process_work_items_command_backoffs_transient_codex_failure(
     monkeypatch,
     capsys,
 ):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
         last_transcript_start_line = 0
@@ -1381,7 +1381,7 @@ def test_process_work_items_command_backoffs_transient_codex_failure(
                 "stream disconnected before completion: error sending request"
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1431,7 +1431,7 @@ def test_process_work_items_command_backoffs_native_codex_missing_auth_header(
 ):
     monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
 
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
         last_transcript_start_line = 0
@@ -1447,7 +1447,7 @@ def test_process_work_items_command_backoffs_native_codex_missing_auth_header(
                 "https://api.openai.com/v1/responses"
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1505,7 +1505,7 @@ def test_process_work_items_command_keeps_native_missing_header_pending_after_li
 ):
     monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
 
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
         last_transcript_start_line = 0
@@ -1521,7 +1521,7 @@ def test_process_work_items_command_keeps_native_missing_header_pending_after_li
                 "https://api.openai.com/v1/responses"
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1574,7 +1574,7 @@ def test_process_work_items_command_keeps_codex_transport_failure_pending_after_
     monkeypatch,
     capsys,
 ):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
         last_transcript_start_line = 0
@@ -1589,7 +1589,7 @@ def test_process_work_items_command_keeps_codex_transport_failure_pending_after_
                 "for url (https://api.openai.com/v1/responses)"
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1642,7 +1642,7 @@ def test_process_work_items_command_keeps_typed_external_failure_pending_after_l
     monkeypatch,
     capsys,
 ):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
         last_transcript_start_line = 0
@@ -1658,7 +1658,7 @@ def test_process_work_items_command_keeps_typed_external_failure_pending_after_l
                 dependency="codex",
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1706,7 +1706,7 @@ def test_process_work_items_command_backoffs_missing_memory_recall_tool_event(
     monkeypatch,
     capsys,
 ):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
         last_transcript_start_line = 0
@@ -1720,7 +1720,7 @@ def test_process_work_items_command_backoffs_missing_memory_recall_tool_event(
                 "non-discard task decision requires memory_recall tool event"
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1768,7 +1768,7 @@ def test_process_work_items_command_discards_cross_project_follow_up_draft(
     monkeypatch,
     capsys,
 ):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_audit_tool_events = []
         last_transcript_start_line = 0
@@ -1782,7 +1782,7 @@ def test_process_work_items_command_discards_cross_project_follow_up_draft(
                 "follow_up_draft.todo_id 2240 does not belong to project 435"
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1831,7 +1831,7 @@ def test_process_work_items_command_uses_task_agent_timeouts(
 ):
     constructed = {}
 
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_transcript_start_line = 0
         last_transcript_end_line = 0
@@ -1854,7 +1854,7 @@ def test_process_work_items_command_uses_task_agent_timeouts(
                 }
             )
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -1891,7 +1891,7 @@ def test_process_work_items_command_passes_dws_client_to_task_agent(
     monkeypatch,
     capsys,
 ):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_transcript_start_line = 0
         last_transcript_end_line = 0
@@ -1910,7 +1910,7 @@ def test_process_work_items_command_passes_dws_client_to_task_agent(
         captured["work_input_id"] = work_input.id
         store.mark_work_summary_input_done(work_input.id)
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     monkeypatch.setattr(cli, "DwsClient", FakeDwsClient)
     monkeypatch.setattr(cli, "process_work_item", fake_process_work_item)
     db_path = tmp_path / "task.sqlite3"
@@ -1965,7 +1965,7 @@ def test_process_work_items_command_respects_zero_max_batches(
     monkeypatch,
     capsys,
 ):
-    class FakeTaskAgentCodexRunner:
+    class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
         last_transcript_start_line = 0
         last_transcript_end_line = 0
@@ -1976,7 +1976,7 @@ def test_process_work_items_command_respects_zero_max_batches(
         def decide(self, *, prompt, session_id=None):
             raise AssertionError("no inputs should be claimed")
 
-    monkeypatch.setattr(cli, "TaskAgentCodexRunner", FakeTaskAgentCodexRunner)
+    monkeypatch.setattr(cli, "TaskAgentPiRunner", FakeTaskAgentPiRunner)
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
     item = WorkItem.model_validate(
@@ -2012,7 +2012,7 @@ def test_backfill_task_memory_context_command_updates_missing_context(
     monkeypatch,
     capsys,
 ):
-    class FakeProjectMemoryContextCodexRunner:
+    class FakeProjectMemoryContextPiRunner:
         last_audit_tool_events = [{"tool": "memory_recall"}]
 
         def __init__(self, **kwargs):
@@ -2038,8 +2038,8 @@ def test_backfill_task_memory_context_command_updates_missing_context(
 
     monkeypatch.setattr(
         cli,
-        "ProjectMemoryContextCodexRunner",
-        FakeProjectMemoryContextCodexRunner,
+        "ProjectMemoryContextPiRunner",
+        FakeProjectMemoryContextPiRunner,
     )
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
@@ -2091,7 +2091,7 @@ def test_backfill_task_memory_context_command_records_missing_memory_recall(
     monkeypatch,
     capsys,
 ):
-    class FakeProjectMemoryContextCodexRunner:
+    class FakeProjectMemoryContextPiRunner:
         last_audit_tool_events = []
 
         def __init__(self, **kwargs):
@@ -2106,8 +2106,8 @@ def test_backfill_task_memory_context_command_records_missing_memory_recall(
 
     monkeypatch.setattr(
         cli,
-        "ProjectMemoryContextCodexRunner",
-        FakeProjectMemoryContextCodexRunner,
+        "ProjectMemoryContextPiRunner",
+        FakeProjectMemoryContextPiRunner,
     )
     db_path = tmp_path / "task.sqlite3"
     store = AutoReplyStore(db_path)
@@ -2870,10 +2870,10 @@ def test_settings_defaults_point_to_memory_home():
     assert settings.corpus_dir == repo_root / "data" / "corpus"
     assert settings.batch_seconds == 120
     assert settings.poll_interval_seconds == 300
-    assert settings.codex_timeout_seconds == 1200
-    assert settings.codex_idle_timeout_seconds == 900
-    assert settings.task_codex_timeout_seconds == 1200
-    assert settings.task_codex_idle_timeout_seconds == 900
+    assert settings.pi_timeout_seconds == 1200
+    assert settings.pi_idle_timeout_seconds == 900
+    assert settings.task_pi_timeout_seconds == 1200
+    assert settings.task_pi_idle_timeout_seconds == 900
     assert settings.task_work_item_interval_seconds == 60
     assert settings.task_daily_interval_seconds == 86_400
     assert settings.task_follow_up_interval_seconds == 60
@@ -3327,8 +3327,38 @@ def test_parser_supports_codex_timeout_option():
     )
     settings = settings_from_args(args)
 
-    assert settings.codex_timeout_seconds == 480
-    assert settings.codex_idle_timeout_seconds == 180
+    assert settings.pi_timeout_seconds == 480
+    assert settings.pi_idle_timeout_seconds == 180
+
+
+def test_parser_uses_pi_timeout_options_as_primary_names():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "run-once",
+            "--pi-timeout-seconds",
+            "481",
+            "--pi-idle-timeout-seconds",
+            "181",
+        ]
+    )
+    settings = settings_from_args(args)
+
+    assert settings.pi_timeout_seconds == 481
+    assert settings.pi_idle_timeout_seconds == 181
+
+
+def test_parser_keeps_legacy_codex_timeout_environment_as_fallback(monkeypatch):
+    monkeypatch.delenv("CEO_PI_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("CEO_PI_IDLE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("CEO_CODEX_TIMEOUT_SECONDS", "482")
+    monkeypatch.setenv("CEO_CODEX_IDLE_TIMEOUT_SECONDS", "182")
+
+    settings = settings_from_args(build_parser().parse_args(["run-once"]))
+
+    assert settings.pi_timeout_seconds == 482
+    assert settings.pi_idle_timeout_seconds == 182
 
 
 def test_parser_supports_task_codex_timeout_options():
@@ -3345,11 +3375,29 @@ def test_parser_supports_task_codex_timeout_options():
     )
     settings = settings_from_args(args)
 
-    assert settings.task_codex_timeout_seconds == 1200
-    assert settings.task_codex_idle_timeout_seconds == 700
+    assert settings.task_pi_timeout_seconds == 1200
+    assert settings.task_pi_idle_timeout_seconds == 700
 
 
-def test_create_worker_wires_store_dws_codex_and_dry_run(monkeypatch, tmp_path):
+def test_parser_uses_task_pi_timeout_options_as_primary_names():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "process-work-items",
+            "--task-pi-timeout-seconds",
+            "1201",
+            "--task-pi-idle-timeout-seconds",
+            "701",
+        ]
+    )
+    settings = settings_from_args(args)
+
+    assert settings.task_pi_timeout_seconds == 1201
+    assert settings.task_pi_idle_timeout_seconds == 701
+
+
+def test_create_worker_wires_store_dws_pi_agent_and_dry_run(monkeypatch, tmp_path):
     constructed = {}
 
     class FakeStore:
@@ -3369,24 +3417,24 @@ def test_create_worker_wires_store_dws_codex_and_dry_run(monkeypatch, tmp_path):
         def __init__(self, dws, org_directory):
             constructed["cached_dws_args"] = (dws, org_directory)
 
-    class FakeCodex:
+    class FakeAgent:
         def __init__(self, workspace, timeout_seconds, idle_timeout_seconds):
-            constructed["codex_workspace"] = workspace
-            constructed["codex_timeout_seconds"] = timeout_seconds
-            constructed["codex_idle_timeout_seconds"] = idle_timeout_seconds
+            constructed["agent_workspace"] = workspace
+            constructed["pi_timeout_seconds"] = timeout_seconds
+            constructed["pi_idle_timeout_seconds"] = idle_timeout_seconds
 
     class FakeWorker:
         def __init__(
             self,
             store,
             dws,
-            codex,
+            agent,
             dry_run,
             style_profile="",
             style_records=None,
         ):
             constructed["worker"] = self
-            constructed["worker_args"] = (store, dws, codex, dry_run)
+            constructed["worker_args"] = (store, dws, agent, dry_run)
             constructed["style_profile"] = style_profile
             constructed["style_records"] = style_records
 
@@ -3394,7 +3442,7 @@ def test_create_worker_wires_store_dws_codex_and_dry_run(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "DwsClient", FakeDws)
     monkeypatch.setattr(cli, "CachedOrgDirectory", FakeCachedOrgDirectory)
     monkeypatch.setattr(cli, "CachedDwsClient", FakeCachedDwsClient)
-    monkeypatch.setattr(cli, "CodexDecisionRunner", FakeCodex)
+    monkeypatch.setattr(cli, "AgentDecisionRunner", FakeAgent)
     monkeypatch.setattr(cli, "DingTalkAutoReplyWorker", FakeWorker)
     monkeypatch.setenv("CEO_OKR_SOURCE_KIND", "agoal")
 
@@ -3403,8 +3451,8 @@ def test_create_worker_wires_store_dws_codex_and_dry_run(monkeypatch, tmp_path):
         db_path=tmp_path / "worker.sqlite3",
         corpus_dir=tmp_path / "corpus",
         dry_run=True,
-        codex_timeout_seconds=480,
-        codex_idle_timeout_seconds=180,
+        pi_timeout_seconds=480,
+        pi_idle_timeout_seconds=180,
     )
     settings.corpus_dir.mkdir()
     (settings.corpus_dir / "style_profile.md").write_text(
@@ -3440,9 +3488,9 @@ def test_create_worker_wires_store_dws_codex_and_dry_run(monkeypatch, tmp_path):
         "transient_retry_delay_seconds": 1.0,
     }
     assert constructed["cached_dws_args"][0] is constructed["dws"]
-    assert constructed["codex_workspace"] == settings.workspace
-    assert constructed["codex_timeout_seconds"] == 480
-    assert constructed["codex_idle_timeout_seconds"] == 180
+    assert constructed["agent_workspace"] == settings.workspace
+    assert constructed["pi_timeout_seconds"] == 480
+    assert constructed["pi_idle_timeout_seconds"] == 180
     assert constructed["worker_args"][3] is True
     assert "先结论" in constructed["style_profile"]
     assert len(constructed["style_records"]) == 1
@@ -4313,7 +4361,7 @@ def test_meeting_loops_call_separate_workers_once(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_create_meeting_dws", lambda received: dws)
     monkeypatch.setattr(
         cli,
-        "MeetingAlignmentCodexRunner",
+        "MeetingAlignmentPiRunner",
         lambda **kwargs: calls.append(("runner", kwargs)) or runner,
     )
     monkeypatch.setattr(
@@ -4392,7 +4440,7 @@ def test_meeting_loops_skip_when_network_not_ready(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(cli, "AutoReplyStore", lambda path: object())
     monkeypatch.setattr(cli, "_create_meeting_dws", lambda received: object())
-    monkeypatch.setattr(cli, "MeetingAlignmentCodexRunner", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "MeetingAlignmentPiRunner", lambda **kwargs: object())
     monkeypatch.setattr(
         cli,
         "produce_meeting_alignment_jobs",
@@ -4568,7 +4616,7 @@ def test_meeting_consumer_dry_run_and_zero_limit_never_deliver(monkeypatch, tmp_
     )
     monkeypatch.setattr(cli, "AutoReplyStore", lambda path: object())
     monkeypatch.setattr(cli, "_create_meeting_dws", lambda received: object())
-    monkeypatch.setattr(cli, "MeetingAlignmentCodexRunner", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "MeetingAlignmentPiRunner", lambda **kwargs: object())
     monkeypatch.setattr(
         cli,
         "consume_meeting_alignment_jobs",
@@ -5738,8 +5786,8 @@ def test_wechat_loop_stops_after_app_data_permission_denial(
     settings = SimpleNamespace(
         db_path=db,
         workspace=tmp_path,
-        codex_timeout_seconds=30,
-        codex_idle_timeout_seconds=30,
+        pi_timeout_seconds=30,
+        pi_idle_timeout_seconds=30,
     )
     monkeypatch.setattr("app.wechat.service.build_reader", lambda *a, **k: object())
     monkeypatch.setattr(
@@ -5791,8 +5839,8 @@ def test_wechat_loop_retries_after_transient_reader_ipc_unavailable(
     settings = SimpleNamespace(
         db_path=db,
         workspace=tmp_path,
-        codex_timeout_seconds=30,
-        codex_idle_timeout_seconds=30,
+        pi_timeout_seconds=30,
+        pi_idle_timeout_seconds=30,
     )
     monkeypatch.setattr("app.wechat.service.build_reader", lambda *a, **k: object())
     monkeypatch.setattr(
@@ -5844,8 +5892,8 @@ def test_wechat_loop_pauses_after_reader_reports_app_data_denial(
     settings = SimpleNamespace(
         db_path=db,
         workspace=tmp_path,
-        codex_timeout_seconds=30,
-        codex_idle_timeout_seconds=30,
+        pi_timeout_seconds=30,
+        pi_idle_timeout_seconds=30,
     )
     monkeypatch.setattr("app.wechat.service.build_reader", lambda *a, **k: object())
     monkeypatch.setattr(

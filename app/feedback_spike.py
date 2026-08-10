@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from app.codex_decision import append_signature
+from app.agent_decision import append_signature
 from app.dws_client import DwsClient
 from app.leak_check import contains_forbidden_leak
 

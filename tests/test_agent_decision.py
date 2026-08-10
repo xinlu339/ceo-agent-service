@@ -1,19 +1,19 @@
 import json
 from pathlib import Path
 
-import app.codex_decision as codex_decision
-from app.codex_decision import (
-    CodexDecisionRunner,
+import app.agent_decision as agent_decision
+from app.agent_decision import (
+    AgentDecisionRunner,
     append_signature,
-    extract_codex_audit_events,
-    extract_codex_session_id,
-    parse_codex_json,
+    extract_agent_audit_events,
+    extract_agent_session_id,
+    parse_agent_json,
 )
 from app.memory_connector_config import memory_connector_config_issue
 from app.dingtalk_models import (
     CalendarResponseStatus,
-    CodexAction,
-    CodexDecision,
+    AgentAction,
+    AgentDecision,
     SensitivityKind,
 )
 from app.leak_check import contains_forbidden_leak
@@ -37,13 +37,13 @@ def make_runner(
     executor=None,
     timeout_seconds: int = 120,
     idle_timeout_seconds: int = 180,
-) -> CodexDecisionRunner:
-    return CodexDecisionRunner(
+) -> AgentDecisionRunner:
+    return AgentDecisionRunner(
         workspace=tmp_path,
         executor=executor,
         timeout_seconds=timeout_seconds,
         idle_timeout_seconds=idle_timeout_seconds,
-        codex_home=tmp_path,
+        session_dir=tmp_path,
     )
 
 
@@ -81,7 +81,7 @@ def _agent_envelope_json(
     )
 
 
-def test_parse_codex_json_accepts_decision_object():
+def test_parse_agent_json_accepts_decision_object():
     raw = json.dumps(
         {
             "action": "send_reply",
@@ -92,10 +92,10 @@ def test_parse_codex_json_accepts_decision_object():
         }
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision == CodexDecision(
-        action=CodexAction.SEND_REPLY,
+    assert decision == AgentDecision(
+        action=AgentAction.SEND_REPLY,
         reply_text="收到",
         reason="direct ask",
         ding_self=False,
@@ -103,7 +103,7 @@ def test_parse_codex_json_accepts_decision_object():
     )
 
 
-def test_parse_codex_json_accepts_permission_fields():
+def test_parse_agent_json_accepts_permission_fields():
     raw = json.dumps(
         {
             "action": "send_reply",
@@ -113,13 +113,13 @@ def test_parse_codex_json_accepts_permission_fields():
         }
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
     assert decision.sensitivity_kind == "internal_personnel"
     assert decision.personnel_subject_user_id == "user-1"
 
 
-def test_parse_codex_json_accepts_calendar_response_status():
+def test_parse_agent_json_accepts_calendar_response_status():
     raw = json.dumps(
         {
             "action": "no_reply",
@@ -129,12 +129,12 @@ def test_parse_codex_json_accepts_calendar_response_status():
         ensure_ascii=False,
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
     assert decision.calendar_response_status == "tentative"
 
 
-def test_parse_codex_json_strict_rejects_legacy_decision_object():
+def test_parse_agent_json_strict_rejects_legacy_decision_object():
     raw = json.dumps(
         {
             "action": "send_reply",
@@ -145,14 +145,14 @@ def test_parse_codex_json_strict_rejects_legacy_decision_object():
     )
 
     try:
-        parse_codex_json(raw, allow_legacy=False)
+        parse_agent_json(raw, allow_legacy=False)
     except json.JSONDecodeError as exc:
         assert "AgentEnvelope" in exc.msg
     else:
-        raise AssertionError("legacy CodexDecision JSON should be rejected")
+        raise AssertionError("legacy AgentDecision JSON should be rejected")
 
 
-def test_parse_codex_json_accepts_audit_fields():
+def test_parse_agent_json_accepts_audit_fields():
     raw = json.dumps(
         {
             "action": "send_reply",
@@ -169,7 +169,7 @@ def test_parse_codex_json_accepts_audit_fields():
         ensure_ascii=False,
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
     assert decision.audit_documents == [
         {
@@ -181,7 +181,7 @@ def test_parse_codex_json_accepts_audit_fields():
     assert "项目闭环" in decision.audit_summary
 
 
-def test_parse_codex_json_accepts_agent_envelope_object():
+def test_parse_agent_json_accepts_agent_envelope_object():
     raw = json.dumps(
         {
             "kind": "reply",
@@ -209,9 +209,9 @@ def test_parse_codex_json_accepts_agent_envelope_object():
         ensure_ascii=False,
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "收到，我来处理。"
     assert decision.reason == "已根据当前消息判断需要回复。"
     assert decision.audit_summary == "已根据当前消息判断需要回复。"
@@ -220,7 +220,7 @@ def test_parse_codex_json_accepts_agent_envelope_object():
     ]
 
 
-def test_parse_codex_json_maps_calendar_response_from_agent_envelope_domain_payload():
+def test_parse_agent_json_maps_calendar_response_from_agent_envelope_domain_payload():
     raw = json.dumps(
         {
             "kind": "reply",
@@ -242,13 +242,13 @@ def test_parse_codex_json_maps_calendar_response_from_agent_envelope_domain_payl
         ensure_ascii=False,
     )
 
-    decision = parse_codex_json(raw, allow_legacy=False)
+    decision = parse_agent_json(raw, allow_legacy=False)
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.calendar_response_status == "accepted"
 
 
-def test_parse_codex_json_maps_handoff_agent_envelope():
+def test_parse_agent_json_maps_handoff_agent_envelope():
     raw = json.dumps(
         {
             "kind": "reply",
@@ -268,9 +268,9 @@ def test_parse_codex_json_maps_handoff_agent_envelope():
         ensure_ascii=False,
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.HANDOFF_TO_HUMAN
+    assert decision.action == AgentAction.HANDOFF_TO_HUMAN
     assert decision.reason == "对方要求本人立即进入会议，必须转交本人。"
 
 
@@ -294,7 +294,7 @@ def test_extract_codex_audit_events_from_jsonl_tool_events():
         ]
     )
 
-    events = extract_codex_audit_events(raw)
+    events = extract_agent_audit_events(raw)
 
     assert events == [
         {
@@ -327,7 +327,7 @@ def test_extract_codex_audit_events_preserves_mcp_tool_name():
         ensure_ascii=False,
     )
 
-    events = extract_codex_audit_events(raw)
+    events = extract_agent_audit_events(raw)
 
     assert events[0]["tool"] == "friday memory_memory_recall"
     assert "候选人筛选项目" in events[0]["input"]
@@ -356,7 +356,7 @@ def test_extract_codex_audit_events_preserves_tool_name_without_payload():
         ]
     )
 
-    events = extract_codex_audit_events(raw)
+    events = extract_agent_audit_events(raw)
 
     assert events == [
         {"event_type": "response_item", "tool": "list_mcp_resources"},
@@ -389,10 +389,10 @@ def test_extract_codex_session_id_accepts_session_meta():
         }
     )
 
-    assert extract_codex_session_id(raw) == "019e29ed-e90f-7002-9507-1e8b7d9efcdc"
+    assert extract_agent_session_id(raw) == "019e29ed-e90f-7002-9507-1e8b7d9efcdc"
 
 
-def test_parse_codex_json_accepts_jsonl_direct_decision_line():
+def test_parse_agent_json_accepts_jsonl_direct_decision_line():
     raw = "\n".join(
         [
             json.dumps({"type": "session", "id": "session-1"}),
@@ -400,13 +400,13 @@ def test_parse_codex_json_accepts_jsonl_direct_decision_line():
         ]
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert decision.reason == "cc only"
 
 
-def test_parse_codex_json_accepts_jsonl_agent_message_decision():
+def test_parse_agent_json_accepts_jsonl_agent_message_decision():
     raw = "\n".join(
         [
             json.dumps({"session_id": "session-1"}),
@@ -419,13 +419,13 @@ def test_parse_codex_json_accepts_jsonl_agent_message_decision():
         ]
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert decision.reason == "cc only"
 
 
-def test_parse_codex_json_accepts_jsonl_message_content_decision():
+def test_parse_agent_json_accepts_jsonl_message_content_decision():
     raw = "\n".join(
         [
             json.dumps({"sessionId": "session-1"}),
@@ -440,13 +440,13 @@ def test_parse_codex_json_accepts_jsonl_message_content_decision():
         ]
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "收到"
 
 
-def test_parse_codex_json_accepts_jsonl_message_content_text_decision():
+def test_parse_agent_json_accepts_jsonl_message_content_text_decision():
     raw = "\n".join(
         [
             json.dumps({"type": "session", "id": "session-1"}),
@@ -461,13 +461,13 @@ def test_parse_codex_json_accepts_jsonl_message_content_text_decision():
         ]
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert decision.reason == "done"
 
 
-def test_parse_codex_json_accepts_live_item_completed_agent_message_text():
+def test_parse_agent_json_accepts_live_item_completed_agent_message_text():
     raw = "\n".join(
         [
             json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
@@ -483,13 +483,13 @@ def test_parse_codex_json_accepts_live_item_completed_agent_message_text():
         ]
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert decision.reason == "live final"
 
 
-def test_parse_codex_json_accepts_nonstandard_envelope_with_user_response():
+def test_parse_agent_json_accepts_nonstandard_envelope_with_user_response():
     raw = "\n".join(
         [
             json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
@@ -527,9 +527,9 @@ def test_parse_codex_json_accepts_nonstandard_envelope_with_user_response():
         ]
     )
 
-    decision = parse_codex_json(raw, allow_legacy=False)
+    decision = parse_agent_json(raw, allow_legacy=False)
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "可以，我先按这个日报每天看当天新增。"
     assert decision.sensitivity_kind == "internal_personnel"
     assert decision.audit_summary == "已读取日报并判断风险。"
@@ -561,9 +561,9 @@ def test_parse_nonstandard_envelope_preserves_domain_payload():
         ensure_ascii=False,
     )
 
-    decision = parse_codex_json(raw, allow_legacy=False)
+    decision = parse_agent_json(raw, allow_legacy=False)
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "这个会可以接。"
     assert decision.sensitivity_kind == SensitivityKind.EXTERNAL_CANDIDATE
     assert decision.candidate_context_known is True
@@ -571,7 +571,7 @@ def test_parse_nonstandard_envelope_preserves_domain_payload():
     assert decision.calendar_response_status == CalendarResponseStatus.ACCEPTED
 
 
-def test_parse_codex_json_accepts_event_msg_agent_message_payload():
+def test_parse_agent_json_accepts_event_msg_agent_message_payload():
     raw = "\n".join(
         [
             json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
@@ -595,9 +595,9 @@ def test_parse_codex_json_accepts_event_msg_agent_message_payload():
         ]
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "收到"
 
 
@@ -616,7 +616,7 @@ def test_invalid_json_retries_once(tmp_path: Path):
 
     decision = runner.decide(prompt="decide", session_id="session-1")
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert len(executor.commands) == 2
     assert executor.commands[0][1].endswith("/pi/packages/coding-agent/dist/cli.js")
     assert executor.commands[0][executor.commands[0].index("--mode") + 1] == "json"
@@ -635,28 +635,19 @@ def test_invalid_json_retries_once(tmp_path: Path):
 
 def test_runner_reads_current_session_when_stdout_has_no_decision(tmp_path: Path):
     session_id = "thread-1"
-    session_path = (
-        tmp_path
-        / "sessions"
-        / "2026"
-        / "05"
-        / "27"
-        / f"rollout-2026-05-27T06-51-23-{session_id}.jsonl"
-    )
-    session_path.parent.mkdir(parents=True)
+    session_path = tmp_path / f"2026-05-27T06-51-23_{session_id}.jsonl"
     session_path.write_text(
         "\n".join(
             [
-                json.dumps({"type": "session_meta", "payload": {"id": session_id}}),
+                json.dumps({"type": "session", "id": session_id}),
                 json.dumps(
                     {
-                        "type": "response_item",
-                        "payload": {
-                            "type": "message",
+                        "type": "message",
+                        "message": {
                             "role": "assistant",
                             "content": [
                                 {
-                                    "type": "output_text",
+                                    "type": "text",
                                     "text": _agent_envelope_json(
                                         mode="send_reply",
                                         text="今晚只放一个主目标。",
@@ -680,10 +671,49 @@ def test_runner_reads_current_session_when_stdout_has_no_decision(tmp_path: Path
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "今晚只放一个主目标。"
     assert runner.last_session_id == session_id
     assert len(executor.commands) == 1
+
+
+def test_runner_does_not_resume_legacy_codex_history(tmp_path: Path):
+    session_id = "legacy-thread-1"
+    legacy_path = (
+        tmp_path
+        / "sessions"
+        / "2026"
+        / "05"
+        / "27"
+        / f"rollout-2026-05-27T06-51-23-{session_id}.jsonl"
+    )
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": session_id}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": _agent_envelope_json(
+                                mode="send_reply",
+                                text="不应恢复这条旧回复。",
+                            ),
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runner = make_runner(tmp_path)
+    runner.last_session_id = session_id
+
+    assert runner._read_current_session_decision() is None
 
 
 def test_runner_tracks_audit_tool_events(tmp_path: Path):
@@ -808,7 +838,7 @@ def test_empty_reply_for_reply_action_retries_once(tmp_path: Path):
 
     decision = runner.decide(prompt="decide", session_id="session-1")
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "收到，我看一下"
     assert len(executor.commands) == 2
     assert "user_response.text 必须非空" in executor.prompts[1]
@@ -865,7 +895,7 @@ def test_first_turn_invalid_json_retries_with_extracted_session_id(tmp_path: Pat
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert runner.last_session_id == "new-session"
     assert executor.commands[0][1].endswith("/pi/packages/coding-agent/dist/cli.js")
     assert "--session-id" not in executor.commands[0]
@@ -901,7 +931,7 @@ def test_first_turn_invalid_json_retries_with_thread_started_id(tmp_path: Path):
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert runner.last_session_id == "thread-1"
     assert executor.commands[0][1].endswith("/pi/packages/coding-agent/dist/cli.js")
     assert "--session-id" not in executor.commands[0]
@@ -912,7 +942,7 @@ def test_first_turn_invalid_json_retries_with_thread_started_id(tmp_path: Path):
     )
 
 
-def test_parse_codex_json_accepts_item_completed_message_output_text():
+def test_parse_agent_json_accepts_item_completed_message_output_text():
     raw = "\n".join(
         [
             json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
@@ -945,14 +975,14 @@ def test_parse_codex_json_accepts_item_completed_message_output_text():
         ]
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "按这个口径推进。"
     assert decision.audit_summary.startswith("只需上下文判断")
 
 
-def test_parse_codex_json_accepts_task_complete_last_agent_message():
+def test_parse_agent_json_accepts_task_complete_last_agent_message():
     raw = "\n".join(
         [
             json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
@@ -976,9 +1006,9 @@ def test_parse_codex_json_accepts_task_complete_last_agent_message():
         ]
     )
 
-    decision = parse_codex_json(raw)
+    decision = parse_agent_json(raw)
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert decision.audit_summary == "对方只是确认收到，无需回复。"
 
 
@@ -1001,8 +1031,8 @@ def test_invalid_json_waits_for_session_decision_before_repair(tmp_path: Path):
     )
     runner = make_runner(tmp_path, executor=executor)
     waits: list[int] = []
-    session_decision = CodexDecision(
-        action=CodexAction.SEND_REPLY,
+    session_decision = AgentDecision(
+        action=AgentAction.SEND_REPLY,
         reply_text="按这个口径推进。",
         audit_documents=[],
         audit_summary="只需上下文判断，当前消息足够确认回复。",
@@ -1016,7 +1046,7 @@ def test_invalid_json_waits_for_session_decision_before_repair(tmp_path: Path):
 
     decision = runner.decide(prompt="decide", session_id="thread-1")
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "按这个口径推进。"
     assert waits == [15]
     assert len(executor.commands) == 1
@@ -1029,7 +1059,7 @@ def test_invalid_json_twice_returns_stop_with_error(tmp_path: Path):
 
     decision = runner.decide(prompt="decide", session_id="session-1")
 
-    assert decision.action == CodexAction.STOP_WITH_ERROR
+    assert decision.action == AgentAction.STOP_WITH_ERROR
     assert "invalid JSON" in decision.reason
 
 
@@ -1048,7 +1078,7 @@ def test_missing_audit_summary_retries_once(tmp_path: Path):
 
     decision = runner.decide(prompt="decide", session_id="session-1")
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert decision.audit_summary == "消息只是抄送，无需回复。"
     assert len(executor.commands) == 2
     assert "audit.summary 必须非空" in executor.prompts[1]
@@ -1070,7 +1100,7 @@ def test_reply_with_empty_audit_documents_accepts_nonempty_audit_summary(
 
     decision = runner.decide(prompt="decide", session_id="session-1")
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.audit_summary.startswith("未使用可作为业务依据的文档材料")
     assert len(executor.commands) == 1
 
@@ -1117,12 +1147,12 @@ def test_subprocess_executor_passes_timeout(tmp_path: Path, monkeypatch):
             stderr="",
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path, timeout_seconds=7, idle_timeout_seconds=3)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert calls[0][1]["total_timeout_seconds"] == 7
     assert calls[0][1]["idle_timeout_seconds"] == 3
     assert calls[0][1]["prompt"] == "decide"
@@ -1141,12 +1171,12 @@ def test_subprocess_timeout_returns_stop_with_error(tmp_path: Path, monkeypatch)
             timeout_reason="process timed out after 7 seconds",
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path, timeout_seconds=7)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.STOP_WITH_ERROR
+    assert decision.action == AgentAction.STOP_WITH_ERROR
     assert "timed out" in decision.reason
     assert decision.external_dependency_failed is True
 
@@ -1162,12 +1192,12 @@ def test_subprocess_idle_timeout_returns_stop_with_error(tmp_path: Path, monkeyp
             timeout_reason="process produced no output for 3 seconds",
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path, timeout_seconds=7, idle_timeout_seconds=3)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.STOP_WITH_ERROR
+    assert decision.action == AgentAction.STOP_WITH_ERROR
     assert decision.reason == "process produced no output for 3 seconds"
 
 
@@ -1175,27 +1205,20 @@ def test_subprocess_timeout_uses_finished_session_decision(
     tmp_path: Path, monkeypatch
 ):
     session_id = "thread-timeout-1"
-    session_path = (
-        tmp_path
-        / "sessions"
-        / "2026"
-        / "05"
-        / "27"
-        / f"rollout-2026-05-27T07-21-00-{session_id}.jsonl"
-    )
-    session_path.parent.mkdir(parents=True)
+    session_path = tmp_path / f"2026-05-27T07-21-00_{session_id}.jsonl"
     session_path.write_text(
         "\n".join(
             [
-                json.dumps({"type": "session_meta", "payload": {"id": session_id}}),
+                json.dumps({"type": "session", "id": session_id}),
                 json.dumps(
                     {
-                        "type": "event_msg",
-                        "payload": {
-                            "type": "agent_message",
-                            "message": json.dumps(
-                                json.loads(
-                                    _agent_envelope_json(
+                        "type": "message",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": _agent_envelope_json(
                                         mode="send_reply",
                                         text="这版可以先发，先改四个硬伤。",
                                         summary="已查看材料并给出反馈。",
@@ -1206,10 +1229,9 @@ def test_subprocess_timeout_uses_finished_session_decision(
                                                 "relevance": "用于审核反馈。",
                                             }
                                         ],
-                                    )
-                                ),
-                                ensure_ascii=False,
-                            ),
+                                    ),
+                                }
+                            ],
                         },
                     },
                     ensure_ascii=False,
@@ -1230,12 +1252,12 @@ def test_subprocess_timeout_uses_finished_session_decision(
             timeout_reason="process timed out after 7 seconds",
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path, timeout_seconds=7)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.SEND_REPLY
+    assert decision.action == AgentAction.SEND_REPLY
     assert decision.reply_text == "这版可以先发，先改四个硬伤。"
     assert runner.last_session_id == session_id
 
@@ -1252,12 +1274,12 @@ def test_subprocess_nonzero_keeps_stdout_decision(tmp_path: Path, monkeypatch):
             stderr="warning only",
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.NO_REPLY
+    assert decision.action == AgentAction.NO_REPLY
     assert decision.reason == "stdout 已经有合法决策。"
 
 
@@ -1269,12 +1291,12 @@ def test_subprocess_nonzero_preserves_thread_id_for_error(tmp_path: Path, monkey
             stderr="fatal schema error",
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.STOP_WITH_ERROR
+    assert decision.action == AgentAction.STOP_WITH_ERROR
     assert runner.last_session_id == "thread-1"
     assert "fatal schema error" in decision.reason
 
@@ -1297,12 +1319,12 @@ def test_subprocess_nonzero_reports_error_line_before_startup_warning(
             stderr=stderr,
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.STOP_WITH_ERROR
+    assert decision.action == AgentAction.STOP_WITH_ERROR
     assert "ERROR codex_api" in decision.reason
     assert "401 Unauthorized" in decision.reason
     assert "startup_remote_sync" not in decision.reason
@@ -1336,12 +1358,12 @@ def test_subprocess_nonzero_reports_stdout_error_before_warning_only_stderr(
             stderr=stderr,
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.STOP_WITH_ERROR
+    assert decision.action == AgentAction.STOP_WITH_ERROR
     assert "out of credits" in decision.reason
     assert "failed to unwatch" not in decision.reason
 
@@ -1383,12 +1405,12 @@ def test_subprocess_nonzero_keeps_native_codex_transport_fallback_context(
             stderr="",
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.STOP_WITH_ERROR
+    assert decision.action == AgentAction.STOP_WITH_ERROR
     assert "stream disconnected before completion" in decision.reason
     assert "transport fallback" in decision.reason
     assert "Missing bearer" in decision.reason
@@ -1416,11 +1438,11 @@ def test_subprocess_nonzero_warning_only_stderr_uses_generic_failure_reason(
             stderr=stderr,
         )
 
-    monkeypatch.setattr(codex_decision, "run_process_with_idle_timeout", fake_run)
+    monkeypatch.setattr(agent_decision, "run_process_with_idle_timeout", fake_run)
     runner = make_runner(tmp_path)
 
     decision = runner.decide(prompt="decide", session_id=None)
 
-    assert decision.action == CodexAction.STOP_WITH_ERROR
+    assert decision.action == AgentAction.STOP_WITH_ERROR
     assert decision.reason == "Pi process failed without a valid AgentEnvelope"
     assert "failed to unwatch" not in decision.reason

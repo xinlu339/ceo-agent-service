@@ -13,7 +13,7 @@ from typing import Callable
 from pydantic import ValidationError
 
 from app.agent_envelope import SendDingTalkReplyAction
-from app.dingtalk_models import CodexAction
+from app.dingtalk_models import AgentAction
 from app.wechat.models import WechatAccount, WechatMessage
 from app.wechat.prompt import build_wechat_turn_prompt
 
@@ -87,7 +87,7 @@ class WechatReplyConsumer:
         )
         decision = self.runner.decide(prompt, None)
 
-        if decision.action in (CodexAction.SEND_REPLY, CodexAction.ASK_CLARIFYING_QUESTION):
+        if decision.action in (AgentAction.SEND_REPLY, AgentAction.ASK_CLARIFYING_QUESTION):
             unsupported_actions = [
                 action
                 for action in decision.system_actions
@@ -130,7 +130,7 @@ class WechatReplyConsumer:
                     "trigger_text": trigger.text,
                 },
             )
-        elif decision.action in (CodexAction.NO_REPLY, CodexAction.HANDOFF_TO_HUMAN):
+        elif decision.action in (AgentAction.NO_REPLY, AgentAction.HANDOFF_TO_HUMAN):
             self.store.finalize_wechat_reply_task(
                 task_id=task.id,
                 expected_execution_generation=task.execution_generation,

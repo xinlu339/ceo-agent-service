@@ -654,7 +654,7 @@ def _worker(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=object(),
+        agent=object(),
         direct_agent_runner=runner,
         channel_gates={
             "dingtalk": ReadyGate("dingtalk"),
@@ -678,7 +678,7 @@ def _worker_with_protocol_executor(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=object(),
+        agent=object(),
         direct_agent_runner=DirectAgentRunner(
             store=store,
             workspace=tmp_path,
@@ -763,7 +763,7 @@ def test_unknown_oa_run_reconciliation_receives_raw_instance_id_and_read_command
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=ContextOnlyDws([trigger]),
-        codex=object(),
+        agent=object(),
         direct_agent_runner=runner,
         channel_gates={"dingtalk": ReadyGate("dingtalk")},
         now_provider=lambda: NOW,
@@ -802,7 +802,7 @@ def test_no_action_reconciliation_rotates_generation_only_after_confirmed_absenc
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=ContextOnlyDws([trigger]),
-        codex=object(),
+        agent=object(),
         direct_agent_runner=runner,
         channel_gates={"dingtalk": ReadyGate("dingtalk")},
         now_provider=lambda: NOW,
@@ -849,7 +849,7 @@ def test_reconciliation_generation_race_skips_stale_run_and_continues(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=ContextOnlyDws([first, second]),
-        codex=object(),
+        agent=object(),
         direct_agent_runner=runner,
         channel_gates={"dingtalk": ReadyGate("dingtalk")},
         now_provider=lambda: NOW,
@@ -886,7 +886,7 @@ def test_reconciliation_failure_sets_backoff_and_is_not_reclaimed_early(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=ContextOnlyDws([trigger]),
-        codex=object(),
+        agent=object(),
         direct_agent_runner=runner,
         channel_gates={"dingtalk": ReadyGate("dingtalk")},
         now_provider=lambda: NOW,
@@ -926,7 +926,7 @@ def test_real_pi_runner_keeps_unknown_effect_when_pi_process_is_unavailable(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=ContextOnlyDws([trigger]),
-        codex=object(),
+        agent=object(),
         direct_agent_runner=runner,
         channel_gates={"dingtalk": ReadyGate("dingtalk")},
         now_provider=lambda: NOW,
@@ -967,7 +967,7 @@ def test_non_retryable_reconciliation_is_never_selected_by_due_scan(tmp_path: Pa
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=ContextOnlyDws([trigger]),
-        codex=object(),
+        agent=object(),
         direct_agent_runner=runner,
         channel_gates={"dingtalk": ReadyGate("dingtalk")},
         now_provider=lambda: NOW,
@@ -1016,7 +1016,7 @@ def test_unknown_run_without_incomplete_effect_is_rotated_for_safe_rerun(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=ContextOnlyDws([trigger]),
-        codex=object(),
+        agent=object(),
         direct_agent_runner=runner,
         channel_gates={"dingtalk": ReadyGate("dingtalk")},
         now_provider=lambda: NOW,
@@ -1990,7 +1990,7 @@ def test_stale_recovery_does_not_revisit_atomically_completed_reconciliation(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=ContextOnlyDws([trigger]),
-        codex=object(),
+        agent=object(),
         direct_agent_runner=ScriptedDirectAgentRunner(store, []),
         channel_gates={"dingtalk": ReadyGate("dingtalk")},
         now_provider=lambda: NOW,

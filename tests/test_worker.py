@@ -23,8 +23,8 @@ from app.agent_runner import (
     LEASE_SECONDS,
 )
 import app.worker as worker_module
-from app.codex_decision import (
-    CodexDecisionRunner,
+from app.agent_decision import (
+    AgentDecisionRunner,
 )
 from app.channel_gate import (
     ChannelGateResult,
@@ -35,8 +35,8 @@ from app.channel_gate import (
 )
 from app.corpus import CorpusRecord
 from app.dingtalk_models import (
-    CodexAction,
-    CodexDecision,
+    AgentAction,
+    AgentDecision,
     DingTalkConversation,
     DingTalkMessage,
     SensitivityKind,
@@ -1196,7 +1196,7 @@ class FakeDws:
 class FakeCodex:
     def __init__(
         self,
-        decision: CodexDecision,
+        decision: AgentDecision,
         last_session_id: str | None = None,
         next_session_id: str | None = None,
         audit_tool_events: list[dict[str, str]] | None = None,
@@ -1219,7 +1219,7 @@ class FakeCodex:
         prompt: str,
         session_id: str | None,
         image_paths: list[Path] | None = None,
-    ) -> CodexDecision:
+    ) -> AgentDecision:
         if self.before_decide is not None:
             self.before_decide(prompt, session_id)
         paths = image_paths or []
@@ -1250,7 +1250,7 @@ class FakeEnvelopeCodex:
 
 
 class SequencedFakeCodex:
-    def __init__(self, decisions: list[CodexDecision]):
+    def __init__(self, decisions: list[AgentDecision]):
         self.decisions = decisions
         self.calls: list[tuple[str, str | None, list[Path]]] = []
         self.last_session_id: str | None = None
@@ -1263,7 +1263,7 @@ class SequencedFakeCodex:
         prompt: str,
         session_id: str | None,
         image_paths: list[Path] | None = None,
-    ) -> CodexDecision:
+    ) -> AgentDecision:
         self.calls.append((prompt, session_id, image_paths or []))
         self.last_session_id = session_id or self.last_session_id or "session-1"
         return self.decisions[len(self.calls) - 1]
@@ -1370,7 +1370,7 @@ def make_worker(
     return DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=codex,
+        agent=codex,
         dry_run=dry_run,
         style_profile=style_profile,
         style_records=style_records,
@@ -1387,7 +1387,7 @@ def test_worker_defaults_to_real_channel_gates(tmp_path, monkeypatch):
     worker = worker_module.DingTalkAutoReplyWorker(
         store=AutoReplyStore(tmp_path / "worker.sqlite3"),
         dws=FakeDws([], {}),
-        codex=FakeCodex([]),
+        agent=FakeCodex([]),
     )
 
     assert isinstance(worker.channel_gates["dingtalk"], DwsChannelGate)
@@ -1466,7 +1466,7 @@ def write_profile_for_consumer_test(tmp_path: Path, monkeypatch) -> str:
     return content
 
 
-def test_consumer_codex_command_injects_work_profile_content(
+def test_consumer_pi_command_injects_work_profile_content(
     tmp_path: Path, monkeypatch
 ):
     profile_content = write_profile_for_consumer_test(tmp_path, monkeypatch)
@@ -1500,12 +1500,12 @@ def test_consumer_codex_command_injects_work_profile_content(
         {"cid-1": [message("@Alex Chen(明哥) 这个候选人可以推进吗？")]},
     )
     dws.user_departments["sender-user-1"] = {"dept-candidate"}
-    codex = CodexDecisionRunner(
+    agent = AgentDecisionRunner(
         workspace=tmp_path,
         executor=executor,
-        codex_home=tmp_path,
+        session_dir=tmp_path,
     )
-    worker = make_worker(tmp_path, dws, codex, monkeypatch)
+    worker = make_worker(tmp_path, dws, agent, monkeypatch)
     runner = script_agent_result(
         worker,
         explicit_agent_result(
@@ -1563,12 +1563,12 @@ def test_consumer_uses_profile_to_ask_for_missing_candidate_materials(
         {"cid-1": [message("@Alex Chen(明哥) 这个候选人可以推进吗？")]},
     )
     dws.user_departments["sender-user-1"] = {"dept-candidate"}
-    codex = CodexDecisionRunner(
+    agent = AgentDecisionRunner(
         workspace=tmp_path,
         executor=executor,
-        codex_home=tmp_path,
+        session_dir=tmp_path,
     )
-    worker = make_worker(tmp_path, dws, codex, monkeypatch)
+    worker = make_worker(tmp_path, dws, agent, monkeypatch)
     runner = script_agent_result(
         worker,
         explicit_agent_result(
@@ -1597,7 +1597,7 @@ def test_group_without_principal_mention_does_not_call_codex_or_send(
     tmp_path: Path, monkeypatch
 ):
     dws = FakeDws([conversation()], {"cid-1": [message("同步一下进展")]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
     worker.run_once()
@@ -1659,7 +1659,7 @@ def test_produce_once_records_list_unread_failure_without_crashing(
 ):
     notifications = []
     dws = FakeDws([], {}, list_error=DwsError("not authenticated", code="2"))
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     monkeypatch.setattr(
         "app.worker.send_macos_notification",
@@ -1679,7 +1679,7 @@ def test_produce_once_suppresses_transient_list_unread_notification(
 ):
     notifications = []
     dws = FakeDws([], {}, list_error=DwsError("transient discovery timeout", code="6"))
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     monkeypatch.setattr(
         "app.worker.send_macos_notification",
@@ -1709,7 +1709,7 @@ def test_produce_once_clears_transient_list_unread_error_after_success(
 ):
     notifications = []
     dws = FakeDws([], {}, list_error=DwsError("transient discovery timeout", code="6"))
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     monkeypatch.setattr(
         "app.worker.send_macos_notification",
@@ -1741,7 +1741,7 @@ def test_read_conversation_messages_suppresses_transient_errors(
         {"cid-1": []},
         read_errors={"cid-1": transient_error},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     conv = conversation(single_chat=True)
 
@@ -1785,7 +1785,7 @@ def test_read_conversation_messages_suppresses_token_verified_errors_until_thres
         {"cid-1": []},
         read_errors={"cid-1": token_error},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     conv = conversation(single_chat=True)
 
@@ -1832,7 +1832,7 @@ def test_call_dws_suppresses_message_read_system_errors(
         code="1",
     )
     dws = FakeDws([], {})
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     monkeypatch.setattr(
         "app.worker.send_macos_notification",
@@ -1887,7 +1887,7 @@ def test_read_recent_messages_missing_direct_chat_target_is_empty_context(
         {"cid-1": []},
         read_errors={"cid-1": missing_target_error},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.set_service_state(
         "dws_transient_error_count:read_recent_messages",
@@ -1931,7 +1931,7 @@ def test_queued_task_starts_pat_authorization_when_context_read_needs_authorizat
         unread_errors={"cid-1": auth_error},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.NO_REPLY, reason="broadcast only")
+        AgentDecision(action=AgentAction.NO_REPLY, reason="broadcast only")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     monkeypatch.setattr(
@@ -1973,7 +1973,7 @@ def test_consume_manual_rerun_task_forces_new_decision(tmp_path: Path, monkeypat
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="unused")),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="unused")),
         monkeypatch,
     )
     attempt_id = worker.store.record_reply_attempt(
@@ -2016,7 +2016,7 @@ def test_produce_once_starts_dws_auth_login_once_for_non_ready_gate(
         "token_valid": False,
         "refresh_token_valid": False,
     }
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(
         tmp_path,
         dws,
@@ -2096,7 +2096,7 @@ def test_produce_once_restarts_stale_persisted_dws_auth_login(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到")),
+        FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到")),
         monkeypatch,
         channel_gates=fixed_channel_gates(ChannelGateState.NEEDS_LOGIN),
     )
@@ -2131,7 +2131,7 @@ def test_produce_once_does_not_start_second_dws_auth_login_for_recent_request(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到")),
+        FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到")),
         monkeypatch,
         channel_gates=fixed_channel_gates(ChannelGateState.NEEDS_LOGIN),
     )
@@ -2173,7 +2173,7 @@ def test_produce_once_restarts_dws_auth_login_after_previous_terminal_state(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到")),
+        FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到")),
         monkeypatch,
         channel_gates=fixed_channel_gates(ChannelGateState.NEEDS_LOGIN),
     )
@@ -2246,7 +2246,7 @@ def test_produce_once_continues_when_mention_recovery_fails(
         mentioned_error=DwsError("list mentions failed"),
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     monkeypatch.setattr(
@@ -2277,7 +2277,7 @@ def test_produce_once_enqueues_candidate_without_calling_codex(
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -2295,7 +2295,7 @@ def test_produce_once_does_not_send_processing_ack_for_new_reply_task(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -2317,7 +2317,7 @@ def test_produce_once_fast_path_reads_only_unread_messages_without_recent_contex
     dws.unread_messages = {"cid-1": [trigger]}
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.set_service_state(
@@ -2340,7 +2340,7 @@ def test_produce_once_fast_path_enqueues_pending_before_backoff(
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(
         tmp_path,
@@ -2387,7 +2387,7 @@ def test_produce_once_fast_path_skips_bare_minutes_link_before_backoff(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.unread_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(
         tmp_path,
@@ -2420,7 +2420,7 @@ def test_produce_once_fast_path_task_is_claimable_after_backoff(
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(
         tmp_path,
@@ -2462,8 +2462,8 @@ def test_calendar_card_task_is_enriched_with_matching_pending_invite(
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="标题和组织者足以判断需要参加。",
             calendar_response_status="accepted",
             audit_summary="已读取待响应日程。",
@@ -2769,7 +2769,7 @@ def test_fast_path_backoff_processes_trigger_when_unread_clears_without_user_rep
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="可以，先推进")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="可以，先推进")
     )
     worker = make_worker(
         tmp_path,
@@ -2851,8 +2851,8 @@ def test_robot_direct_message_triggers_bot_reply(tmp_path: Path, monkeypatch):
     dws.robot_direct_messages = {"cid-bot": [trigger]}
     dws.resolved_senders["user-open-1"] = "principal-user-1"
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="你好，我在。",
         )
     )
@@ -2887,7 +2887,7 @@ def test_robot_direct_message_is_prioritized_when_task_limit_is_small(
     )
     dws = FakeDws([conversation()], {"cid-1": [group_trigger]})
     dws.robot_direct_messages = {"cid-bot": [robot_trigger]}
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
     assert worker.produce_once(max_tasks=1) == 1
@@ -2917,7 +2917,7 @@ def test_robot_direct_message_still_queues_when_unread_listing_fails(
         list_error=DwsError("transient discovery timeout", code="6"),
     )
     dws.robot_direct_messages = {"cid-bot": [robot_trigger]}
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
     assert worker.produce_once(max_tasks=1) == 1
@@ -2946,7 +2946,7 @@ def test_robot_direct_current_user_message_still_triggers_reply(
     )
     dws = FakeDws([], {"cid-bot": [trigger]})
     dws.robot_direct_messages = {"cid-bot": [trigger]}
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
     worker.store.set_current_user_id("principal-user-1")
     worker.store.upsert_org_user_profile(
@@ -3104,8 +3104,8 @@ def test_worker_creates_markdown_doc_for_long_reply_before_sending(
     trigger = message("@Alex Chen(明哥) 帮我看下")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="A" * 6000,
             sensitivity_kind=SensitivityKind.GENERAL,
         )
@@ -3136,8 +3136,8 @@ def test_worker_falls_back_to_chunked_reply_when_automatic_long_reply_doc_fails(
         lambda name, content: {"result": {"name": name}},
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="A" * 6000,
             sensitivity_kind=SensitivityKind.GENERAL,
         )
@@ -3163,8 +3163,8 @@ def test_worker_creates_markdown_doc_when_decision_requests_document_reply(
     trigger = message("@Alex Chen(明哥) 写一版方案")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="# 方案\n\n先按 A 路径推进。",
             sensitivity_kind=SensitivityKind.GENERAL,
             system_actions=[
@@ -3202,8 +3202,8 @@ def test_worker_falls_back_when_explicit_document_create_has_no_url(
 
     monkeypatch.setattr(dws, "create_markdown_doc", create_doc_without_url)
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="# 方案\n\n先按 A 路径推进。",
             sensitivity_kind=SensitivityKind.GENERAL,
             system_actions=[
@@ -3245,8 +3245,8 @@ def test_worker_falls_back_to_chunked_reply_when_automatic_doc_permission_fails(
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.doc_editor_permission_error = DwsError("doc permission add failed")
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="A" * 6000,
             sensitivity_kind=SensitivityKind.GENERAL,
         )
@@ -3273,8 +3273,8 @@ def test_worker_keeps_explicit_document_reply_failed_when_permission_fails(
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.doc_editor_permission_error = DwsError("doc permission add failed")
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="# 方案\n\n先按 A 路径推进。",
             sensitivity_kind=SensitivityKind.GENERAL,
             system_actions=[
@@ -3316,8 +3316,8 @@ def test_worker_does_not_fallback_group_send_when_native_reply_visibility_unconf
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.reply_visible = False
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="A" * 6000,
             sensitivity_kind=SensitivityKind.GENERAL,
         )
@@ -3351,7 +3351,7 @@ def test_queued_task_falls_back_to_trigger_when_context_read_fails(
     dws.read_errors["cid-1"] = DwsError("forbidden request", code="1001")
     dws.unread_errors["cid-1"] = DwsError("forbidden request", code="1001")
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="这个方向可以")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="这个方向可以")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     runner = script_completed_result(worker, operation_id="context-read-failed")
@@ -3398,8 +3398,8 @@ def test_fast_path_backoff_skips_when_current_user_replied_after_trigger(
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             audit_summary="本人已经处理，无需再次回复。",
         )
     )
@@ -3444,7 +3444,7 @@ def test_fast_path_backoff_skips_when_trigger_was_recalled_after_wait(
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.NO_REPLY, audit_summary="消息已撤回，无需回复。")
+        AgentDecision(action=AgentAction.NO_REPLY, audit_summary="消息已撤回，无需回复。")
     )
     worker = make_worker(
         tmp_path,
@@ -3510,7 +3510,7 @@ def test_produce_once_fast_path_skips_unread_conversations_unchanged_since_last_
     )
     dws.mentioned_messages = {"cid-new": [new_trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.set_service_state(
@@ -3540,7 +3540,7 @@ def test_produce_once_skips_recent_conversation_recovery_between_hourly_fallback
     )
     dws = FakeDws([], {"cid-recovered": [message("补充一下", message_id="msg-new")]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.upsert_conversation(
@@ -3577,7 +3577,7 @@ def test_produce_once_runs_recent_conversation_recovery_once_per_hour(
     new_message.create_time = "2026-05-13 18:05:00"
     dws = FakeDws([], {"cid-recovered": [old_message, new_message]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.upsert_conversation(
@@ -3610,7 +3610,7 @@ def test_produce_once_does_not_recover_recent_group_conversations(
     dws = FakeDws([], {"cid-group": [message("群里补充一下")]})
     dws.read_errors["cid-group"] = DwsError("forbidden request", code="1001")
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.upsert_conversation(
@@ -3639,7 +3639,7 @@ def test_current_user_candidate_filter_uses_only_local_identity_cache(
 ):
     dws = FakeDws([], {}, current_user_error=RuntimeError("remote lookup"))
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     current_user_message = message(
@@ -3669,7 +3669,7 @@ def test_produce_once_checks_dws_upgrade_once_per_local_day(
         "needs_upgrade": True,
     }
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3688,7 +3688,7 @@ def test_produce_once_records_dws_upgrade_check_failure_in_service_state(
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.upgrade_check_error = RuntimeError("upgrade service unavailable")
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3717,7 +3717,7 @@ def test_produce_once_records_dws_upgrade_install_failure_without_blocking_messa
     }
     dws.upgrade_install_error = RuntimeError("upgrade install unavailable")
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3746,7 +3746,7 @@ def test_produce_once_refreshes_org_cache_once_per_seven_days(
     monkeypatch.setattr(worker_module, "refresh_org_cache", fake_refresh_org_cache)
     dws = FakeDws([], {})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3770,7 +3770,7 @@ def test_produce_once_refreshes_org_cache_after_seven_days(
     monkeypatch.setattr(worker_module, "refresh_org_cache", fake_refresh_org_cache)
     dws = FakeDws([], {})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.set_service_state("org_cache_refreshed_date", "2026-05-06")
@@ -3793,7 +3793,7 @@ def test_produce_once_refreshes_org_cache_when_refresh_date_is_invalid(
     monkeypatch.setattr(worker_module, "refresh_org_cache", fake_refresh_org_cache)
     dws = FakeDws([], {})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.set_service_state("org_cache_refreshed_date", "invalid")
@@ -3814,7 +3814,7 @@ def test_produce_once_records_org_cache_refresh_failure_without_blocking_message
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3836,7 +3836,7 @@ def test_produce_once_skips_messages_older_than_local_24_hour_window(
     trigger.create_time = "2026-05-13 00:59:59"
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3856,7 +3856,7 @@ def test_produce_once_uses_beijing_message_time_against_local_24_hour_window(
     trigger.create_time = "2026-05-13 01:00:00"
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3872,7 +3872,7 @@ def test_repeated_produce_once_does_not_send_processing_ack(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3893,7 +3893,7 @@ def test_consume_once_does_not_send_processing_ack(
         assert dws.sent == []
 
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走"),
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走"),
         before_decide=before_decide,
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
@@ -3914,7 +3914,7 @@ def test_repeated_produce_once_does_not_duplicate_pending_task(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3933,7 +3933,7 @@ def test_produce_once_treats_configured_agent_name_mention_like_principal_mentio
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -3962,7 +3962,7 @@ def test_produce_once_uses_recent_context_when_unread_read_fails_for_group_menti
     )
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     monkeypatch.setattr(
@@ -3995,7 +3995,7 @@ def test_produce_once_suppresses_repeated_forbidden_unread_reads(
         unread_errors={"cid-1": DwsError("forbidden request", code="1001")},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -4025,7 +4025,7 @@ def test_produce_once_suppresses_repeated_permission_denied_unread_reads(
         },
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -4054,7 +4054,7 @@ def test_produce_once_does_not_cache_authorization_errors_as_forbidden_reads(
         },
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -4084,7 +4084,7 @@ def test_produce_once_starts_pat_authorization_without_forbidden_read_cache(
         unread_errors={"cid-1": pat_error},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     monkeypatch.setattr(
@@ -4117,7 +4117,7 @@ def test_forbidden_read_cache_only_suppresses_during_short_cooldown(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="test")),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="test")),
         monkeypatch,
     )
     forbidden_until = (
@@ -4149,7 +4149,7 @@ def test_stale_forbidden_read_cache_does_not_block_recovered_single_chat(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="test")),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="test")),
         monkeypatch,
     )
     forbidden_until = (
@@ -4189,7 +4189,7 @@ def test_produce_once_does_not_notify_when_only_recent_context_read_fails(
     )
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     monkeypatch.setattr(
@@ -4211,7 +4211,7 @@ def test_consume_once_processes_queued_task(tmp_path: Path, monkeypatch):
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     runner = script_completed_result(worker, operation_id="queued-task-reply")
@@ -4334,7 +4334,7 @@ def test_lark_blocked_task_does_not_block_later_dingtalk_task(tmp_path, monkeypa
     worker = worker_module.DingTalkAutoReplyWorker(
         store=store,
         dws=FakeDws([], {}),
-        codex=FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        agent=FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         now_provider=fixed_worker_now,
         channel_gates={"dingtalk": dingtalk_gate, "lark": lark_gate},
         direct_agent_runner=FakeAgentResultRunner(store),
@@ -4390,7 +4390,7 @@ def test_consume_once_does_not_scan_tasks_inserted_after_pass_snapshot(
     worker = worker_module.DingTalkAutoReplyWorker(
         store=store,
         dws=FakeDws([], {}),
-        codex=FakeCodex([]),
+        agent=FakeCodex([]),
         now_provider=fixed_worker_now,
         channel_gates={"dingtalk": dingtalk_gate, "lark": lark_gate},
     )
@@ -4544,7 +4544,7 @@ def test_consume_once_appends_feedback_links_when_configured(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     runner = script_completed_result(worker, operation_id="feedback-configured-reply")
@@ -4572,7 +4572,7 @@ def test_consume_once_uses_required_feedback_prefix_after_unanswered_week(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     runner = script_completed_result(worker, operation_id="feedback-week-reply")
@@ -4608,7 +4608,7 @@ def test_consume_once_keeps_reply_after_unanswered_feedback_deadline(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     runner = script_completed_result(worker, operation_id="feedback-deadline-reply")
@@ -4908,11 +4908,11 @@ def test_consume_once_records_stale_processing_tasks_before_requeue(
             (agent_claim.run.id,),
         )
     dws = FakeDws([conversation()], {"cid-1": []})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, audit_summary="无需回复。"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, audit_summary="无需回复。"))
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=codex,
+        agent=codex,
         now_provider=fixed_worker_now,
         channel_gates=fixed_channel_gates(),
         direct_agent_runner=FakeAgentResultRunner(store),
@@ -4966,7 +4966,7 @@ def test_stale_wechat_read_only_decision_requeues_with_precise_reason(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=FakeDws([], {}),
-        codex=FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, audit_summary="unused")),
+        agent=FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, audit_summary="unused")),
         now_provider=fixed_worker_now,
         channel_gates=fixed_channel_gates(),
         direct_agent_runner=FakeAgentResultRunner(store),
@@ -5018,7 +5018,7 @@ def test_consume_once_does_not_requeue_stale_task_with_live_agent_lease(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=FakeDws([conversation()], {"cid-1": []}),
-        codex=FakeCodex([]),
+        agent=FakeCodex([]),
         now_provider=lambda: datetime.now().astimezone(),
         channel_gates=fixed_channel_gates(),
         direct_agent_runner=FakeAgentResultRunner(store),
@@ -5080,7 +5080,7 @@ def test_consume_once_does_not_recover_older_single_chat_claim(
         unread_messages={"cid-1": [new_message, old_message]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到，按第二条处理。")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到，按第二条处理。")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.enqueue_reply_task(
@@ -5129,7 +5129,7 @@ def test_consume_once_authorization_failure_waits_without_final_failure(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     gates = fixed_channel_gates(dingtalk=ChannelGateState.NEEDS_LOGIN)
     worker = make_worker(
@@ -5265,7 +5265,7 @@ def test_explicit_codex_provider_missing_auth_header_still_requires_authorizatio
 ):
     monkeypatch.setenv("CEO_PI_PROVIDER", "custom-responses")
 
-    normalized = worker_module._normalize_codex_stop_error_reason(
+    normalized = worker_module._normalize_agent_stop_error_reason(
         "unexpected status 401 Unauthorized: Missing bearer or basic "
         "authentication in header, url: https://api.example.invalid/v1/responses"
     )
@@ -5367,7 +5367,7 @@ def test_consume_once_external_dependency_does_not_exhaust_business_attempts(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     runner = FakeAgentResultRunner(
         AutoReplyStore(tmp_path / "worker.sqlite3"),
@@ -5457,7 +5457,7 @@ def test_unresolvable_non_candidate_sender_does_not_block_conversation(
         current_user_error=RuntimeError("sender not resolved"),
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -5474,7 +5474,7 @@ def test_single_chat_rendered_schedule_asks_for_readable_calendar_detail(
     trigger = message("[日程]", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.HANDOFF_TO_HUMAN, reason="不应该调用")
+        AgentDecision(action=AgentAction.HANDOFF_TO_HUMAN, reason="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -5503,7 +5503,7 @@ def test_non_text_calendar_without_detail_asks_for_readable_calendar_detail(
     trigger = message("日程卡片", single_chat=True, message_type="calendar")
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.HANDOFF_TO_HUMAN, reason="日程详情仍不可读")
+        AgentDecision(action=AgentAction.HANDOFF_TO_HUMAN, reason="日程详情仍不可读")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -5539,8 +5539,8 @@ def test_calendar_link_message_is_handled_as_calendar_invite(tmp_path: Path, mon
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.ASK_CLARIFYING_QUESTION,
+        AgentDecision(
+            action=AgentAction.ASK_CLARIFYING_QUESTION,
             reply_text="请补充这场会议希望我决策或输入的内容。",
             reason="calendar_agent_needs_more_context",
         )
@@ -5585,8 +5585,8 @@ def test_calendar_invite_still_injects_calendar_context_before_codex(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="日程上下文足够判断。",
         )
     )
@@ -5629,8 +5629,8 @@ def test_bare_calendar_card_uses_unique_pending_invite_from_sender(
     ] = [invite]
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="标题和组织者足以判断需要参加客户会议。",
             calendar_response_status="accepted",
             audit_summary="已读取待响应日程；标题和组织者足以判断需要接受。",
@@ -5681,8 +5681,8 @@ def test_calendar_response_organizer_error_is_terminal_noop(
         code="300000",
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="组织者本人不需要文字回复。",
             calendar_response_status="accepted",
             audit_summary="已读取待响应日程。",
@@ -5729,8 +5729,8 @@ def test_calendar_response_missing_event_error_is_terminal_noop(
         code="business_error",
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="日程已不存在，不需要文字回复。",
             calendar_response_status="accepted",
             audit_summary="已读取待响应日程。",
@@ -5770,8 +5770,8 @@ def test_send_reply_calendar_response_failure_does_not_send_reply(
     dws.calendar_response_error = DwsError("calendar accept failed", code="500")
     dws.calendar_events["agent-live-read"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="我先参加，重点看续约方案。",
             reason="客户续约会议有明确业务价值，应该参加。",
             calendar_response_status="accepted",
@@ -5820,8 +5820,8 @@ def test_rendered_calendar_card_without_message_type_uses_unique_pending_invite_
     ] = [invite]
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="标题足以判断先暂定。",
             calendar_response_status="tentative",
             audit_summary="已按唯一待响应日程匹配裸日程卡片。",
@@ -5899,8 +5899,8 @@ def test_bare_calendar_card_enriches_sender_pending_invites_to_match_recent_crea
         enriched_invite
     ]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="已读取候选人面试日程并接受。",
             calendar_response_status="accepted",
             audit_summary="已通过详情接口读取刚创建的待响应日程。",
@@ -5931,8 +5931,8 @@ def test_existing_dry_run_calendar_response_is_executed_without_rerunning_codex(
     trigger = message("[日程]", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="不应该重新生成",
         )
     )
@@ -6032,8 +6032,8 @@ def test_calendar_response_respects_worker_dry_run(
     ] = [invite]
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="标题足以判断需要接受。",
             calendar_response_status="accepted",
         )
@@ -6075,8 +6075,8 @@ def test_bare_calendar_card_uses_already_accepted_invite_as_context(
     ] = [invite]
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="这个日程已经接受，后面按会议主题准备。",
             reason="日程已经接受，标题和描述足够判断。",
             audit_summary="已按消息时间匹配同一发送人刚创建的日程。",
@@ -6145,8 +6145,8 @@ def test_bare_calendar_card_prefers_pending_attendee_invite_over_resolved_sender
         f"{pending_attendee_event.start_time}|{pending_attendee_event.end_time}"
     ] = [pending_attendee_event, accepted_conflict]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="融资对齐交流已经占用同一时间，先不接受。",
             calendar_response_status="declined",
             audit_summary="应优先处理待本人响应的 18:30 日程。",
@@ -6190,8 +6190,8 @@ def test_already_accepted_calendar_response_is_noop_without_forced_reply(
     ] = [invite]
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="这个会我接受。",
             calendar_response_status="accepted",
         )
@@ -6233,8 +6233,8 @@ def test_send_reply_with_already_accepted_calendar_status_does_not_call_response
     ] = [invite]
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="已看到，按商机清单和客户优先级准备。",
             reason="日程已接受，只同步会前准备重点。",
             calendar_response_status="accepted",
@@ -6279,8 +6279,8 @@ def test_calendar_response_verifies_result_before_sending_reply(
     dws.calendar_event_details["invite-1"] = still_pending
     dws.calendar_response_updates_details = False
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="这个会我接受。",
             reason="需要参加客户复盘。",
             calendar_response_status="accepted",
@@ -6325,8 +6325,8 @@ def test_bare_calendar_card_uses_unique_future_accepted_invite_without_change_ti
     ] = [invite]
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="已看到圆桌会，按测试岗位画像和候选人结论来准备。",
             reason="同发送人的唯一未来日程已经匹配。",
         )
@@ -6386,8 +6386,8 @@ def test_bare_calendar_card_uses_closest_recent_pending_invite_from_sender(
         matched_invite
     ]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="候选人二面需要参加。",
             calendar_response_status="accepted",
             audit_summary="已按消息时间匹配最近创建的待响应日程。",
@@ -6434,8 +6434,8 @@ def test_bare_calendar_card_uses_single_chat_sender_attendee_invite(
     ] = [invite]
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="标题和描述足以判断需要参加。",
             calendar_response_status="accepted",
             audit_summary="已按消息时间匹配刚创建的本人待响应日程。",
@@ -6483,8 +6483,8 @@ def test_bare_calendar_card_ignores_sender_pending_invite_changed_too_early(
         "2026-05-13T17:00:00+08:00|2026-05-27T17:00:00+08:00"
     ] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.HANDOFF_TO_HUMAN,
+        AgentDecision(
+            action=AgentAction.HANDOFF_TO_HUMAN,
             reason="日程创建时间与触发消息不一致，需要人工确认目标。",
         )
     )
@@ -6534,8 +6534,8 @@ def test_bare_calendar_card_does_not_guess_multiple_pending_invites(
         ),
     ]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.HANDOFF_TO_HUMAN,
+        AgentDecision(
+            action=AgentAction.HANDOFF_TO_HUMAN,
             reason="存在多个待响应日程，无法唯一确定目标。",
         )
     )
@@ -6586,8 +6586,8 @@ def test_bare_calendar_card_uses_near_upcoming_invite_without_change_time(
         near_invite
     ]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="标题和时间足以判断需要接受这次静默会。",
             calendar_response_status="accepted",
         )
@@ -6644,8 +6644,8 @@ def test_bare_calendar_card_uses_pending_invite_created_near_message(
         f"{matched_invite.start_time}|{matched_invite.end_time}"
     ] = [matched_invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.ASK_CLARIFYING_QUESTION,
+        AgentDecision(
+            action=AgentAction.ASK_CLARIFYING_QUESTION,
             reply_text="请补充这场会议希望我决策或输入的内容。",
             reason="calendar_agent_needs_more_context",
         )
@@ -6685,8 +6685,8 @@ def test_calendar_retry_ignores_old_system_notification_skip(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.ASK_CLARIFYING_QUESTION,
+        AgentDecision(
+            action=AgentAction.ASK_CLARIFYING_QUESTION,
             reply_text="请补充这场会议希望我决策或输入的内容。",
             reason="calendar_agent_needs_more_context",
         )
@@ -6698,7 +6698,7 @@ def test_calendar_retry_ignores_old_system_notification_skip(
         trigger_message_id="msg-1",
         trigger_sender="sender",
         trigger_text="[日程]",
-        action=CodexAction.NO_REPLY.value,
+        action=AgentAction.NO_REPLY.value,
         sensitivity_kind="general",
         codex_reason="system_or_notification_message",
         send_status="skipped",
@@ -6758,8 +6758,8 @@ def test_calendar_invite_without_description_asks_for_attendance_reason(
     dws.calendar_invites["msg-1"] = invite
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite, existing]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.ASK_CLARIFYING_QUESTION,
+        AgentDecision(
+            action=AgentAction.ASK_CLARIFYING_QUESTION,
             reply_text="这场和产品周会冲突，请补充为什么需要优先于现有日程。",
             reason="calendar_agent_needs_more_context",
         )
@@ -6813,8 +6813,8 @@ def test_calendar_invite_ignores_declined_overlapping_event(
         declined_existing,
     ]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="已拒绝过重叠会议，标题足以判断新会议可接受。",
             calendar_response_status="accepted",
             audit_summary="已读取日程；重叠会议是 declined，不构成冲突。",
@@ -6864,8 +6864,8 @@ def test_calendar_invite_ignores_pending_overlapping_event(
         pending_existing,
     ]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.ASK_CLARIFYING_QUESTION,
+        AgentDecision(
+            action=AgentAction.ASK_CLARIFYING_QUESTION,
             reply_text="请补充这场会议希望我决策或输入的内容。",
             reason="calendar_agent_needs_more_context",
         )
@@ -6901,8 +6901,8 @@ def test_calendar_invite_without_description_can_be_tentative_without_conflict(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="标题看起来相关但价值不够明确，先暂定。",
             calendar_response_status="tentative",
             audit_summary="已读取日程；标题足以判断先暂定，不需要聊天追问。",
@@ -6953,8 +6953,8 @@ def test_calendar_invite_with_description_asks_codex_to_evaluate_conflict(
     dws.calendar_invites["msg-1"] = invite
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite, existing]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="这个会议和产品周会冲突。按描述看客户升级问题优先级更高，建议接受这场并请产品周会另约。",
             reason="calendar_conflict_evaluated",
         )
@@ -6997,8 +6997,8 @@ def test_calendar_prompt_includes_current_response_status(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="已看到，按商机清单准备。",
             reason="日程已接受。",
         )
@@ -7033,8 +7033,8 @@ def test_calendar_invite_for_document_review_replies_to_use_document_comment(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="请直接@我文档让我批阅即可，只有存疑再约会。",
             reason="calendar_document_review_redirect",
         )
@@ -7074,8 +7074,8 @@ def test_calendar_static_review_description_must_process_task_before_document_re
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text=(
                 "可以，这个静默会我直接处理：上线前先收敛首屏 CTA 和表单跳转；"
                 "后续再优化客户案例的排序。"
@@ -7187,8 +7187,8 @@ def test_calendar_static_review_exposes_minutes_reference_to_agent(
         "result": {"actions": ['{"value":"Alex 给出是否推进录用的处理结论"}']}
     }
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="不建议直接推进，建议补充作业后再判断。",
             reason="静默会材料已处理，并接受日程。",
             calendar_response_status="accepted",
@@ -7241,8 +7241,8 @@ def test_calendar_document_reference_is_exposed_to_agent_for_reading(
         code="forbidden.accessDenied",
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.ASK_CLARIFYING_QUESTION,
+        AgentDecision(
+            action=AgentAction.ASK_CLARIFYING_QUESTION,
             reply_text="我现在没有权限读取这份材料，麻烦补充正文或开权限。",
             reason="calendar_material_unreadable",
             calendar_response_status="accepted",
@@ -7287,8 +7287,8 @@ def test_calendar_invite_with_clear_value_auto_accepts_without_chat_reply(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="Alex 参与有明确业务价值",
             calendar_response_status="accepted",
             audit_summary="日程描述明确，且需要 Alex 做关键客户交付判断。",
@@ -7332,8 +7332,8 @@ def test_rerun_calendar_card_recovers_event_from_existing_attempt(
     dws.calendar_event_details["invite-1"] = invite
     dws.calendar_events[f"{invite.start_time}|{invite.end_time}"] = [invite]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="客户拜访前需要同步项目情况和后续计划，有必要参加。",
             calendar_response_status="accepted",
             audit_summary="已从既有 attempt 恢复日历详情并判断需要接受。",
@@ -7434,8 +7434,8 @@ def test_rerun_calendar_card_matches_already_accepted_invite_from_sender(
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="客户拜访前需要同步项目情况和后续计划，有必要参加。",
             calendar_response_status="accepted",
             audit_summary="已从同发送人的已接受日程恢复详情并判断需要接受。",
@@ -7495,8 +7495,8 @@ def test_calendar_invite_no_reply_without_auto_accept_reason_does_not_accept(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="not relevant",
             audit_summary="不需要处理。",
         )
@@ -7532,8 +7532,8 @@ def test_calendar_invite_agent_can_decline_without_chat_reply(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="会议只是状态同步，不需要本人参加。",
             calendar_response_status="declined",
             audit_summary="已读取日程；描述显示只是同步信息，不需要本人输入。",
@@ -7573,8 +7573,8 @@ def test_queued_calendar_response_completes_task_with_terminal_attempt_update(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.calendar_invites["msg-1"] = invite
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="会议只是状态同步，不需要本人参加。",
             calendar_response_status="declined",
             audit_summary="已读取日程；描述显示只是同步信息，不需要本人输入。",
@@ -7622,7 +7622,7 @@ def test_structured_link_card_is_skipped_before_codex(tmp_path: Path, monkeypatc
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -7653,8 +7653,8 @@ def test_single_chat_alidocs_card_reaches_codex_as_material_reference(
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="这份周会材料需要先读材料再判断。",
             audit_summary="私聊文档卡片已进入 agent 判断。",
         )
@@ -7706,8 +7706,8 @@ def test_structured_approval_card_is_processed_by_direct_agent(
         )
     ]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.HANDOFF_TO_HUMAN,
+        AgentDecision(
+            action=AgentAction.HANDOFF_TO_HUMAN,
             reason="审批需要本人处理",
             audit_summary="结构化 OA 卡片需要按审批审阅原则处理。",
         )
@@ -7748,7 +7748,7 @@ def test_direct_agent_oa_receipt_is_persisted_with_approval_history(
         "taskId": "task-1",
     }
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     result = AgentResult(
         outcome=AgentOutcome.NEEDS_HUMAN,
@@ -7782,7 +7782,7 @@ def test_existing_commented_oa_attempt_is_terminal(tmp_path: Path, monkeypatch):
         single_chat=True,
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -7831,7 +7831,7 @@ def test_single_chat_oa_follow_up_reuses_recent_review_target(
         single_chat=True,
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -7883,7 +7883,7 @@ def test_automatic_sync_notification_is_skipped_before_codex(
     trigger = message("AI 自动同步成功：董事会筹备组纪要", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -7899,7 +7899,7 @@ def test_file_state_notification_is_skipped_before_codex(tmp_path: Path, monkeyp
     trigger = message("文档已更新：董事会材料", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -7917,7 +7917,7 @@ def test_project_status_notification_is_skipped_before_codex(
     trigger = message("项目立项已提交", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -7935,8 +7935,8 @@ def test_status_like_message_with_followup_request_is_processed_by_codex(
     trigger = message("文件已更新，帮忙看一下", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="test",
             audit_summary="带请求的文件状态消息需要交给 agent 判断。",
         )
@@ -7955,8 +7955,8 @@ def test_question_with_link_still_goes_to_codex(tmp_path: Path, monkeypatch):
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="test",
             audit_summary="只需上下文判断，不需要回复。",
         )
@@ -7973,8 +7973,8 @@ def test_bare_external_link_is_processed_by_codex(tmp_path: Path, monkeypatch):
     trigger = message("@明哥 https://example.com/a", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="test",
             audit_summary="普通外链需要交给 agent 判断。",
         )
@@ -7999,7 +7999,7 @@ def test_bare_dingtalk_internal_link_is_skipped_before_codex(
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -8027,7 +8027,7 @@ def test_ai_minutes_permission_request_is_auto_approved_without_codex_or_reply(
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     dws.minutes_permission_requests["msg-1"] = request
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
     script_no_action(worker)
@@ -8057,8 +8057,8 @@ def test_ding_approval_reminder_is_processed_by_direct_agent(
         )
     ]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.HANDOFF_TO_HUMAN,
+        AgentDecision(
+            action=AgentAction.HANDOFF_TO_HUMAN,
             reason="审批需要本人处理",
             audit_summary="审批催办需要按 OA 审阅原则处理。",
         )
@@ -8095,7 +8095,7 @@ def test_oa_approval_missing_applicant_records_failed_delivery(
     trigger = message("[Ding]刘瑞安提醒您审批他的录用申请", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该走聊天回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该走聊天回复")
     )
     worker = make_worker(
         tmp_path,
@@ -8136,7 +8136,7 @@ def test_oa_reject_action_still_requires_task_id(tmp_path: Path, monkeypatch):
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该走聊天回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该走聊天回复")
     )
     worker = make_worker(
         tmp_path,
@@ -8182,7 +8182,7 @@ def test_oa_reject_action_requires_parseable_current_user_ownership(
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该走聊天回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该走聊天回复")
     )
     worker = make_worker(
         tmp_path,
@@ -8236,7 +8236,7 @@ def test_oa_approval_does_not_execute_task_that_is_not_current_user(
         }
     }
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该走聊天回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该走聊天回复")
     )
     worker = make_worker(
         tmp_path,
@@ -8302,7 +8302,7 @@ def test_ding_approval_reminder_injects_openapi_detail_when_dws_form_is_empty(
             ],
         }
     }
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -8365,7 +8365,7 @@ def test_oa_approval_detail_always_includes_openapi_comments(
             ],
         }
     }
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -8414,7 +8414,7 @@ def test_oa_approval_detail_param_error_is_recovered_by_openapi(
             ],
         }
     }
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -8449,7 +8449,7 @@ def test_oa_approval_is_not_discovered_when_dws_gate_needs_login(
         "token_valid": False,
         "refresh_token_valid": False,
     }
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -8479,7 +8479,7 @@ def test_oa_approval_dry_run_uses_review_only_mode_and_keeps_live_retry_open(
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该走聊天回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该走聊天回复")
     )
     worker = make_worker(
         tmp_path,
@@ -8521,7 +8521,7 @@ def test_bare_dingtalk_approval_wrapper_reaches_direct_agent(
         single_chat=True,
     )
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -8556,7 +8556,7 @@ def test_group_mention_sends_signed_reply(tmp_path: Path, monkeypatch):
         },
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="group-reply")
@@ -8588,8 +8588,8 @@ def test_group_reply_replaces_leading_name_with_structured_at(
     group = conversation()
     dws = FakeDws([group], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="@ET 你要再往下收一层",
         )
     )
@@ -8614,7 +8614,7 @@ def test_success_notification_keeps_full_reply_text(tmp_path: Path, monkeypatch)
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     reply_body = "我倾向于按这个方向收敛：" + "先看行业经验和交付闭环，" * 12
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text=reply_body)
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text=reply_body)
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="long-notification-reply")
@@ -8643,7 +8643,7 @@ def test_success_notification_prepares_dingtalk_open_conversation_url(
         [conversation()],
         {"cid-1": [trigger]},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="收到"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="收到"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="notification-open-url")
     notifications: list[dict[str, str | None]] = []
@@ -8670,8 +8670,8 @@ def test_leak_check_feedback_regenerates_reply_before_blocking(
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = SequencedFakeCodex(
         [
-            CodexDecision(
-                action=CodexAction.SEND_REPLY,
+            AgentDecision(
+                action=AgentAction.SEND_REPLY,
                 reply_text="参考 [1]，先按A方案推进",
                 audit_summary="只需上下文判断，当前消息已足够确认。",
             ),
@@ -8731,7 +8731,7 @@ def test_dingtalk_material_links_are_passed_to_codex_without_worker_reading(
     )
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先读材料再判断")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先读材料再判断")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -8758,7 +8758,7 @@ def test_lark_doc_link_is_passed_to_codex_as_material_reference(
     trigger = message(f"{doc_url}\n@Alex Chen(明哥) 看下真实需求")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="已按文档判断")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="已按文档判断")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -8786,7 +8786,7 @@ def test_dingtalk_doc_link_is_passed_to_codex_without_worker_read(
     trigger = message(f"{doc_url} @Alex Chen(明哥) 看下根因和解法")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="按协作方式拆分")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="按协作方式拆分")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -8819,12 +8819,12 @@ def test_single_chat_doc_material_no_reply_retries_without_worker_read(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = SequencedFakeCodex(
         [
-            CodexDecision(
-                action=CodexAction.NO_REPLY,
+            AgentDecision(
+                action=AgentAction.NO_REPLY,
                 audit_summary="误判为无需回复。",
             ),
-            CodexDecision(
-                action=CodexAction.SEND_REPLY,
+            AgentDecision(
+                action=AgentAction.SEND_REPLY,
                 reply_text="我会先读材料再判断方案。",
                 audit_summary="私聊材料引用触发重试。",
             ),
@@ -8859,12 +8859,12 @@ def test_single_chat_file_material_no_reply_retries_without_worker_read(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = SequencedFakeCodex(
         [
-            CodexDecision(
-                action=CodexAction.NO_REPLY,
+            AgentDecision(
+                action=AgentAction.NO_REPLY,
                 audit_summary="误判为无需回复。",
             ),
-            CodexDecision(
-                action=CodexAction.SEND_REPLY,
+            AgentDecision(
+                action=AgentAction.SEND_REPLY,
                 reply_text="我会先读取文件再判断。",
                 audit_summary="私聊文件材料引用触发重试。",
             ),
@@ -8905,12 +8905,12 @@ def test_single_chat_mixed_minutes_and_doc_material_retries_for_doc(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = SequencedFakeCodex(
         [
-            CodexDecision(
-                action=CodexAction.NO_REPLY,
+            AgentDecision(
+                action=AgentAction.NO_REPLY,
                 audit_summary="误判为听记单独场景。",
             ),
-            CodexDecision(
-                action=CodexAction.SEND_REPLY,
+            AgentDecision(
+                action=AgentAction.SEND_REPLY,
                 reply_text="我会结合方案材料判断。",
                 audit_summary="文档材料触发重试。",
             ),
@@ -8961,7 +8961,7 @@ def test_dingtalk_doc_permission_setup_is_irrelevant_to_worker_material_referenc
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         monkeypatch,
         dry_run=True,
     )
@@ -8985,7 +8985,7 @@ def test_dingtalk_aitable_link_is_passed_to_codex_without_worker_read(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         monkeypatch,
         dry_run=True,
     )
@@ -9013,12 +9013,12 @@ def test_docs_dingtalk_aitable_material_no_reply_retries_without_worker_read(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = SequencedFakeCodex(
         [
-            CodexDecision(
-                action=CodexAction.NO_REPLY,
+            AgentDecision(
+                action=AgentAction.NO_REPLY,
                 audit_summary="误判为无需回复。",
             ),
-            CodexDecision(
-                action=CodexAction.SEND_REPLY,
+            AgentDecision(
+                action=AgentAction.SEND_REPLY,
                 reply_text="我会先读表格材料再判断。",
                 audit_summary="私聊 AI 表格引用触发重试。",
             ),
@@ -9058,7 +9058,7 @@ def test_dingtalk_doc_link_in_context_is_passed_to_codex_without_worker_read(
     )
     dws = FakeDws([conversation()], {"cid-1": [context_doc, trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先收敛需求")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先收敛需求")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -9088,7 +9088,7 @@ def test_referenced_file_message_is_passed_to_codex_without_worker_read(
     trigger.quoted_message_id = "file-msg-1"
     dws = FakeDws([conversation()], {"cid-1": [file_message, trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="建议补边界和owner")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="建议补边界和owner")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -9122,7 +9122,7 @@ def test_referenced_file_message_includes_drive_download_command(
     trigger.quoted_message_id = "file-msg-1"
     dws = FakeDws([conversation()], {"cid-1": [file_message, trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我会先读材料再合并规则")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我会先读材料再合并规则")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -9152,7 +9152,7 @@ def test_referenced_file_context_is_passed_to_codex_without_worker_read(
     )
     dws = FakeDws([conversation()], {"cid-1": [file_message, trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="建议补边界和owner")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="建议补边界和owner")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -9181,7 +9181,7 @@ def test_referenced_file_with_file_id_is_passed_as_read_command_without_download
         message_id="msg-2",
     )
     dws = FakeDws([conversation()], {"cid-1": [file_message, trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
     references = worker._material_references([trigger], [file_message, trigger])
@@ -9205,8 +9205,8 @@ def test_referenced_file_reference_does_not_download_or_expose_credentials(
     )
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.ASK_CLARIFYING_QUESTION,
+        AgentDecision(
+            action=AgentAction.ASK_CLARIFYING_QUESTION,
             reply_text="我现在只能看到文件名，麻烦贴一下正文。",
         )
     )
@@ -9241,7 +9241,7 @@ def test_minutes_link_is_passed_to_codex_without_worker_read(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         monkeypatch,
     )
     references = worker._material_references([trigger], [trigger])
@@ -9270,12 +9270,12 @@ def test_single_chat_minutes_no_reply_does_not_trigger_material_retry(
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = SequencedFakeCodex(
         [
-            CodexDecision(
-                action=CodexAction.NO_REPLY,
+            AgentDecision(
+                action=AgentAction.NO_REPLY,
                 audit_summary="单独听记链接按上下文判断无需回复。",
             ),
-            CodexDecision(
-                action=CodexAction.SEND_REPLY,
+            AgentDecision(
+                action=AgentAction.SEND_REPLY,
                 reply_text="这次不应该被调用。",
                 audit_summary="听记不应触发普通材料重试。",
             ),
@@ -9322,8 +9322,8 @@ def test_minutes_comment_failure_falls_back_to_original_message_reply(
     }
     dws.minutes_summaries[minutes_id] = {"result": {"fullSummary": "候选人风险偏高。"}}
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="不建议直接推进，建议补充作业后再判断。",
         )
     )
@@ -9363,8 +9363,8 @@ def test_plain_shanji_transcribe_link_replies_without_doc_comment(
     }
     dws.minutes_summaries[minutes_id] = {"result": {"fullSummary": "候选人优先级。"}}
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="先推进刁必颂、代东，其他人放第二梯队。",
         )
     )
@@ -9403,8 +9403,8 @@ def test_media_id_image_uses_dws_local_download_path(
         },
     }
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="image reviewed",
             audit_summary="只需上下文判断，不需要回复。",
         )
@@ -9437,8 +9437,8 @@ def test_image_download_failure_is_passed_to_codex_prompt(
         ("cid-1", "msg-image-1", "@img-token-1", "mediaId")
     ] = DwsError("resource download unavailable")
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.ASK_CLARIFYING_QUESTION,
+        AgentDecision(
+            action=AgentAction.ASK_CLARIFYING_QUESTION,
             reply_text="我这边图片读取失败，你发一个可查看版本我再看。",
         )
     )
@@ -9484,7 +9484,7 @@ def test_dingtalk_doc_read_failure_setup_does_not_block_codex(
         "nodeId": "missing",
     }
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我先读材料")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我先读材料")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="document-live-read")
@@ -9520,7 +9520,7 @@ def test_minutes_permission_setup_is_passed_to_codex_without_worker_read(
         code="B_PERMISSION_NoPermission",
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -9550,7 +9550,7 @@ def test_alidocs_permission_setup_is_passed_to_codex_without_worker_read(
         code="forbidden.accessDenied",
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -9576,8 +9576,8 @@ def test_codex_stop_with_error_notifies_only_after_task_retries_are_exhausted(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.STOP_WITH_ERROR,
+        AgentDecision(
+            action=AgentAction.STOP_WITH_ERROR,
             reason="codex exec failed",
             macos_notify=False,
         )
@@ -9619,7 +9619,7 @@ def test_codex_auth_required_stop_with_error_is_failed(
 ):
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     gate = FixedGate("dingtalk", ChannelGateState.NEEDS_LOGIN)
     worker = make_worker(
         tmp_path,
@@ -9653,7 +9653,7 @@ def test_codex_invalid_refresh_token_waits_for_authorization(
 ):
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     gate = FixedGate("dingtalk", ChannelGateState.NEEDS_LOGIN)
     worker = make_worker(
         tmp_path,
@@ -9687,7 +9687,7 @@ def test_codex_invalid_refresh_token_retries_without_duplicate_notification(
 ):
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     gate = FixedGate("dingtalk", ChannelGateState.NEEDS_LOGIN)
     worker = make_worker(
         tmp_path,
@@ -9736,8 +9736,8 @@ def test_codex_provider_stop_with_error_records_clear_sanitized_failure(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.STOP_WITH_ERROR,
+        AgentDecision(
+            action=AgentAction.STOP_WITH_ERROR,
             reason=reason,
             macos_notify=False,
         )
@@ -9780,7 +9780,7 @@ def test_codex_stop_with_error_keeps_queued_task_retryable(
         "failed to refresh available models: "
         "timeout waiting for child process to exit"
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     runner = FakeAgentResultRunner(
         worker.store,
@@ -9856,7 +9856,7 @@ def test_dws_transient_dependency_stop_requeues_task_without_sending(
         "dws_transient_dependency_unavailable: "
         "dws minutes list all failed with exit code 6"
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(tmp_path, dws, codex, monkeypatch, max_task_attempts=3)
     worker.direct_agent_runner = FakeAgentResultRunner(
         worker.store,
@@ -9900,7 +9900,7 @@ def test_retryable_codex_timeout_does_not_notify_before_final_failure(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     reason = "process produced no output for 180 seconds"
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -9941,7 +9941,7 @@ def test_codex_process_failure_recovers_after_normal_attempt_limit_without_alert
     notifications = []
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -10016,7 +10016,7 @@ def test_session_lock_wait_defers_task_without_consuming_attempt(
     worker = make_worker(
         tmp_path,
         FakeDws([conversation()], {"cid-1": [trigger]}),
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         monkeypatch,
     )
 
@@ -10043,7 +10043,7 @@ def test_codex_process_failure_rotates_stuck_conversation_session_before_retry(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         monkeypatch,
     )
     worker.store.upsert_conversation("cid-1", "Friday", False, "stuck-session")
@@ -10084,7 +10084,7 @@ def test_codex_process_failure_becomes_terminal_after_one_extra_recovery_claim(
     notifications = []
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -10148,7 +10148,7 @@ def test_codex_stop_with_error_retry_waits_for_backoff(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     reason = "codex exec timed out after 300 seconds"
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.direct_agent_runner = FakeAgentResultRunner(
         worker.store,
@@ -10194,7 +10194,7 @@ def test_stale_processing_task_with_terminal_attempt_is_requeued_not_completed(
     trigger = message("[日程] 晚饭", message_id="msg-calendar", message_type="calendar")
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该重跑")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该重跑")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.enqueue_reply_task(
@@ -10244,7 +10244,7 @@ def test_critical_info_unavailable_stop_with_error_fails_queued_task(
         "critical_info_unavailable: dws oa approval detail failed and "
         "required approval material is unavailable"
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -10294,7 +10294,7 @@ def test_xiaoqing_unavailable_without_mcp_call_forces_retry(
     trigger = message("@Alex Chen(明哥) 请看一下候选人冯学震的录用申请")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     reason = "小青面试系统结构化读取能力暂时不可用。"
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     runner = FakeAgentResultRunner(
         worker.store,
@@ -10332,7 +10332,7 @@ def test_queued_stop_with_error_retry_does_not_create_duplicate_attempt(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     reason = "codex exec timed out after 300 seconds"
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -10403,7 +10403,7 @@ def test_queued_failed_non_send_attempt_does_not_create_duplicate_attempt(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该重新生成")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该重新生成")
     )
     worker = make_worker(
         tmp_path,
@@ -10455,7 +10455,7 @@ def test_resume_prompt_only_includes_turn_message_without_repeating_thread_promp
 ):
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="handled"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="handled"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.upsert_conversation(
         "cid-1",
@@ -10483,7 +10483,7 @@ def test_stale_codex_resume_retries_same_thread_before_opening_new_thread(
 ):
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     assert worker.store.enqueue_reply_task(
         conversation_id="cid-1",
@@ -10568,7 +10568,7 @@ def test_stale_codex_resume_clears_session_and_retries_with_new_user_message(
 ):
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     runner = FakeAgentResultRunner(
         worker.store,
@@ -10659,7 +10659,7 @@ def test_sent_reply_records_recall_key_from_send_result(tmp_path: Path, monkeypa
         send_result={"result": {"processQueryKey": "key-1"}},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="reply-with-receipt")
@@ -10683,7 +10683,7 @@ def test_existing_dry_run_attempt_does_not_call_codex_again(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该重新生成")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该重新生成")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
     script_completed_result(worker, operation_id="dry-run-rerun")
@@ -10725,7 +10725,7 @@ def test_failed_send_retries_existing_final_reply_without_calling_codex(
         send_result={"result": {"processQueryKey": "key-1"}},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该重新生成")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该重新生成")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="failed-send-rerun")
@@ -10773,7 +10773,7 @@ def test_sent_reply_prevents_retry_when_latest_attempt_failed(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该重新生成")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该重新生成")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_agent_result(
@@ -10819,7 +10819,7 @@ def test_rerun_message_retries_existing_failed_attempt_without_calling_codex(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该重新生成")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该重新生成")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="manual-failed-rerun")
@@ -10862,7 +10862,7 @@ def test_rerun_message_cleans_legacy_group_reply_wrappers(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该重新生成")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该重新生成")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="legacy-wrapper-rerun")
@@ -10901,11 +10901,11 @@ def test_rerun_message_cleans_legacy_group_reply_wrappers(
     assert latest.send_status == "completed"
 
 
-def test_rerun_message_can_force_new_codex_decision(tmp_path: Path, monkeypatch):
+def test_rerun_message_can_force_new_agent_decision(tmp_path: Path, monkeypatch):
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="改走B方案")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="改走B方案")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="corrected-action")
@@ -10967,7 +10967,7 @@ def test_rerun_message_looks_up_trigger_by_id_when_recent_context_expired(
     )
     dws.mentioned_messages["cid-1"] = [trigger]
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="改走B方案")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="改走B方案")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="expired-context-rerun")
@@ -10993,7 +10993,7 @@ def test_rerun_message_does_not_resend_when_trigger_already_has_sent_reply(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="改走B方案")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="改走B方案")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_agent_result(
@@ -11038,7 +11038,7 @@ def test_force_new_rerun_can_resend_when_trigger_already_has_sent_reply(
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="改走B方案")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="改走B方案")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, operation_id="corrected-resend")
@@ -11080,7 +11080,7 @@ def test_force_new_rerun_starts_fresh_codex_session(tmp_path: Path, monkeypatch)
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.NO_REPLY),
+        AgentDecision(action=AgentAction.NO_REPLY),
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.upsert_conversation("cid-1", "Friday", False, "old-session")
@@ -11112,7 +11112,7 @@ def test_rerun_message_uses_explicit_oa_url_when_trigger_has_no_link(
             ],
         }
     }
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY))
     worker = make_worker(
         tmp_path,
         dws,
@@ -11144,8 +11144,8 @@ def test_reply_attempt_records_codex_audit_fields(tmp_path: Path, monkeypatch):
         {"cid-1": [message("@Alex Chen(明哥) 这个候选人是否推进？")]},
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="先补岗位画像和简历再判断",
             audit_documents=[
                 {
@@ -11222,7 +11222,7 @@ def test_prompt_includes_dynamic_similar_corpus_examples_without_static_style_pr
         [conversation()],
         {"cid-1": [message("@Alex Chen(明哥) 这个项目排期怎么处理？")]},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="dry run"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="dry run"))
     style_records = [
         CorpusRecord(
             source_type="dingtalk",
@@ -11315,7 +11315,7 @@ def test_prompt_includes_similar_human_feedback_examples(tmp_path: Path, monkeyp
             ]
         },
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="dry run"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="dry run"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     attempt_id = worker.store.record_reply_attempt(
         conversation_id="cid-old",
@@ -11357,7 +11357,7 @@ def test_group_name_reference_without_direct_at_does_not_queue(
         {"cid-1": [message("@张晓民(Xiaomin张晓民) 这个和明哥预期一致")]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -11383,8 +11383,8 @@ def test_algorithm_owner_multi_mention_is_framed_as_principal_responsibility(
         },
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY, reply_text="可以，算法这边应该参与"
+        AgentDecision(
+            action=AgentAction.SEND_REPLY, reply_text="可以，算法这边应该参与"
         )
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
@@ -11421,7 +11421,7 @@ def test_group_direct_mention_found_in_recent_context_is_queued(
     )
     dws.mentioned_messages = {"cid-1": [old_direct_mention]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我看一下")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我看一下")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, "已处理上下文中的直接 mention。")
@@ -11452,7 +11452,7 @@ def test_group_seen_direct_mention_found_in_recent_context_does_not_queue(
         unread_messages={"cid-1": [latest_unread]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.mark_seen("msg-old", "cid-1")
@@ -11503,7 +11503,7 @@ def test_group_stale_direct_mention_found_in_recent_context_does_not_queue(
         unread_messages={"cid-1": [latest_unread]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -11519,8 +11519,8 @@ def test_okr_review_request_is_enqueued_after_agent_queue_action(
     trigger = message("帮我审核 OKR", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="用户明确请求审核 OKR，交给 OKR handler 处理。",
             system_actions=[{"type": "queue_okr_review"}],
         )
@@ -11560,8 +11560,8 @@ def test_okr_review_request_uses_explicit_quarter_from_trigger(
     trigger.create_time = "2026-07-03 10:00:00"
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="用户明确请求审核 Q2 OKR，交给 OKR handler 处理。",
             system_actions=[{"type": "queue_okr_review"}],
         )
@@ -11604,7 +11604,7 @@ def test_okr_mentions_without_agent_queue_action_do_not_fetch_okr_source(
         single_chat=False,
     )
     dws = FakeDws([conversation(single_chat=False)], {"cid-1": [trigger]})
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="通知同步"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="通知同步"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.okr_live_source = type(
         "LiveSource",
@@ -11633,8 +11633,8 @@ def test_okr_review_missing_live_source_fails_after_agent_queue_action(
     trigger = message("帮我审核 OKR", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="用户明确请求审核 OKR，交给 OKR handler 处理。",
             system_actions=[{"type": "queue_okr_review"}],
         )
@@ -11676,8 +11676,8 @@ def test_okr_review_live_source_error_fails_after_agent_queue_action(
     trigger = message("帮我审核 OKR", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="用户明确请求审核 OKR，交给 OKR handler 处理。",
             system_actions=[{"type": "queue_okr_review"}],
         )
@@ -11720,8 +11720,8 @@ def test_okr_review_dingteam_auth_error_blocks_after_agent_queue_action(
     trigger = message("帮我审核 OKR", single_chat=True)
     dws = FakeDws([conversation(single_chat=True)], {"cid-1": [trigger]})
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="用户明确请求审核 OKR，交给 OKR handler 处理。",
             system_actions=[{"type": "queue_okr_review"}],
         )
@@ -11767,8 +11767,8 @@ def test_queued_okr_review_ack_delivery_failure_requeues_after_agent_queue_actio
         send_error=RuntimeError("send failed"),
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.NO_REPLY,
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
             reason="用户明确请求审核 OKR，交给 OKR handler 处理。",
             system_actions=[{"type": "queue_okr_review"}],
         )
@@ -11838,7 +11838,7 @@ def test_single_chat_old_candidate_context_does_not_become_new_question(
         {"cid-1": [old_candidate_context, latest_unread]},
         unread_messages={"cid-1": [latest_unread]},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="ack only"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="ack only"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
     script_no_action(worker)
@@ -11888,7 +11888,7 @@ def test_single_chat_recent_context_after_seen_is_processed_when_unread_empty(
         unread_messages={"cid-1": []},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我倾向先推 HSW。")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我倾向先推 HSW。")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.upsert_conversation("cid-1", "Friday", True, None)
@@ -11942,7 +11942,7 @@ def test_single_chat_recovery_processes_unseen_gap_before_later_seen_anchor(
         unread_messages={"cid-1": []},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我会处理这条。")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我会处理这条。")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.upsert_conversation("cid-1", "韩露", True, None)
@@ -11990,7 +11990,7 @@ def test_single_chat_recovery_does_not_coalesce_across_current_user_context(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="test")),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="test")),
         monkeypatch,
     )
     worker.store.upsert_conversation("cid-1", "韩露", True, None)
@@ -12015,7 +12015,7 @@ def test_single_chat_empty_unread_without_seen_anchor_does_not_process_old_conte
         {"cid-1": [old_message]},
         unread_messages={"cid-1": []},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
     worker.run_once()
@@ -12042,7 +12042,7 @@ def test_initial_prompt_context_includes_previous_20_plus_unread_tail(
         {"cid-1": old_messages},
         unread_messages={"cid-1": [trigger, downstream]},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="handled"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="handled"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
     script_no_action(worker)
@@ -12077,7 +12077,7 @@ def test_resumed_prompt_context_only_includes_messages_after_last_seen(
         {"cid-1": [before_seen, last_seen, after_seen]},
         unread_messages={"cid-1": [trigger]},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="handled"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="handled"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     worker.store.upsert_conversation(
         "cid-1",
@@ -12107,7 +12107,7 @@ def test_no_reply_action_does_not_send(tmp_path: Path, monkeypatch):
     trigger = message("@Alex Chen(明哥) cc一下")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.mentioned_messages = {"cid-1": [trigger]}
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="cc only"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="cc only"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_agent_result(
         worker,
@@ -12137,7 +12137,7 @@ def test_handoff_adds_text_emotion_dings_self_and_records_reaction(
     trigger = message("@Alex Chen(明哥) 不要分身，真人看一下")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
     dws.mentioned_messages = {"cid-1": [trigger]}
-    codex = FakeCodex(CodexDecision(action=CodexAction.HANDOFF_TO_HUMAN))
+    codex = FakeCodex(AgentDecision(action=AgentAction.HANDOFF_TO_HUMAN))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_agent_result(
         worker,
@@ -12196,7 +12196,7 @@ def test_service_handoff_notification_is_not_enqueued_from_self_chat(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         monkeypatch,
     )
 
@@ -12219,7 +12219,7 @@ def test_new_principal_mention_is_processed(
     dws = FakeDws([conversation()], {"cid-1": [latest]})
     dws.conversations[0].title = "26年董事会筹备组"
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="战略主线建议这样调整")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="战略主线建议这样调整")
     )
     notifications: list[dict[str, str | None]] = []
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
@@ -12257,7 +12257,7 @@ def test_group_unread_without_principal_mention_is_ignored(
     dws = FakeDws([conversation()], {"cid-1": [latest]})
     dws.conversations[0].title = "MKT core"
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     notifications: list[dict[str, str | None]] = []
     monkeypatch.setattr(
@@ -12267,7 +12267,7 @@ def test_group_unread_without_principal_mention_is_ignored(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=codex,
+        agent=codex,
         now_provider=fixed_worker_now,
         channel_gates=fixed_channel_gates(),
     )
@@ -12298,12 +12298,12 @@ def test_group_unread_without_principal_mention_reads_unread_tail_but_does_not_q
         {"cid-1": [latest]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=codex,
+        agent=codex,
         now_provider=fixed_worker_now,
         channel_gates=fixed_channel_gates(),
     )
@@ -12338,12 +12338,12 @@ def test_recovery_due_group_unread_without_principal_mention_reads_unread_tail_b
         {"cid-1": [latest]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=codex,
+        agent=codex,
         now_provider=fixed_worker_now,
         channel_gates=fixed_channel_gates(),
     )
@@ -12373,7 +12373,7 @@ def test_dry_run_group_unread_without_principal_mention_is_ignored(
     dws = FakeDws([conversation()], {"cid-1": [latest]})
     dws.conversations[0].title = "26年董事会筹备组"
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     notifications: list[dict[str, str | None]] = []
     monkeypatch.setattr(
@@ -12383,7 +12383,7 @@ def test_dry_run_group_unread_without_principal_mention_is_ignored(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=codex,
+        agent=codex,
         dry_run=True,
         now_provider=fixed_worker_now,
         channel_gates=fixed_channel_gates(),
@@ -12403,7 +12403,7 @@ def test_single_chat_unread_is_processed_without_mention(tmp_path: Path, monkeyp
         {"cid-1": [message("这个今天能拍吗？", single_chat=True)]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="可以，先推进")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="可以，先推进")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, "已直接完成私聊请求。")
@@ -12429,8 +12429,8 @@ def test_user_runtime_term_in_trigger_does_not_block_safe_reply(
         {"cid-1": [message("明哥，你是怎么解决codex上下文压缩失败的问题的？", single_chat=True)]},
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="我会把长任务拆小，每一步都留清楚验收口径。",
             audit_summary="只需上下文判断。",
         )
@@ -12453,7 +12453,7 @@ def test_single_chat_current_user_message_does_not_call_codex(
         {"cid-1": [principal_message("AI自动抓取，用于会议纪要整理")]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, "只处理首个 batch。")
@@ -12513,7 +12513,7 @@ def test_run_once_max_batches_stops_after_limit(tmp_path: Path, monkeypatch):
             "cid-2": [message("@Alex Chen(明哥) 第二个问题", message_id="msg-2")],
         },
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先推进"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先推进"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
     script_no_action(worker)
@@ -12539,7 +12539,7 @@ def test_single_chat_same_display_name_without_current_user_id_still_calls_codex
         [conversation(single_chat=True)],
         {"cid-1": [same_name_message]},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="handled"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="handled"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
     script_no_action(worker)
@@ -12567,7 +12567,7 @@ def test_message_before_current_user_reply_does_not_call_codex(
         {"cid-1": [requester, manual_reply]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该回复")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该回复")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     script_completed_result(worker, "已处理可读取的会话。")
@@ -12595,7 +12595,7 @@ def test_message_after_current_user_reply_still_calls_codex(
         [conversation()],
         {"cid-1": [manual_reply, requester]},
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="handled"))
+    codex = FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="handled"))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
     script_no_action(worker)
@@ -12638,7 +12638,7 @@ def test_read_failure_records_error_and_continues_next_conversation(
         read_errors={"cid-bad": RuntimeError("forbidden request")},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
 
@@ -12669,7 +12669,7 @@ def test_group_mention_from_unread_conversation_is_processed_when_unread_tail_mi
     )
     dws.mentioned_messages = {"cid-1": [missed_mention]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="现在可以对")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="现在可以对")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -12695,7 +12695,7 @@ def test_group_agent_name_mention_from_search_is_processed_when_mentions_miss_it
     dws.mentioned_messages = {}
     dws.broadcast_messages = {"cid-1": [agent_mention]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="现在可以对")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="现在可以对")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -12725,7 +12725,7 @@ def test_group_mention_from_unread_payload_is_processed_when_mention_lookup_miss
     )
     dws.mentioned_messages = {}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="这条我看一下")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="这条我看一下")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -12763,7 +12763,7 @@ def test_produce_once_triggers_only_latest_consecutive_group_mention_from_same_s
         unread_messages={"cid-1": [first, second, third]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -12945,7 +12945,7 @@ def test_fast_path_followup_uses_recent_oa_card_url_when_unread_omits_card(
     worker = make_worker(
         tmp_path,
         dws,
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY, reason="missing route")),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY, reason="missing route")),
         monkeypatch,
     )
     worker.store.set_service_state(
@@ -12980,7 +12980,7 @@ def test_mark_seen_tracks_all_latest_trigger_message_ids(tmp_path: Path, monkeyp
     third = message("@Alex Chen(明哥) 最后总结一下", message_id="msg-mentioned-3")
     dws = FakeDws([conversation()], {"cid-1": [first, second, third]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.NO_REPLY, reason="no action needed")
+        AgentDecision(action=AgentAction.NO_REPLY, reason="no action needed")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     trigger = DingTalkAutoReplyWorker._latest_trigger_message([first, second, third])
@@ -13003,7 +13003,7 @@ def test_group_all_mention_from_unread_conversation_is_processed(
         unread_messages={"cid-1": [all_mention]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我看一下风险点")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我看一下风险点")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13027,7 +13027,7 @@ def test_group_all_mention_is_case_insensitive_for_ascii_alias(
         unread_messages={"cid-1": [all_mention]},
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我看一下")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我看一下")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13057,7 +13057,7 @@ def test_group_mention_from_read_conversation_is_processed_from_mentions(
     )
     dws.mentioned_messages = {"cid-mkt": [mentioned]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="会，但只处理需要回复的消息")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="会，但只处理需要回复的消息")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13088,7 +13088,7 @@ def test_group_all_mention_from_read_conversation_is_processed_from_broadcast_se
     )
     dws.broadcast_messages = {"cid-website": [broadcast]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我看一下官网内容")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我看一下官网内容")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13120,7 +13120,7 @@ def test_current_user_all_mention_is_filtered_from_broadcast_search(
     )
     dws.broadcast_messages = {"cid-website": [broadcast]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13142,7 +13142,7 @@ def test_broadcast_filter_does_not_resolve_sender_without_stable_identity(
     dws = FakeDws([], {"cid-website": [broadcast]})
     dws.broadcast_messages = {"cid-website": [broadcast]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.NO_REPLY, reason="not relevant")
+        AgentDecision(action=AgentAction.NO_REPLY, reason="not relevant")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13183,7 +13183,7 @@ def test_read_group_mention_is_skipped_when_later_current_user_text_replied(
     )
     dws.mentioned_messages = {"cid-mkt": [mentioned]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13229,7 +13229,7 @@ def test_read_group_mention_after_seen_message_is_processed_from_mentions(
     )
     dws.mentioned_messages = {"cid-hyperion": [follow_up]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
     worker.store.upsert_conversation(
@@ -13286,7 +13286,7 @@ def test_split_person_auto_reply_does_not_hide_unanswered_group_mention(
     )
     dws.mentioned_messages = {"cid-iter": [missed]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="不应该调用")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
     worker.store.upsert_conversation("cid-iter", "迭代群", False, None)
@@ -13335,7 +13335,7 @@ def test_group_mentions_are_processed_by_message_time_not_fetch_order(
         ]
     }
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我看一下")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我看一下")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13369,7 +13369,7 @@ def test_current_user_file_does_not_hide_unanswered_group_mention(
     )
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="会，但只处理需要回复的消息")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="会，但只处理需要回复的消息")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13401,7 +13401,7 @@ def test_processing_ack_does_not_hide_unanswered_group_mention(
     )
     dws.mentioned_messages = {"cid-1": [trigger]}
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="我看一下")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="我看一下")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch, dry_run=True)
 
@@ -13423,8 +13423,8 @@ def test_internal_personnel_question_missing_subject_blocks_without_sending(
         {"cid-1": [message("这个人后续怎么处理？", single_chat=True)]},
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.HANDOFF_TO_HUMAN,
+        AgentDecision(
+            action=AgentAction.HANDOFF_TO_HUMAN,
             reason="missing personnel subject",
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
         )
@@ -13459,8 +13459,8 @@ def test_internal_personnel_question_allows_private_self_subject(
         {"cid-1": [message("我转正怎么看？", single_chat=True)]},
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="你这次转正材料看起来可以，但后续要补齐闭环。",
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="sender-user-1",
@@ -13485,8 +13485,8 @@ def test_internal_personnel_question_allows_private_hr_requester(
     dws.hr_users.add("sender-user-1")
     dws.manager_chains["subject-user-1"] = ["sender-user-1"]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="先按事实反馈",
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="subject-user-1",
@@ -13515,8 +13515,8 @@ def test_internal_personnel_question_does_not_auto_allow_manager(
     )
     dws.manager_chains["subject-user-1"] = ["sender-user-1"]
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="这个涉及其他人的人事信息，我不能直接回答。",
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="subject-user-1",
@@ -13544,8 +13544,8 @@ def test_internal_personnel_question_refuses_unrelated_requester(
         department_ids={"dept-1"},
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="这个涉及其他人的人事信息，我不能直接回答。",
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="subject-user-1",
@@ -13568,8 +13568,8 @@ def test_internal_personnel_question_allows_agent_reply_in_group(
         {"cid-1": [message("@Alex Chen(明哥) 我绩效怎么定？", single_chat=False)]},
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="你这次可以按高绩效处理",
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="sender-user-1",
@@ -13592,8 +13592,8 @@ def test_candidate_question_missing_context_uses_agent_clarifying_question(
         {"cid-1": [message("这个候选人怎么样？", single_chat=True)]},
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.ASK_CLARIFYING_QUESTION,
+        AgentDecision(
+            action=AgentAction.ASK_CLARIFYING_QUESTION,
             reply_text="我这边没找到这个候选人的面试记录和岗位信息，你把简历或面试听记发我一下。",
             sensitivity_kind=SensitivityKind.EXTERNAL_CANDIDATE,
             candidate_context_known=False,
@@ -13617,8 +13617,8 @@ def test_candidate_question_allows_related_department_requester(
     )
     dws.user_departments["sender-user-1"] = {"dept-sales"}
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="可以推进",
             sensitivity_kind=SensitivityKind.EXTERNAL_CANDIDATE,
             candidate_context_known=True,
@@ -13643,8 +13643,8 @@ def test_candidate_question_refuses_unrelated_department_requester(
     )
     dws.user_departments["sender-user-1"] = {"dept-product"}
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="这个候选人信息只回答相关部门的人。",
             sensitivity_kind=SensitivityKind.EXTERNAL_CANDIDATE,
             candidate_context_known=True,
@@ -13669,8 +13669,8 @@ def test_candidate_question_allows_group_reply_without_sender_department_check(
     )
     dws.user_departments["sender-user-1"] = {"dept-product"}
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="可以推进",
             sensitivity_kind=SensitivityKind.EXTERNAL_CANDIDATE,
             candidate_context_known=True,
@@ -13698,8 +13698,8 @@ def test_permission_lookup_failure_records_error_and_does_not_send(
         {"cid-1": [message("张三绩效怎么定？", single_chat=True, sender_user_id=None)]},
     )
     codex = FakeCodex(
-        CodexDecision(
-            action=CodexAction.SEND_REPLY,
+        AgentDecision(
+            action=AgentAction.SEND_REPLY,
             reply_text="先按事实反馈",
             sensitivity_kind=SensitivityKind.INTERNAL_PERSONNEL,
             personnel_subject_user_id="subject-user-1",
@@ -13708,7 +13708,7 @@ def test_permission_lookup_failure_records_error_and_does_not_send(
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=codex,
+        agent=codex,
         now_provider=fixed_worker_now,
         channel_gates=fixed_channel_gates(),
     )
@@ -13729,12 +13729,12 @@ def test_dry_run_does_not_mutate_terminal_state(tmp_path: Path, monkeypatch):
         [conversation()], {"cid-1": [message("@Alex Chen(明哥) 这个怎么处理？")]}
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=codex,
+        agent=codex,
         dry_run=True,
         now_provider=fixed_worker_now,
         channel_gates=fixed_channel_gates(),
@@ -13754,7 +13754,7 @@ def test_send_failure_records_error_and_does_not_mark_seen(tmp_path: Path, monke
         send_error=RuntimeError("send failed"),
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     store = worker.store
@@ -13795,7 +13795,7 @@ def test_send_failure_requeues_reply_task_for_consumer_retry(
         send_error=RuntimeError("send failed"),
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     store = worker.store
@@ -13834,7 +13834,7 @@ def test_consumer_send_failure_emits_one_failure_notification(
         send_error=RuntimeError("send failed"),
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     worker = make_worker(
         tmp_path,
@@ -13882,7 +13882,7 @@ def test_pat_authorization_error_is_recorded_as_failed_without_retry_or_url(
         ),
     )
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.SEND_REPLY, reply_text="先按A方案走")
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="先按A方案走")
     )
     gate = FixedGate("dingtalk", ChannelGateState.NEEDS_LOGIN)
     worker = make_worker(
@@ -13927,7 +13927,7 @@ def test_handoff_ding_failure_does_not_block_ack(
         {"cid-1": [message("@Alex Chen(明哥) 不要分身，真人看一下")]},
         ding_error=RuntimeError("ding failed"),
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.HANDOFF_TO_HUMAN))
+    codex = FakeCodex(AgentDecision(action=AgentAction.HANDOFF_TO_HUMAN))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     store = worker.store
     script_agent_result(
@@ -13972,7 +13972,7 @@ def test_needs_human_agent_attempt_publishes_browser_notification(
     worker = make_worker(
         tmp_path,
         FakeDws([conversation()], {"cid-1": [trigger]}),
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         monkeypatch,
     )
     script_agent_result(
@@ -14011,7 +14011,7 @@ def test_needs_human_agent_attempt_falls_back_to_macos_notification(
     worker = make_worker(
         tmp_path,
         FakeDws([conversation()], {"cid-1": [trigger]}),
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         monkeypatch,
     )
     script_agent_result(
@@ -14046,7 +14046,7 @@ def test_retryable_failed_agent_attempt_publishes_browser_notification(
     worker = make_worker(
         tmp_path,
         FakeDws([conversation()], {"cid-1": [trigger]}),
-        FakeCodex(CodexDecision(action=CodexAction.NO_REPLY)),
+        FakeCodex(AgentDecision(action=AgentAction.NO_REPLY)),
         monkeypatch,
         max_task_attempts=3,
     )
@@ -14090,7 +14090,7 @@ def test_handoff_records_one_error_when_external_delivery_falls_back_to_local(
         ding_error=RuntimeError("ding failed"),
         send_error=RuntimeError("bot failed"),
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.HANDOFF_TO_HUMAN))
+    codex = FakeCodex(AgentDecision(action=AgentAction.HANDOFF_TO_HUMAN))
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
     store = worker.store
     script_agent_result(
@@ -14135,7 +14135,7 @@ def test_handoff_text_emotion_failure_still_notifies_and_marks_seen(
         "token verified failed",
         code="TOKEN_VERIFIED_FAILED",
     )
-    codex = FakeCodex(CodexDecision(action=CodexAction.HANDOFF_TO_HUMAN))
+    codex = FakeCodex(AgentDecision(action=AgentAction.HANDOFF_TO_HUMAN))
     worker = make_worker(
         tmp_path,
         dws,
@@ -14170,7 +14170,7 @@ def test_handoff_text_emotion_failure_still_notifies_and_marks_seen(
 def test_persists_codex_last_session_id_after_decision(tmp_path: Path, monkeypatch):
     dws = FakeDws([conversation()], {"cid-1": [message("@Alex Chen(明哥) cc一下")]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.NO_REPLY, reason="cc only"),
+        AgentDecision(action=AgentAction.NO_REPLY, reason="cc only"),
         next_session_id="session-1",
     )
     worker = make_worker(tmp_path, dws, codex, monkeypatch)
@@ -14196,13 +14196,13 @@ def test_stale_codex_last_session_id_is_not_persisted(tmp_path: Path, monkeypatc
     )
     dws = FakeDws([conversation()], {"cid-1": [message("@Alex Chen(明哥) cc一下")]})
     codex = FakeCodex(
-        CodexDecision(action=CodexAction.NO_REPLY, reason="cc only"),
+        AgentDecision(action=AgentAction.NO_REPLY, reason="cc only"),
         last_session_id="stale-session",
     )
     worker = DingTalkAutoReplyWorker(
         store=store,
         dws=dws,
-        codex=codex,
+        agent=codex,
         now_provider=fixed_worker_now,
         channel_gates=fixed_channel_gates(),
     )
@@ -14217,8 +14217,8 @@ def test_mail_reply_action_executes_before_chat_and_persists_result(
 ):
     trigger = message("@Alex Chen(明哥) 审批并回复这封邮件")
     dws = FakeDws([conversation()], {"cid-1": [trigger]})
-    decision = CodexDecision(
-        action=CodexAction.SEND_REPLY,
+    decision = AgentDecision(
+        action=AgentAction.SEND_REPLY,
         reply_text="邮件已审阅并回复。",
         system_actions=[
             {
@@ -14263,8 +14263,8 @@ def test_mail_reply_action_executes_before_chat_and_persists_result(
 def test_retry_after_chat_failure_does_not_send_mail_twice(tmp_path: Path, monkeypatch):
     trigger = message("@Alex Chen(明哥) 审批并回复这封邮件")
     dws = FakeDws([conversation()], {"cid-1": [trigger]}, send_error=DwsError("chat down"))
-    decision = CodexDecision(
-        action=CodexAction.SEND_REPLY,
+    decision = AgentDecision(
+        action=AgentAction.SEND_REPLY,
         reply_text="邮件已审阅并回复。",
         system_actions=[
             {

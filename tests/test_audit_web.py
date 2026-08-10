@@ -4710,6 +4710,120 @@ def test_render_codex_session_detail_uses_local_rendered_history(
     assert '<time>2026-05-14T12:00:01Z</time>' in html
 
 
+def test_pi_session_detail_wins_over_legacy_codex_id_collision(
+    tmp_path: Path,
+    monkeypatch,
+):
+    session_id = "shared-session-1"
+    pi_session_dir = tmp_path / "pi-sessions"
+    pi_session_dir.mkdir()
+    (pi_session_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session", "id": session_id}),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "current Pi transcript"}
+                            ],
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    legacy_home = tmp_path / ".codex"
+    legacy_path = (
+        legacy_home
+        / "sessions"
+        / "2026"
+        / "05"
+        / "14"
+        / f"rollout-2026-05-14T12-00-00-{session_id}.jsonl"
+    )
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {"type": "session_meta", "payload": {"id": session_id}}
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_text", "text": "legacy transcript"}
+                            ],
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CEO_PI_SESSION_DIR", str(pi_session_dir))
+    monkeypatch.setattr("app.codex_history.DEFAULT_CODEX_HOME", legacy_home)
+
+    status, html = render_codex_session_detail(session_id)
+
+    assert status == 200
+    assert "current Pi transcript" in html
+    assert "legacy transcript" not in html
+
+
+def test_pi_session_detail_falls_back_to_read_only_legacy_history(
+    tmp_path: Path,
+    monkeypatch,
+):
+    session_id = "legacy-only-session"
+    legacy_home = tmp_path / ".codex"
+    legacy_path = (
+        legacy_home
+        / "sessions"
+        / "2026"
+        / "05"
+        / "14"
+        / f"rollout-2026-05-14T12-00-00-{session_id}.jsonl"
+    )
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {"type": "session_meta", "payload": {"id": session_id}}
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_text", "text": "legacy read only"}
+                            ],
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CEO_PI_SESSION_DIR", str(tmp_path / "missing-pi"))
+    monkeypatch.setattr("app.codex_history.DEFAULT_CODEX_HOME", legacy_home)
+
+    status, html = render_codex_session_detail(session_id)
+
+    assert status == 200
+    assert "legacy read only" in html
+
+
 def test_render_codex_session_detail_returns_404_when_missing(tmp_path: Path):
     status, html = render_codex_session_detail("missing", codex_home=tmp_path)
 

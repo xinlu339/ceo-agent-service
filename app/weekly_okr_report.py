@@ -14,7 +14,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from app.codex_decision import _subprocess_failure_reason
+from app.agent_decision import _subprocess_failure_reason
 from app.dws_client import DwsClient, DwsError
 from app.okr_review import DwsLiveOkrSource, current_quarter_period
 from app.pi_events import assistant_text_candidates
@@ -200,7 +200,7 @@ class WeeklyOkrGateway(Protocol):
     ) -> str: ...
 
 
-class CodexWeeklyOkrAgent:
+class PiWeeklyOkrAgent:
     def __init__(
         self,
         *,
@@ -1082,10 +1082,10 @@ def weekly_okr_report_command(
         store=store,
         gateway=DwsWeeklyOkrGateway(dws),
         source=source,
-        agent=CodexWeeklyOkrAgent(
+        agent=PiWeeklyOkrAgent(
             workspace=settings.workspace,
-            timeout_seconds=max(settings.codex_timeout_seconds, 1800),
-            idle_timeout_seconds=max(settings.codex_idle_timeout_seconds, 900),
+            timeout_seconds=max(settings.pi_timeout_seconds, 1800),
+            idle_timeout_seconds=max(settings.pi_idle_timeout_seconds, 900),
         ),
         workspace=settings.workspace,
         now=current,

@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from app.codex_decision import CodexDecisionRunner
-from app.dingtalk_models import CodexAction
+from app.agent_decision import AgentDecisionRunner
+from app.dingtalk_models import AgentAction
 from app.dws_client import DwsClient
 
 
@@ -35,7 +35,7 @@ def test_live_dws_read_only_smoke():
 def test_live_codex_exec_json_smoke():
     workspace = Path(os.getenv("CEO_CODEX_E2E_WORKSPACE", "/Users/principal/Documents/memory"))
     assert workspace.exists()
-    runner = CodexDecisionRunner(workspace=workspace, timeout_seconds=120)
+    runner = AgentDecisionRunner(workspace=workspace, timeout_seconds=120)
 
     decision = runner.decide(
         prompt=(
@@ -45,8 +45,8 @@ def test_live_codex_exec_json_smoke():
         session_id=None,
     )
 
-    assert decision.action in {CodexAction.NO_REPLY, CodexAction.STOP_WITH_ERROR}
-    if decision.action == CodexAction.STOP_WITH_ERROR:
+    assert decision.action in {AgentAction.NO_REPLY, AgentAction.STOP_WITH_ERROR}
+    if decision.action == AgentAction.STOP_WITH_ERROR:
         pytest.fail(decision.reason)
 
 

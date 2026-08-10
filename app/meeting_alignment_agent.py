@@ -15,7 +15,7 @@ from app.prompt import work_profile_instruction
 from app.pi_events import assistant_text_candidates
 from app.pi_history import count_pi_session_lines, extract_pi_audit_events_from_session
 from app.pi_runner import PiRunner, pi_process_failure_reason
-from app.store import CodexSessionSearchResult
+from app.store import AgentSessionSearchResult
 
 
 MEETING_ALIGNMENT_DECISION_SCHEMA_PATH = (
@@ -30,7 +30,7 @@ class MeetingAlignmentTargetError(ValueError):
     """A decision target contradicts the authoritative meeting roster."""
 
 
-class MeetingAlignmentCodex(Protocol):
+class MeetingAlignmentBackend(Protocol):
     last_session_id: str | None
     last_transcript_start_line: int
     last_transcript_end_line: int
@@ -42,16 +42,16 @@ class MeetingAlignmentCodex(Protocol):
 class MeetingAlignmentAgent:
     """Build one isolated meeting prompt and ask Pi for a strict decision."""
 
-    def __init__(self, codex: MeetingAlignmentCodex):
-        self.codex = codex
+    def __init__(self, backend: MeetingAlignmentBackend):
+        self.backend = backend
 
     def decide(
         self,
         source: MeetingSource,
         *,
-        similar_sessions: list[CodexSessionSearchResult] | None = None,
+        similar_sessions: list[AgentSessionSearchResult] | None = None,
     ) -> MeetingAlignmentDecision:
-        decision = self.codex.decide(
+        decision = self.backend.decide(
             prompt=build_meeting_alignment_prompt(
                 source,
                 work_profile=work_profile_instruction(),
@@ -63,36 +63,36 @@ class MeetingAlignmentAgent:
         return decision
 
 
-class MeetingAlignmentCodexRunner:
+class MeetingAlignmentPiRunner:
     def __init__(
         self,
         workspace: Path,
-        codex_bin: str = "codex",
+        node_binary: str | None = None,
         executor=None,
         timeout_seconds: int = 1200,
         idle_timeout_seconds: int = 900,
         work_profile_source: str | None = None,
     ):
-        from app.codex_decision import (
+        from app.agent_decision import (
             _subprocess_failure_reason,
-            extract_codex_audit_events,
-            extract_codex_session_id,
+            extract_agent_audit_events,
+            extract_agent_session_id,
         )
         from app.process_runner import run_process_with_idle_timeout
 
         self.workspace = workspace
         self.runner = PiRunner(
             workspace=workspace,
-            node_binary=None if codex_bin == "codex" else codex_bin,
+            node_binary=node_binary,
         )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
         self.work_profile_source = work_profile_source or str(work_profile_path())
         self._run_process_with_idle_timeout = run_process_with_idle_timeout
-        self._extract_codex_session_id = extract_codex_session_id
-        self._extract_codex_audit_events = extract_codex_audit_events
-        self._extract_codex_audit_events_from_session = (
+        self._extract_agent_session_id = extract_agent_session_id
+        self._extract_agent_audit_events = extract_agent_audit_events
+        self._extract_agent_audit_events_from_session = (
             extract_pi_audit_events_from_session
         )
         self._session_line_count = count_pi_session_lines
@@ -110,13 +110,13 @@ class MeetingAlignmentCodexRunner:
         self.last_transcript_end_line = 0
         self.last_audit_tool_events = []
         raw = self._execute(prompt=prompt)
-        self.last_session_id = self._extract_codex_session_id(raw)
+        self.last_session_id = self._extract_agent_session_id(raw)
         self.last_transcript_end_line = self._session_line_count(
             self.last_session_id
         )
         session_events: list[dict[str, str]] = []
         if self.last_session_id:
-            session_events = self._extract_codex_audit_events_from_session(
+            session_events = self._extract_agent_audit_events_from_session(
                 self.last_session_id,
                 start_line=0,
                 end_line=self.last_transcript_end_line,
@@ -124,7 +124,7 @@ class MeetingAlignmentCodexRunner:
             )
         self.last_audit_tool_events = (
             session_events
-            or self._extract_codex_audit_events(
+            or self._extract_agent_audit_events(
                 raw,
                 limit=MEETING_ALIGNMENT_AUDIT_EVENT_LIMIT,
             )
@@ -204,7 +204,7 @@ def build_meeting_alignment_prompt(
     *,
     work_profile: str,
     work_profile_source: str,
-    similar_sessions: list[CodexSessionSearchResult] | None = None,
+    similar_sessions: list[AgentSessionSearchResult] | None = None,
 ) -> str:
     source_json = json.dumps(
         source.model_dump(mode="json"), ensure_ascii=False, indent=2
@@ -316,7 +316,7 @@ def build_meeting_alignment_prompt(
 
 
 def _similar_sessions_prompt_block(
-    sessions: list[CodexSessionSearchResult],
+    sessions: list[AgentSessionSearchResult],
 ) -> str:
     if not sessions:
         return "（无）"

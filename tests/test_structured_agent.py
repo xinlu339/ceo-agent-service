@@ -10,7 +10,7 @@ from app.store import AutoReplyStore
 from app.structured_agent import (
     AgentSpec,
     SkillLoadError,
-    StructuredCodexRunner,
+    StructuredPiRunner,
     load_skill_text,
     parse_agent_envelope,
 )
@@ -190,7 +190,7 @@ def test_structured_runner_uses_conversation_session_lock_and_persists_session(
         )
 
     spec = AgentSpec("reply", schema, [skill], [], "Return JSON.")
-    runner = StructuredCodexRunner(
+    runner = StructuredPiRunner(
         store=store,
         workspace=tmp_path,
         spec=spec,
@@ -252,7 +252,7 @@ def test_structured_runner_clears_missing_local_session_before_exec(tmp_path):
         )
 
     spec = AgentSpec("reply", schema, [skill], [], "Return JSON.")
-    runner = StructuredCodexRunner(
+    runner = StructuredPiRunner(
         store=store,
         workspace=tmp_path,
         spec=spec,
@@ -321,7 +321,7 @@ def test_structured_runner_resumes_session_to_repair_invalid_json(tmp_path):
         )
 
     spec = AgentSpec("reply", schema, [skill], [], "Return JSON.")
-    runner = StructuredCodexRunner(
+    runner = StructuredPiRunner(
         store=store,
         workspace=tmp_path,
         spec=spec,
@@ -384,7 +384,7 @@ def test_structured_runner_can_skip_persisting_shared_conversation_session(tmp_p
         )
 
     spec = AgentSpec("okr_review", schema, [skill], [], "Return JSON.")
-    runner = StructuredCodexRunner(
+    runner = StructuredPiRunner(
         store=store,
         workspace=tmp_path,
         spec=spec,
@@ -413,7 +413,7 @@ def test_structured_runner_retries_fresh_after_session_refresh_error(tmp_path):
     store = AutoReplyStore(tmp_path / "worker.sqlite3")
     store.upsert_conversation("cid-1", "Friday", True, "expired-session")
     spec = AgentSpec("reply", schema, [skill], [], "Return JSON.")
-    runner = StructuredCodexRunner(
+    runner = StructuredPiRunner(
         store=store,
         workspace=tmp_path,
         spec=spec,
@@ -543,7 +543,7 @@ def test_structured_runner_reads_audit_events_from_session_transcript(
         )
 
     spec = AgentSpec("reply", schema, [skill], [], "Return JSON.")
-    runner = StructuredCodexRunner(
+    runner = StructuredPiRunner(
         store=store,
         workspace=tmp_path,
         spec=spec,
@@ -610,7 +610,7 @@ def test_structured_runner_default_executor_uses_process_runner_signature(tmp_pa
         )
 
     spec = AgentSpec("reply", schema, [skill], [], "Return JSON.")
-    runner = StructuredCodexRunner(
+    runner = StructuredPiRunner(
         store=store,
         workspace=tmp_path,
         spec=spec,
@@ -681,7 +681,7 @@ def test_structured_runner_embeds_explicit_output_schema_when_configured(tmp_pat
         "Return JSON.",
         output_schema_path=output_schema,
     )
-    runner = StructuredCodexRunner(
+    runner = StructuredPiRunner(
         store=store,
         workspace=tmp_path,
         spec=spec,
@@ -704,7 +704,7 @@ def test_structured_runner_fails_fast_when_lock_is_held(tmp_path):
     store = AutoReplyStore(tmp_path / "worker.sqlite3")
     assert store.acquire_codex_session_lock("cid-1", "other") is True
     spec = AgentSpec("reply", schema, [skill], [], "Return JSON.")
-    runner = StructuredCodexRunner(store=store, workspace=tmp_path, spec=spec)
+    runner = StructuredPiRunner(store=store, workspace=tmp_path, spec=spec)
 
-    with pytest.raises(RuntimeError, match="codex session locked"):
+    with pytest.raises(RuntimeError, match="pi session locked"):
         runner.run("cid-1", "Friday", True, "hello", owner="reply:msg-1")

@@ -143,7 +143,7 @@ def _parse_instant(value: str, *, end_of_day: bool = False) -> datetime:
 
 
 def _parse_output(raw: str) -> list[ExtractedMemoryCandidate]:
-    from app.codex_decision import _decision_text_candidates, _iter_json_payloads
+    from app.agent_decision import _decision_text_candidates, _iter_json_payloads
     payloads = _iter_json_payloads(raw)
     candidates: list[object] = list(payloads)
     for payload in payloads:
@@ -163,15 +163,15 @@ def _parse_output(raw: str) -> list[ExtractedMemoryCandidate]:
     raise ValueError("WeChat Memory extraction returned no candidate envelope")
 
 
-class CodexMemoryExtractionRunner:
+class PiMemoryExtractionRunner:
     """Structured Pi runner. It has no Memory write permission in its prompt."""
 
-    def __init__(self, workspace: Path, codex_bin: str = "codex", executor=None,
+    def __init__(self, workspace: Path, node_binary: str | None = None, executor=None,
                  timeout_seconds: int = 1200, idle_timeout_seconds: int = 900):
         from app.pi_runner import PiRunner
         self.runner = PiRunner(
             workspace=workspace,
-            node_binary=None if codex_bin == "codex" else codex_bin,
+            node_binary=node_binary,
         )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
@@ -191,7 +191,7 @@ class CodexMemoryExtractionRunner:
         if self.executor is not None:
             raw = self.executor(command, prompt)
         else:
-            from app.codex_decision import _subprocess_failure_reason
+            from app.agent_decision import _subprocess_failure_reason
             from app.process_runner import run_process_with_idle_timeout
             completed = run_process_with_idle_timeout(
                 command, prompt=prompt, env=self.runner.build_env(),
@@ -236,15 +236,15 @@ class CodexMemoryExtractionRunner:
         )
 
 
-class CodexMemoryRecallMatcher:
+class PiMemoryRecallMatcher:
     """Read-only durable Memory matcher, hard-limited to memory_recall."""
 
-    def __init__(self, workspace: Path, codex_bin: str = "codex", executor=None,
+    def __init__(self, workspace: Path, node_binary: str | None = None, executor=None,
                  timeout_seconds: int = 1200, idle_timeout_seconds: int = 900):
         from app.pi_runner import PiRunner
         self.runner = PiRunner(
             workspace=workspace,
-            node_binary=None if codex_bin == "codex" else codex_bin,
+            node_binary=node_binary,
         )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
@@ -330,7 +330,7 @@ class CodexMemoryRecallMatcher:
     def _execute(self, command: list[str], prompt: str) -> str:
         if self.executor is not None:
             return self.executor(command, prompt)
-        from app.codex_decision import _subprocess_failure_reason
+        from app.agent_decision import _subprocess_failure_reason
         from app.process_runner import run_process_with_idle_timeout
         completed = run_process_with_idle_timeout(
             command, prompt=prompt, env=self.runner.build_env(),
@@ -377,7 +377,7 @@ class CodexMemoryRecallMatcher:
             output.get("isError") is True or output.get("error")
         ):
             raise RuntimeError("durable Memory recall tool error")
-        output = CodexMemoryRecallMatcher._unwrap_recall_output(output)
+        output = PiMemoryRecallMatcher._unwrap_recall_output(output)
         if not isinstance(output, dict):
             raise RuntimeError("durable Memory recall output is not structured")
         memories = output.get("memories")
@@ -429,7 +429,7 @@ class CodexMemoryRecallMatcher:
 
     @staticmethod
     def _result_payload(raw: str) -> dict:
-        from app.codex_decision import _decision_text_candidates, _iter_json_payloads
+        from app.agent_decision import _decision_text_candidates, _iter_json_payloads
         values: list[object] = list(_iter_json_payloads(raw))
         for payload in list(values):
             if isinstance(payload, dict):
@@ -449,10 +449,10 @@ class CodexMemoryRecallMatcher:
 
 
 class WechatMemoryImporter:
-    def __init__(self, store, reader=None, codex=None, matcher=None):
+    def __init__(self, store, reader=None, backend=None, matcher=None):
         self.store = store
         self.reader = reader
-        self.codex = codex
+        self.backend = backend
         self.matcher = matcher
 
     @staticmethod
@@ -531,7 +531,7 @@ class WechatMemoryImporter:
             until, end_of_day=len(until) == 10
         ):
             raise ValueError("since date bound must not be after until")
-        if self.reader is None or self.codex is None or account is None:
+        if self.reader is None or self.backend is None or account is None:
             raise ValueError("reader, extraction runner, and ready account are required")
         if self.matcher is None:
             raise RuntimeError("durable Memory matcher is required")
@@ -567,7 +567,7 @@ class WechatMemoryImporter:
         candidates: list[ExtractedMemoryCandidate] = []
         for start in range(0, len(messages), BATCH_SIZE):
             batch = messages[start:start + BATCH_SIZE]
-            raw = self.codex.extract(batch)
+            raw = self.backend.extract(batch)
             parsed = [item if isinstance(item, ExtractedMemoryCandidate)
                       else ExtractedMemoryCandidate.model_validate(item) for item in raw]
             by_id = {message.message_id: message for message in batch}

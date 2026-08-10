@@ -1,7 +1,7 @@
 import pytest
 
 from app.store import AutoReplyStore
-from app.dingtalk_models import CodexAction, CodexDecision
+from app.dingtalk_models import AgentAction, AgentDecision
 from app.wechat.models import WechatAccount
 from app.wechat.consumer import WechatReplyConsumer
 from app.store import AgentRunLeaseLostError
@@ -45,8 +45,8 @@ def consumer(store, fake_codex, account):
 
 
 def test_send_reply_creates_ready_delivery(fake_codex, consumer, store):
-    fake_codex.decision = CodexDecision(
-        action=CodexAction.SEND_REPLY, reply_text="收到，我下午给你结论。",
+    fake_codex.decision = AgentDecision(
+        action=AgentAction.SEND_REPLY, reply_text="收到，我下午给你结论。",
         reason="明确承诺", audit_summary="明确承诺",
     )
     assert consumer.run_once(limit=1) == 1
@@ -63,7 +63,7 @@ def test_send_reply_creates_ready_delivery(fake_codex, consumer, store):
 
 
 def test_no_reply_completes_without_delivery(fake_codex, consumer, store):
-    fake_codex.decision = CodexDecision(action=CodexAction.NO_REPLY, audit_summary="无需回复")
+    fake_codex.decision = AgentDecision(action=AgentAction.NO_REPLY, audit_summary="无需回复")
     assert consumer.run_once(limit=1) == 1
     assert store.get_wechat_delivery_for_task(1) is None
     attempt = store.get_reply_attempt(1)
@@ -73,8 +73,8 @@ def test_no_reply_completes_without_delivery(fake_codex, consumer, store):
 
 
 def test_dingtalk_system_actions_rejected(fake_codex, consumer, store):
-    fake_codex.decision = CodexDecision(
-        action=CodexAction.SEND_REPLY, reply_text="x",
+    fake_codex.decision = AgentDecision(
+        action=AgentAction.SEND_REPLY, reply_text="x",
         system_actions=[{"tool": "dws"}], audit_summary="s",
     )
     assert consumer.run_once(limit=1) == 1
@@ -88,8 +88,8 @@ def test_dingtalk_system_actions_rejected(fake_codex, consumer, store):
 def test_reply_transport_action_creates_ready_wechat_delivery(
     fake_codex, consumer, store
 ):
-    fake_codex.decision = CodexDecision(
-        action=CodexAction.SEND_REPLY,
+    fake_codex.decision = AgentDecision(
+        action=AgentAction.SEND_REPLY,
         reply_text="我也去餐厅吃饭。",
         system_actions=[
             {
@@ -111,8 +111,8 @@ def test_reply_transport_action_creates_ready_wechat_delivery(
 
 
 def test_stop_with_error_records_failed_attempt(fake_codex, consumer, store):
-    fake_codex.decision = CodexDecision(
-        action=CodexAction.STOP_WITH_ERROR,
+    fake_codex.decision = AgentDecision(
+        action=AgentAction.STOP_WITH_ERROR,
         reason="missing_wechat_context",
         audit_summary="缺上下文",
     )
@@ -135,8 +135,8 @@ def test_consumer_marks_read_only_decision_phase_before_calling_codex(
             task = store.get_reply_task(1)
             assert task is not None
             observed_phases.append(task.error)
-            return CodexDecision(
-                action=CodexAction.NO_REPLY,
+            return AgentDecision(
+                action=AgentAction.NO_REPLY,
                 audit_summary="无需回复。",
             )
 
@@ -149,8 +149,8 @@ def test_consumer_marks_read_only_decision_phase_before_calling_codex(
 def test_corrected_generation_replaces_unsent_wechat_delivery(
     fake_codex, consumer, store
 ):
-    fake_codex.decision = CodexDecision(
-        action=CodexAction.SEND_REPLY,
+    fake_codex.decision = AgentDecision(
+        action=AgentAction.SEND_REPLY,
         reply_text="旧回复",
         reason="first",
         audit_summary="first",
@@ -164,8 +164,8 @@ def test_corrected_generation_replaces_unsent_wechat_delivery(
             "update reply_tasks set status='pending', execution_generation='corrected' "
             "where id=1"
         )
-    fake_codex.decision = CodexDecision(
-        action=CodexAction.SEND_REPLY,
+    fake_codex.decision = AgentDecision(
+        action=AgentAction.SEND_REPLY,
         reply_text="修正版回复",
         reason="corrected",
         audit_summary="corrected",
@@ -187,8 +187,8 @@ def test_stale_wechat_worker_cannot_persist_attempt_or_delivery(
     class RotatingRunner:
         def decide(self, *_args, **_kwargs):
             store.rotate_reply_task_execution_generation(claimed.id)
-            return CodexDecision(
-                action=CodexAction.SEND_REPLY,
+            return AgentDecision(
+                action=AgentAction.SEND_REPLY,
                 reply_text="旧 worker 回复",
                 reason="stale",
                 audit_summary="stale",

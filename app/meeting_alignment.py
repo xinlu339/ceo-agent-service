@@ -460,7 +460,7 @@ def _search_similar_meeting_sessions(
             query_embedding = vectors[0] if vectors else None
         except Exception:
             query_embedding = None
-    return store.search_codex_sessions(
+    return store.search_agent_sessions(
         fts_query=_meeting_fts_query(query_text),
         query_embedding=query_embedding,
         limit=3,
@@ -507,7 +507,7 @@ def _meeting_fts_text(text: str) -> str:
     return " ".join(token for token in tokens if token)
 
 
-def _index_meeting_codex_session(
+def _index_meeting_agent_session(
     store: AutoReplyStore,
     runner: Any,
     job: Any,
@@ -528,7 +528,7 @@ def _index_meeting_codex_session(
             embedding = vectors[0] if vectors else None
         except Exception:
             embedding = None
-    store.upsert_codex_session_search_index(
+    store.upsert_agent_session_search_index(
         session_id=session_id,
         source_type="meeting_alignment",
         source_id=str(source_id),
@@ -704,7 +704,7 @@ def _analyze_meeting_job(
             status="no_action",
             error="",
         )
-        _index_meeting_codex_session(
+        _index_meeting_agent_session(
             store,
             runner,
             job,
@@ -737,7 +737,7 @@ def _analyze_meeting_job(
         status="ready_to_send",
         error="",
     )
-    _index_meeting_codex_session(
+    _index_meeting_agent_session(
         store,
         runner,
         job,

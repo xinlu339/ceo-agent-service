@@ -95,7 +95,7 @@ def render_task_agent_examples(work_item: WorkItem, *, limit: int = 2) -> str:
     return "\n".join(text for _, _, text in ranked[:limit])
 
 
-class TaskCodex(Protocol):
+class TaskAgentBackend(Protocol):
     last_session_id: str
     last_transcript_start_line: int
     last_transcript_end_line: int
@@ -109,8 +109,8 @@ class TaskCodex(Protocol):
 
 
 class TaskAgentRunner:
-    def __init__(self, codex: TaskCodex):
-        self.codex = codex
+    def __init__(self, backend: TaskAgentBackend):
+        self.backend = backend
 
     def decide(
         self,
@@ -119,7 +119,7 @@ class TaskAgentRunner:
         *,
         memory_issue: str = "",
     ) -> TaskAgentDecision:
-        return self.codex.decide(
+        return self.backend.decide(
             prompt=build_task_agent_prompt(
                 work_item,
                 candidate_prompt,
@@ -129,34 +129,34 @@ class TaskAgentRunner:
         )
 
 
-class TaskAgentCodexRunner:
+class TaskAgentPiRunner:
     def __init__(
         self,
         workspace: Path,
-        codex_bin: str = "codex",
+        node_binary: str | None = None,
         executor=None,
         timeout_seconds: int = 1200,
         idle_timeout_seconds: int = 900,
     ):
-        from app.codex_decision import (
+        from app.agent_decision import (
             _subprocess_failure_reason,
-            extract_codex_audit_events,
-            extract_codex_session_id,
+            extract_agent_audit_events,
+            extract_agent_session_id,
         )
         from app.process_runner import run_process_with_idle_timeout
 
         self.workspace = workspace
         self.runner = PiRunner(
             workspace=workspace,
-            node_binary=None if codex_bin == "codex" else codex_bin,
+            node_binary=node_binary,
         )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
         self._run_process_with_idle_timeout = run_process_with_idle_timeout
-        self._extract_codex_session_id = extract_codex_session_id
-        self._extract_codex_audit_events = extract_codex_audit_events
-        self._extract_codex_audit_events_from_session = (
+        self._extract_agent_session_id = extract_agent_session_id
+        self._extract_agent_audit_events = extract_agent_audit_events
+        self._extract_agent_audit_events_from_session = (
             extract_pi_audit_events_from_session
         )
         self._session_line_count = count_pi_session_lines
@@ -174,18 +174,18 @@ class TaskAgentCodexRunner:
     ) -> TaskAgentDecision:
         self.last_transcript_start_line = self._session_line_count(session_id)
         raw = self._execute(prompt=prompt, session_id=session_id)
-        self.last_session_id = self._extract_codex_session_id(raw) or session_id
+        self.last_session_id = self._extract_agent_session_id(raw) or session_id
         self.last_transcript_end_line = self._session_line_count(self.last_session_id)
         session_events = []
         if self.last_session_id:
-            session_events = self._extract_codex_audit_events_from_session(
+            session_events = self._extract_agent_audit_events_from_session(
                 self.last_session_id,
                 start_line=self.last_transcript_start_line,
                 end_line=self.last_transcript_end_line,
                 limit=TASK_AGENT_AUDIT_EVENT_LIMIT,
             )
         self.last_audit_tool_events = (
-            session_events or self._extract_codex_audit_events(raw)
+            session_events or self._extract_agent_audit_events(raw)
         )
         return _parse_task_agent_decision(raw)
 
@@ -443,15 +443,15 @@ def process_work_item(
             candidate_prompt,
             memory_issue=memory_issue,
         )
-        codex_session_id = getattr(runner.codex, "last_session_id", None) or ""
+        agent_session_id = getattr(runner.backend, "last_session_id", None) or ""
         store.record_task_agent_run(
             summary_input_id=work_input.id,
-            codex_session_id=codex_session_id,
+            codex_session_id=agent_session_id,
             decision_json=_json_dumps(decision.model_dump(mode="json")),
             audit_summary=decision.update_summary,
             memory_recall_used=decision.memory_recall_used,
         )
-        audit_tool_events = getattr(runner.codex, "last_audit_tool_events", None)
+        audit_tool_events = getattr(runner.backend, "last_audit_tool_events", None)
         memory_recall_attempted = _audit_events_include_memory_recall(
             audit_tool_events
         )
@@ -470,7 +470,7 @@ def process_work_item(
             summary_input_id=work_input.id,
             work_item=work_item,
             decision=decision,
-            codex_session_id=codex_session_id,
+            agent_session_id=agent_session_id,
             memory_issue=memory_issue,
             memory_recall_attempted=memory_recall_attempted,
             memory_runtime_unavailable=memory_runtime_unavailable,
@@ -496,7 +496,7 @@ def apply_task_agent_decision(
     summary_input_id: int,
     work_item: WorkItem,
     decision: TaskAgentDecision,
-    codex_session_id: str = "",
+    agent_session_id: str = "",
     memory_issue: str = "",
     memory_recall_attempted: bool = False,
     memory_runtime_unavailable: bool = False,
@@ -507,7 +507,7 @@ def apply_task_agent_decision(
     if record_run:
         store.record_task_agent_run(
             summary_input_id=summary_input_id,
-            codex_session_id=codex_session_id,
+            codex_session_id=agent_session_id,
             decision_json=_json_dumps(decision.model_dump(mode="json")),
             audit_summary=decision.update_summary,
             memory_recall_used=decision.memory_recall_used,

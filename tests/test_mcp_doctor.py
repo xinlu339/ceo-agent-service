@@ -63,7 +63,7 @@ url = "https://xiaoqing.example/mcp"
     )
 
     statuses = check_mcp_statuses(
-        codex_config_path=config,
+        memory_config_path=config,
     )
     by_name = {status.name: status for status in statuses}
 
@@ -81,7 +81,7 @@ url = "https://xiaoqing.example/mcp"
 
 def test_mcp_doctor_reports_missing_memory_config(tmp_path: Path) -> None:
     statuses = check_mcp_statuses(
-        codex_config_path=tmp_path / "missing.toml",
+        memory_config_path=tmp_path / "missing.toml",
     )
 
     assert statuses[0] == McpStatus(
@@ -101,7 +101,7 @@ def test_mcp_doctor_uses_reviewed_exa_bridge_not_legacy_codex_passthrough(
     monkeypatch.setenv("CEO_CODEX_PASSTHROUGH_MCP_SERVERS", "exa")
 
     statuses = check_mcp_statuses(
-        codex_config_path=config,
+        memory_config_path=config,
     )
     by_name = {status.name: status for status in statuses}
 
@@ -140,7 +140,7 @@ def test_mcp_doctor_notification_is_sent_once(tmp_path: Path) -> None:
 def test_mcp_doctor_report_is_read_only_without_notify(tmp_path: Path) -> None:
     report = mcp_doctor_report(
         db_path=tmp_path / "auto-reply.sqlite3",
-        codex_config_path=tmp_path / "missing.toml",
+        memory_config_path=tmp_path / "missing.toml",
         notify=False,
     )
 

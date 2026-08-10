@@ -7,6 +7,7 @@ from app.pi_runner import (
     PI_API_KEY_ENV,
     PiRunner,
     ensure_pi_runtime_config,
+    pi_allowed_read_roots,
     pi_memory_connector_config_issue,
     pi_models_config,
     pi_process_failure_reason,
@@ -210,6 +211,19 @@ def test_pi_runner_environment_uses_isolated_agent_directories(
     assert env["CEO_PI_XIAOQING_MCP_URL"] == (
         "https://interview.hr.startask.net/mcp"
     )
+
+
+def test_pi_default_read_roots_do_not_depend_on_codex_skills(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.delenv("CEO_PI_ALLOWED_READ_ROOTS", raising=False)
+    monkeypatch.setattr("app.pi_runner.Path.home", lambda: tmp_path)
+
+    roots = pi_allowed_read_roots(tmp_path / "workspace")
+
+    assert (tmp_path / ".agents" / "skills").resolve() in roots
+    assert (tmp_path / ".codex" / "skills").resolve() not in roots
 
 
 def test_pi_runner_loads_only_reviewed_memory_connector_environment(

@@ -1,7 +1,7 @@
 """Tool-free Pi runner for creating a WeChat reply decision."""
 from __future__ import annotations
 
-from app.codex_decision import CodexDecisionRunner
+from app.agent_decision import AgentDecisionRunner
 from app.pi_safety import make_read_only_without_tools
 
 
@@ -17,7 +17,7 @@ WECHAT_DECISION_DEVELOPER_INSTRUCTIONS = """You are a tool-free WeChat reply dec
 """
 
 
-class WechatDecisionRunner(CodexDecisionRunner):
+class WechatDecisionRunner(AgentDecisionRunner):
     """A replay-safe decision step before the persisted WeChat delivery stage."""
 
     def __init__(self, *args, **kwargs):

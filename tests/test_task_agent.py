@@ -11,7 +11,7 @@ from app.task_agent import (
     build_task_agent_prompt,
     process_work_item,
 )
-from app.task_agent import TaskAgentCodexRunner
+from app.task_agent import TaskAgentPiRunner
 from app.task_models import TaskAgentDecision, WorkItem
 
 
@@ -877,7 +877,7 @@ def test_apply_decision_closes_todo_with_completion_evidence(tmp_path):
         summary_input_id=0,
         work_item=_work_item("客户交付"),
         decision=decision,
-        codex_session_id="session-1",
+        agent_session_id="session-1",
     )
 
     todo = store.list_work_todos(project_id=project_id)[0]
@@ -2580,7 +2580,7 @@ def test_task_agent_codex_runner_isolates_user_config_for_memory_recall(tmp_path
             }
         )
 
-    runner = TaskAgentCodexRunner(workspace=tmp_path, executor=executor)
+    runner = TaskAgentPiRunner(workspace=tmp_path, executor=executor)
 
     runner.decide(prompt="{}", session_id=None)
 
@@ -2858,7 +2858,7 @@ def test_process_work_item_accepts_none_session_id(tmp_path):
 
 
 def test_task_agent_codex_runner_parses_jsonl_payload(tmp_path):
-    from app.task_agent import TaskAgentCodexRunner
+    from app.task_agent import TaskAgentPiRunner
 
     def executor(command, prompt):
         return (
@@ -2876,7 +2876,7 @@ def test_task_agent_codex_runner_parses_jsonl_payload(tmp_path):
             '"}}\n'
         )
 
-    runner = TaskAgentCodexRunner(workspace=tmp_path, executor=executor)
+    runner = TaskAgentPiRunner(workspace=tmp_path, executor=executor)
     decision = runner.decide(prompt="x")
 
     assert decision.action == "discard"
@@ -2884,7 +2884,7 @@ def test_task_agent_codex_runner_parses_jsonl_payload(tmp_path):
 
 
 def test_task_agent_codex_runner_parses_response_item_output_text(tmp_path):
-    from app.task_agent import TaskAgentCodexRunner
+    from app.task_agent import TaskAgentPiRunner
 
     def executor(command, prompt):
         return "\n".join(
@@ -2923,7 +2923,7 @@ def test_task_agent_codex_runner_parses_response_item_output_text(tmp_path):
             ]
         )
 
-    runner = TaskAgentCodexRunner(workspace=tmp_path, executor=executor)
+    runner = TaskAgentPiRunner(workspace=tmp_path, executor=executor)
     decision = runner.decide(prompt="x")
 
     assert decision.action == "discard"
@@ -3140,7 +3140,7 @@ def test_task_agent_schema_uses_strict_object_shapes_required_by_codex():
 
 
 def test_task_agent_codex_runner_uses_process_runner_signature(tmp_path):
-    from app.task_agent import TaskAgentCodexRunner
+    from app.task_agent import TaskAgentPiRunner
     from app.task_agent import TASK_AGENT_DECISION_SCHEMA_PATH
 
     calls = []
@@ -3166,7 +3166,7 @@ def test_task_agent_codex_runner_uses_process_runner_signature(tmp_path):
             stderr="",
         )
 
-    runner = TaskAgentCodexRunner(
+    runner = TaskAgentPiRunner(
         workspace=tmp_path,
         timeout_seconds=7,
         idle_timeout_seconds=3,
@@ -3190,7 +3190,7 @@ def test_task_agent_codex_runner_uses_process_runner_signature(tmp_path):
 
 
 def test_task_agent_codex_runner_reads_audit_events_from_session(tmp_path):
-    from app.task_agent import TaskAgentCodexRunner
+    from app.task_agent import TaskAgentPiRunner
 
     def fake_run(command, **kwargs):
         return ProcessRunResult(
@@ -3216,12 +3216,12 @@ def test_task_agent_codex_runner_reads_audit_events_from_session(tmp_path):
             stderr="",
         )
 
-    runner = TaskAgentCodexRunner(workspace=tmp_path)
+    runner = TaskAgentPiRunner(workspace=tmp_path)
     runner._run_process_with_idle_timeout = fake_run
-    runner._extract_codex_session_id = (
+    runner._extract_agent_session_id = (
         lambda raw: "019f0000-0000-7000-8000-000000000000"
     )
-    runner._extract_codex_audit_events = lambda raw: []
+    runner._extract_agent_audit_events = lambda raw: []
     runner._session_line_count = lambda session_id: 8 if session_id else 0
     observed_limits = []
 
@@ -3231,7 +3231,7 @@ def test_task_agent_codex_runner_reads_audit_events_from_session(tmp_path):
             return [{"tool": "exec_command", "arguments": "{}"}]
         return [{"tool": "mcp__memory_connector__memory_recall", "arguments": "{}"}]
 
-    runner._extract_codex_audit_events_from_session = fake_session_events
+    runner._extract_agent_audit_events_from_session = fake_session_events
 
     decision = runner.decide(prompt="decide")
 
@@ -3246,7 +3246,7 @@ def test_task_agent_codex_runner_reads_audit_events_from_session(tmp_path):
 
 def test_task_agent_codex_runner_timeout_raises_reason(tmp_path):
     from app.external_retry import ExternalDependencyError
-    from app.task_agent import TaskAgentCodexRunner
+    from app.task_agent import TaskAgentPiRunner
 
     def fake_run(command, **kwargs):
         return ProcessRunResult(
@@ -3258,7 +3258,7 @@ def test_task_agent_codex_runner_timeout_raises_reason(tmp_path):
             timeout_reason="process produced no output for 3 seconds",
         )
 
-    runner = TaskAgentCodexRunner(workspace=tmp_path)
+    runner = TaskAgentPiRunner(workspace=tmp_path)
     runner._run_process_with_idle_timeout = fake_run
 
     with pytest.raises(ExternalDependencyError, match="no output for 3 seconds"):

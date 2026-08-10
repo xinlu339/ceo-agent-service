@@ -18,33 +18,33 @@ PROJECT_MEMORY_CONTEXT_SCHEMA_PATH = (
 )
 
 
-class ProjectMemoryContextCodexRunner:
+class ProjectMemoryContextPiRunner:
     def __init__(
         self,
         workspace: Path,
-        codex_bin: str = "codex",
+        node_binary: str | None = None,
         executor=None,
         timeout_seconds: int = 1200,
         idle_timeout_seconds: int = 900,
     ):
-        from app.codex_decision import (
+        from app.agent_decision import (
             _subprocess_failure_reason,
-            extract_codex_audit_events,
-            extract_codex_session_id,
+            extract_agent_audit_events,
+            extract_agent_session_id,
         )
         from app.process_runner import run_process_with_idle_timeout
 
         self.workspace = workspace
         self.runner = PiRunner(
             workspace=workspace,
-            node_binary=None if codex_bin == "codex" else codex_bin,
+            node_binary=node_binary,
         )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
         self._run_process_with_idle_timeout = run_process_with_idle_timeout
-        self._extract_codex_session_id = extract_codex_session_id
-        self._extract_codex_audit_events = extract_codex_audit_events
+        self._extract_agent_session_id = extract_agent_session_id
+        self._extract_agent_audit_events = extract_agent_audit_events
         self._subprocess_failure_reason = _subprocess_failure_reason
         self.last_session_id: str | None = None
         self.last_audit_tool_events: list[dict[str, str]] = []
@@ -66,8 +66,8 @@ class ProjectMemoryContextCodexRunner:
             updates=updates,
         )
         raw = self._execute(prompt)
-        self.last_session_id = self._extract_codex_session_id(raw)
-        self.last_audit_tool_events = self._extract_codex_audit_events(raw)
+        self.last_session_id = self._extract_agent_session_id(raw)
+        self.last_audit_tool_events = self._extract_agent_audit_events(raw)
         return parse_project_memory_context(raw)
 
     def _execute(self, prompt: str) -> str:

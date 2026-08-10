@@ -6,10 +6,10 @@ from typing import Callable
 from pydantic import ValidationError
 
 from app.agent_envelope import AgentEnvelope
-from app.codex_decision import (
+from app.agent_decision import (
     _subprocess_failure_reason,
-    extract_codex_audit_events,
-    extract_codex_session_id,
+    extract_agent_audit_events,
+    extract_agent_session_id,
 )
 from app.external_retry import ExternalDependencyError, run_external
 from app.pi_events import assistant_text_candidates
@@ -74,20 +74,25 @@ class AgentSpec:
 @dataclass(frozen=True)
 class StructuredAgentRun:
     envelope: AgentEnvelope
-    codex_session_id: str
+    agent_session_id: str
     transcript_start_line: int
     transcript_end_line: int
     audit_tool_events: list[dict[str, str]]
 
+    @property
+    def codex_session_id(self) -> str:
+        """Legacy accessor for database-facing callers during the schema transition."""
+        return self.agent_session_id
 
-class StructuredCodexRunner:
+
+class StructuredPiRunner:
     def __init__(
         self,
         *,
         store,
         workspace: Path,
         spec: AgentSpec,
-        codex_bin: str = "codex",
+        node_binary: str | None = None,
         executor: Callable[[list[str], str, dict[str, str]], str] | None = None,
         session_exists: Callable[[str], bool] | None = None,
         timeout_seconds: int = 1200,
@@ -97,7 +102,7 @@ class StructuredCodexRunner:
         self.store = store
         self.workspace = workspace
         self.spec = spec
-        self.pi_node_binary = None if codex_bin == "codex" else codex_bin
+        self.pi_node_binary = node_binary
         self.executor = executor
         self.session_exists = session_exists or self._local_session_exists
         self.timeout_seconds = timeout_seconds
@@ -119,7 +124,7 @@ class StructuredCodexRunner:
         owner: str,
         allow_side_effects: bool = False,
     ) -> StructuredAgentRun:
-        with self.store.codex_session_lock(conversation_id, owner):
+        with self.store.agent_session_lock(conversation_id, owner):
             session_id = self._usable_session_id(conversation_id)
             transcript_start_line = self._session_line_count(session_id)
             command = self._build_command(
@@ -130,9 +135,9 @@ class StructuredCodexRunner:
             try:
                 raw = self._execute(command, prompt)
             except RuntimeError as exc:
-                if not session_id or not _is_codex_session_refresh_error(str(exc)):
+                if not session_id or not _is_agent_session_refresh_error(str(exc)):
                     raise
-                self.store.clear_codex_session(conversation_id)
+                self.store.clear_agent_session(conversation_id)
                 session_id = None
                 transcript_start_line = 0
                 command = self._build_command(
@@ -141,7 +146,7 @@ class StructuredCodexRunner:
                     allow_side_effects=allow_side_effects,
                 )
                 raw = self._execute(command, prompt)
-            parsed_session_id = extract_codex_session_id(raw) or session_id or ""
+            parsed_session_id = extract_agent_session_id(raw) or session_id or ""
             try:
                 envelope = parse_agent_envelope(raw)
             except (json.JSONDecodeError, ValueError, ValidationError):
@@ -154,7 +159,7 @@ class StructuredCodexRunner:
                     allow_side_effects=False,
                 )
                 raw = self._execute(repair_command, repair_prompt)
-                parsed_session_id = extract_codex_session_id(raw) or parsed_session_id
+                parsed_session_id = extract_agent_session_id(raw) or parsed_session_id
                 envelope = parse_agent_envelope(raw)
             transcript_end_line = self._session_line_count(parsed_session_id)
             audit_tool_events = self._audit_tool_events(
@@ -172,19 +177,19 @@ class StructuredCodexRunner:
                 )
             return StructuredAgentRun(
                 envelope=envelope,
-                codex_session_id=parsed_session_id,
+                agent_session_id=parsed_session_id,
                 transcript_start_line=transcript_start_line,
                 transcript_end_line=transcript_end_line,
                 audit_tool_events=audit_tool_events,
             )
 
     def _usable_session_id(self, conversation_id: str) -> str | None:
-        session_id = self.store.get_codex_session_id(conversation_id)
+        session_id = self.store.get_agent_session_id(conversation_id)
         if not session_id:
             return None
         if self.session_exists(session_id):
             return session_id
-        self.store.clear_codex_session(conversation_id)
+        self.store.clear_agent_session(conversation_id)
         return None
 
     @staticmethod
@@ -210,7 +215,7 @@ class StructuredCodexRunner:
                 start_line=start_line,
                 end_line=end_line,
             )
-        return session_events or extract_codex_audit_events(raw)
+        return session_events or extract_agent_audit_events(raw)
 
     def _execute(self, command: list[str], prompt: str) -> str:
         env = self.runner.build_env()
@@ -352,7 +357,7 @@ def _normalize_agent_envelope_payload(payload: dict) -> dict:
     }
 
 
-def _is_codex_session_refresh_error(message: str) -> bool:
+def _is_agent_session_refresh_error(message: str) -> bool:
     normalized = message.casefold()
     return (
         "failed to refresh token" in normalized

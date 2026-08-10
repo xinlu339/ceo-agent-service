@@ -95,7 +95,7 @@ HANDOFF_NOTIFICATION_PREFIX = "【CEO Agent 转人工通知】"
 # Historical auto-ack marker. Keep filtering it from context, but do not send
 # new processing acknowledgements before final replies.
 PROCESSING_ACK = "收到，我正在处理（by 分身）"
-CODEX_LOGIN_REQUIRED_PREFIX = "codex_login_required"
+LEGACY_CODEX_LOGIN_REQUIRED_PREFIX = "codex_login_required"
 PI_PROVIDER_AUTH_FAILED_PREFIX = "pi_provider_auth_failed"
 PI_PROVIDER_UNAVAILABLE_PREFIX = "pi_provider_unavailable"
 LEGACY_CODEX_PROVIDER_AUTH_FAILED_PREFIX = "codex_provider_auth_failed"
@@ -110,17 +110,15 @@ STALE_PROCESSING_TASK_SECONDS = 30 * 60
 MAX_REPLY_TASK_ATTEMPTS = 3
 REPLY_TASK_RETRY_BASE_DELAY_SECONDS = 60
 REPLY_TASK_RETRY_MAX_DELAY_SECONDS = 15 * 60
-RECOVERABLE_AGENT_RUNTIME_ERRORS = frozenset(
-    {
-        "pi_process_failed",
-        "pi_process_timeout",
-        "pi_stream_invalid",
-        "codex_process_failed",
-        "codex_process_timeout",
-        "codex_stream_invalid",
-    }
+PI_RECOVERABLE_RUNTIME_ERRORS = frozenset(
+    {"pi_process_failed", "pi_process_timeout", "pi_stream_invalid"}
 )
-STALE_CODEX_RESUME_ATTEMPTS = 2
+LEGACY_CODEX_RUNTIME_ERRORS = frozenset(
+    {"codex_process_failed", "codex_process_timeout", "codex_stream_invalid"}
+)
+RECOVERABLE_AGENT_RUNTIME_ERRORS = frozenset(
+    PI_RECOVERABLE_RUNTIME_ERRORS | LEGACY_CODEX_RUNTIME_ERRORS
+)
 CALENDAR_PENDING_INVITE_LOOKAHEAD_DAYS = 14
 CALENDAR_PENDING_INVITE_EVENT_MATCH_SECONDS = 5 * 60
 CALENDAR_PENDING_INVITE_NO_CHANGE_TIME_START_LOOKAHEAD = timedelta(hours=24)
@@ -197,7 +195,7 @@ LARK_DOC_URL_PATTERN = re.compile(
 )
 
 
-def _is_codex_login_required_error(reason: str) -> bool:
+def _is_legacy_agent_login_required_error(reason: str) -> bool:
     normalized = reason.lower()
     return (
         "failed to refresh token" in normalized
@@ -208,7 +206,7 @@ def _is_codex_login_required_error(reason: str) -> bool:
     ) or "token_invalidated" in normalized
 
 
-def _is_codex_provider_auth_error(reason: str) -> bool:
+def _is_agent_provider_auth_error(reason: str) -> bool:
     normalized = reason.lower()
     if normalized.startswith(
         (PI_PROVIDER_AUTH_FAILED_PREFIX, LEGACY_CODEX_PROVIDER_AUTH_FAILED_PREFIX)
@@ -229,7 +227,7 @@ def _is_codex_provider_auth_error(reason: str) -> bool:
     return responses_api_auth_failed or chatgpt_codex_forbidden
 
 
-def _codex_provider_auth_error(reason: str) -> str:
+def _agent_provider_auth_error(reason: str) -> str:
     if reason.startswith(PI_PROVIDER_AUTH_FAILED_PREFIX):
         return reason
     normalized = reason.lower()
@@ -251,7 +249,7 @@ def _codex_provider_auth_error(reason: str) -> str:
     )
 
 
-def _is_codex_provider_transport_error(reason: str) -> bool:
+def _is_agent_provider_transport_error(reason: str) -> bool:
     normalized = reason.lower()
     if normalized.startswith(
         (PI_PROVIDER_UNAVAILABLE_PREFIX, LEGACY_CODEX_PROVIDER_UNAVAILABLE_PREFIX)
@@ -272,7 +270,7 @@ def _is_codex_provider_transport_error(reason: str) -> bool:
     )
 
 
-def _codex_provider_transport_error(reason: str) -> str:
+def _agent_provider_transport_error(reason: str) -> str:
     if reason.startswith(PI_PROVIDER_UNAVAILABLE_PREFIX):
         return reason
     normalized = reason.lower()
@@ -298,26 +296,26 @@ def _is_dingteam_okr_login_error(reason: str) -> bool:
     )
 
 
-def _normalize_codex_stop_error_reason(reason: str) -> str:
-    if _is_codex_authorization_wait_reason(reason):
+def _normalize_agent_stop_error_reason(reason: str) -> str:
+    if _is_agent_authorization_wait_reason(reason):
         return reason
-    if _is_codex_provider_transport_error(reason):
-        return _codex_provider_transport_error(reason)
-    if _is_codex_provider_auth_error(reason):
-        return _codex_provider_auth_error(reason)
-    if _is_codex_login_required_error(reason):
-        return f"{CODEX_LOGIN_REQUIRED_PREFIX}: {reason}"
+    if _is_agent_provider_transport_error(reason):
+        return _agent_provider_transport_error(reason)
+    if _is_agent_provider_auth_error(reason):
+        return _agent_provider_auth_error(reason)
+    if _is_legacy_agent_login_required_error(reason):
+        return f"{LEGACY_CODEX_LOGIN_REQUIRED_PREFIX}: {reason}"
     return reason
 
 
-def _is_codex_authorization_wait_reason(reason: str) -> bool:
+def _is_agent_authorization_wait_reason(reason: str) -> bool:
     return reason.startswith(
         (
             PI_PROVIDER_AUTH_FAILED_PREFIX,
             PI_PROVIDER_UNAVAILABLE_PREFIX,
             LEGACY_CODEX_PROVIDER_AUTH_FAILED_PREFIX,
             LEGACY_CODEX_PROVIDER_UNAVAILABLE_PREFIX,
-            CODEX_LOGIN_REQUIRED_PREFIX,
+            LEGACY_CODEX_LOGIN_REQUIRED_PREFIX,
         )
     )
 
@@ -404,7 +402,7 @@ class ReplyTaskProcessingError(RuntimeError):
     """Raised after recording a processing failure so queued tasks can retry."""
 
 
-class CodexAuthorizationRequiredError(ReplyTaskProcessingError):
+class AgentAuthorizationRequiredError(ReplyTaskProcessingError):
     """Legacy name for a Pi provider-credential recovery condition."""
 
     needs_authorization = True
@@ -425,7 +423,7 @@ class DingTalkAutoReplyWorker:
         self,
         store: AutoReplyStore,
         dws,
-        codex,
+        agent,
         dry_run: bool = False,
         style_profile: str = "",
         style_records: list[CorpusRecord] | None = None,
@@ -439,7 +437,7 @@ class DingTalkAutoReplyWorker:
     ):
         self.store = store
         self.dws = dws
-        self.codex = codex
+        self.agent = agent
         self.dry_run = dry_run
         self.style_profile = style_profile.strip()
         self.style_records = style_records or []
@@ -465,14 +463,14 @@ class DingTalkAutoReplyWorker:
     def _direct_agent_runner(self) -> DirectAgentRunner:
         if self.direct_agent_runner is not None:
             return self.direct_agent_runner
-        runner = getattr(self.codex, "runner", None)
+        runner = getattr(self.agent, "runner", None)
         workspace = getattr(runner, "workspace", None)
         if workspace is None:
             raise RuntimeError("Pi runner workspace is unavailable")
         self.direct_agent_runner = DirectAgentRunner(
             store=self.store,
             workspace=Path(workspace),
-            codex_bin=str(getattr(runner, "node_binary", "node")),
+            node_binary=str(getattr(runner, "node_binary", "node")),
         )
         return self.direct_agent_runner
 
@@ -1514,10 +1512,10 @@ class DingTalkAutoReplyWorker:
                 continue
             except Exception as exc:
                 error = str(exc)
-                authorization_wait_error = _normalize_codex_stop_error_reason(error)
+                authorization_wait_error = _normalize_agent_stop_error_reason(error)
                 if self._is_authorization_error(
                     exc
-                ) or _is_codex_authorization_wait_reason(authorization_wait_error):
+                ) or _is_agent_authorization_wait_reason(authorization_wait_error):
                     provider_recovery = authorization_wait_error.startswith(
                         (
                             PI_PROVIDER_UNAVAILABLE_PREFIX,
@@ -1566,7 +1564,7 @@ class DingTalkAutoReplyWorker:
                     continue
                 try:
                     if error in RECOVERABLE_AGENT_RUNTIME_ERRORS:
-                        self.store.clear_codex_session(task.conversation_id)
+                        self.store.clear_agent_session(task.conversation_id)
                         self.store.clear_agent_run_session(
                             task.id,
                             task.execution_generation,
@@ -1708,7 +1706,7 @@ class DingTalkAutoReplyWorker:
                     expected_execution_generation=task.execution_generation,
                 )
                 continue
-            if not run.codex_session_id:
+            if not run.agent_session_id:
                 self.store.fail_expired_agent_run(
                     run.id,
                     {"code": "stale_agent_run_missing_session"},
@@ -1838,11 +1836,8 @@ class DingTalkAutoReplyWorker:
                     "reconciliation_proof_invalid",
                     "reconciliation_proof_ambiguous",
                     "reconciliation_result_invalid",
-                    "codex_process_failed",
-                    "codex_process_timeout",
-                    "codex_stream_invalid",
                     "reconciliation_tool_unavailable",
-                }
+                } or code in LEGACY_CODEX_RUNTIME_ERRORS
                 self._defer_agent_reconciliation(
                     run.id,
                     runner.owner,
@@ -2041,7 +2036,7 @@ class DingTalkAutoReplyWorker:
                 trigger_sender=task.trigger_sender,
                 trigger_text=task.trigger_text,
                 codex_reason=error,
-                codex_session_id=run.codex_session_id,
+                codex_session_id=run.agent_session_id,
                 codex_transcript_start_line=run.transcript_start_line,
                 codex_transcript_end_line=run.transcript_end_line,
                 audit_tool_events_json=json.dumps(
@@ -2660,7 +2655,7 @@ class DingTalkAutoReplyWorker:
             trigger_sender=task.trigger_sender,
             trigger_text=task.trigger_text,
             codex_reason=run_result.result.summary,
-            codex_session_id=run.codex_session_id,
+            codex_session_id=run.agent_session_id,
             codex_transcript_start_line=run_result.transcript_start_line,
             codex_transcript_end_line=run_result.transcript_end_line,
             audit_tool_events_json=json.dumps(
@@ -2716,7 +2711,7 @@ class DingTalkAutoReplyWorker:
             action="agent_run",
             sensitivity_kind="general",
             codex_reason=run_result.result.summary,
-            codex_session_id=run.codex_session_id,
+            codex_session_id=run.agent_session_id,
             codex_transcript_start_line=run_result.transcript_start_line,
             codex_transcript_end_line=run_result.transcript_end_line,
             audit_tool_events_json=json.dumps(

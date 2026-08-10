@@ -13,8 +13,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.dingtalk_models import (
-    CodexAction,
-    CodexDecision,
+    AgentAction,
+    AgentDecision,
     DingTalkConversation,
     DingTalkMessage,
 )
@@ -126,7 +126,7 @@ def test_dingtalk_message_does_not_address_principal_for_agent_name_without_at(
 
 
 def test_codex_action_values_match_output_protocol():
-    assert [action.value for action in CodexAction] == [
+    assert [action.value for action in AgentAction] == [
         "send_reply",
         "ask_clarifying_question",
         "handoff_to_human",
@@ -135,8 +135,8 @@ def test_codex_action_values_match_output_protocol():
     ]
 
 
-def test_codex_decision_defaults():
-    decision = CodexDecision(action=CodexAction.NO_REPLY)
+def test_agent_decision_defaults():
+    decision = AgentDecision(action=AgentAction.NO_REPLY)
 
     assert decision.reply_text == ""
     assert decision.reason == ""

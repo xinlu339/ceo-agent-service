@@ -28,7 +28,7 @@ from app.codex_history import (
     extract_codex_audit_events_from_session,
     render_local_codex_session,
 )
-from app.codex_decision import audit_summary_explains_no_documents
+from app.agent_decision import audit_summary_explains_no_documents
 from app.config import (
     agent_names,
     assistant_signature,
@@ -106,7 +106,11 @@ from app.pi_runner import (
     validate_pi_provider,
     validate_pi_thinking_level,
 )
-from app.pi_history import RenderedPiEvent, render_local_pi_session
+from app.pi_history import (
+    RenderedPiEvent,
+    extract_pi_audit_events_from_session,
+    render_local_pi_session,
+)
 from app.developer_prompt import (
     configurable_prompt_variable_pairs,
     DeveloperPromptTemplateError,
@@ -609,7 +613,7 @@ NO_AUDIT_DOCUMENTS_TOOLTIP = (
 NO_AUDIT_CONTEXT_TOOLTIP = (
     "No audit documents or tool events were attached; this answer was generated from conversation context only."
 )
-NO_CODEX_SESSION_TOOLTIP = (
+NO_AGENT_SESSION_TOOLTIP = (
     "No Pi session is linked; review this attempt using the stored audit fields only."
 )
 _BROWSER_NOTIFICATION_SUBSCRIBERS: set[asyncio.Queue[dict[str, str]]] = set()
@@ -1161,7 +1165,7 @@ def _tutorial_steps() -> list[_TutorialStep]:
             ],
             "commands": [
                 ".venv/bin/ceo-agent build-work-profile --workspace \"$HOME/Documents/memory\" --corpus-dir ./data/corpus",
-                ".venv/bin/pytest tests/test_work_profile.py tests/test_prompt.py tests/test_worker.py::test_consumer_codex_command_embeds_work_profile_content -q",
+                ".venv/bin/pytest tests/test_work_profile.py tests/test_prompt.py tests/test_worker.py::test_consumer_pi_command_injects_work_profile_content -q",
             ],
             "links": [("Config", "/config"), ("Logs", "/logs")],
         },
@@ -5930,7 +5934,7 @@ def render_attempt_detail(store: AutoReplyStore, attempt_id: int) -> tuple[int, 
         sent_reply,
         _feedback_events_by_sent_reply(store, [sent_reply] if sent_reply else []),
     )
-    codex_session_id = attempt.codex_session_id or store.get_codex_session_id(
+    agent_session_id = attempt.codex_session_id or store.get_agent_session_id(
         attempt.conversation_id
     )
     later_attempt = _later_attempt_for_display(store, attempt)
@@ -5939,7 +5943,7 @@ def render_attempt_detail(store: AutoReplyStore, attempt_id: int) -> tuple[int, 
         _attempt_detail_body(
             attempt,
             sent_reply,
-            codex_session_id,
+            agent_session_id,
             feedback_events,
             later_attempt,
         ),
@@ -6081,7 +6085,7 @@ def render_meeting_attempt_detail(
         title_label="会议",
         title=job.title,
         subtitle=f"参会人：{participant_preview}" if participant_preview else "",
-        codex_session_id=run.codex_session_id,
+        agent_session_id=run.agent_session_id,
         actions_html="",
         fields=fields,
         pills_html=_agent_status_pill(run_status),
@@ -6174,10 +6178,10 @@ def _meeting_run_display_status(
     return run_status
 
 
-def render_codex_session_list(store: AutoReplyStore) -> str:
+def render_pi_session_list(store: AutoReplyStore) -> str:
     rows = []
-    for conversation in store.list_codex_conversations():
-        session_id = conversation.codex_session_id or ""
+    for conversation in store.list_agent_conversations():
+        session_id = conversation.agent_session_id or ""
         latest_attempts = store.list_reply_attempts_for_conversation(
             conversation.conversation_id,
             limit=1,
@@ -6206,21 +6210,22 @@ def render_codex_session_list(store: AutoReplyStore) -> str:
     )
 
 
-def render_codex_session_detail(
+def render_pi_session_detail(
     session_id: str,
     codex_home: Path | None = None,
     store: AutoReplyStore | None = None,
 ) -> tuple[int, str]:
-    rendered = (
-        render_local_codex_session(session_id, codex_home=codex_home)
-        if codex_home is not None
-        else render_local_pi_session(session_id)
-    )
+    if codex_home is not None:
+        rendered = render_local_codex_session(session_id, codex_home=codex_home)
+    else:
+        rendered = render_local_pi_session(session_id)
+        if rendered.missing:
+            rendered = render_local_codex_session(session_id)
     related_reply_attempts = (
-        store.list_reply_attempts_for_codex_session(session_id) if store else []
+        store.list_reply_attempts_for_agent_session(session_id) if store else []
     )
     related_meeting_runs = (
-        store.list_meeting_alignment_runs_for_codex_session(session_id)
+        store.list_meeting_alignment_runs_for_agent_session(session_id)
         if store
         else []
     )
@@ -6250,7 +6255,7 @@ def render_codex_session_detail(
                 store.count_pending_user_feedback_items() if store else None
             ),
         )
-    events = "".join(_codex_event_card(event) for event in rendered.events)
+    events = "".join(_agent_event_card(event) for event in rendered.events)
     related_history = _related_history_card(
         related_reply_attempts,
         session_id=session_id,
@@ -6279,6 +6284,11 @@ def render_codex_session_detail(
             store.count_pending_user_feedback_items() if store else None
         ),
     )
+
+
+# Compatibility exports for callers that used the pre-Pi audit helper names.
+render_codex_session_list = render_pi_session_list
+render_codex_session_detail = render_pi_session_detail
 
 
 def render_error_list(
@@ -7344,9 +7354,9 @@ def create_audit_app(
 
     def _wechat_memory_writer(store):
         from app import config as _config
-        from app.wechat.memory import CodexMemoryWriteBackend, WechatMemoryWriter
+        from app.wechat.memory import PiMemoryWriteBackend, WechatMemoryWriter
         return WechatMemoryWriter(
-            store, CodexMemoryWriteBackend(_config.workspace_path())
+            store, PiMemoryWriteBackend(_config.workspace_path())
         )
 
     register_wechat_memory_review_routes(
@@ -7540,11 +7550,11 @@ def create_audit_app(
 
     @app.get("/pi", response_class=HTMLResponse)
     def pi_session_list() -> str:
-        return render_codex_session_list(AutoReplyStore(db_path))
+        return render_pi_session_list(AutoReplyStore(db_path))
 
     @app.get("/pi/{session_id}", response_class=HTMLResponse)
     def pi_session_detail(session_id: str) -> HTMLResponse:
-        status, html = render_codex_session_detail(
+        status, html = render_pi_session_detail(
             session_id,
             store=AutoReplyStore(db_path),
         )
@@ -7885,7 +7895,7 @@ def _positive_int_query(request: Request, name: str, *, default: int) -> int:
 def _attempt_detail_body(
     attempt: ReplyAttempt,
     sent_reply: SentReply | None,
-    codex_session_id: str | None,
+    agent_session_id: str | None,
     feedback_events: list[FeedbackEvent],
     later_attempt: ReplyAttempt | None = None,
 ) -> str:
@@ -7907,7 +7917,7 @@ def _attempt_detail_body(
         subtitle=(
             f"触发人：{attempt.trigger_sender}" if attempt.trigger_sender.strip() else ""
         ),
-        codex_session_id=codex_session_id,
+        agent_session_id=agent_session_id,
         actions_html=_attempt_row_actions(attempt, sent_reply),
         fields=fields,
         pills_html=_attempt_action_pills(attempt, later_attempt=later_attempt),
@@ -7939,7 +7949,7 @@ def _agent_detail_body(
     title_label: str,
     title: str,
     subtitle: str,
-    codex_session_id: str | None,
+    agent_session_id: str | None,
     actions_html: str,
     fields: list[tuple[str, str]],
     pills_html: str,
@@ -7953,7 +7963,7 @@ def _agent_detail_body(
     extra_cards: str,
 ) -> str:
     return (
-        f"{_agent_detail_banner(title_label, title, subtitle, codex_session_id, actions_html)}"
+        f"{_agent_detail_banner(title_label, title, subtitle, agent_session_id, actions_html)}"
         f"{_attempt_detail_grid(fields)}"
         f"{_agent_review_panel(pills_html, trigger_title, trigger_text, reason_title, reason_text, reply_title, reply_text, side_html)}"
         f"{extra_cards}"
@@ -7979,7 +7989,7 @@ def _agent_detail_banner(
     title_label: str,
     title: str,
     subtitle: str,
-    codex_session_id: str | None,
+    agent_session_id: str | None,
     actions_html: str,
 ) -> str:
     subtitle_html = (
@@ -7988,9 +7998,9 @@ def _agent_detail_banner(
         else ""
     )
     agent_log = (
-        f"<a class=\"agent-log-button\" href=\"/pi/{escape(codex_session_id)}\">"
+        f"<a class=\"agent-log-button\" href=\"/pi/{escape(agent_session_id)}\">"
         "agent 执行记录</a>"
-        if codex_session_id
+        if agent_session_id
         else "<span class=\"muted\">No agent execution record</span>"
     )
     return (
@@ -8556,7 +8566,7 @@ def _attempt_info_tooltip(attempt: ReplyAttempt) -> str:
         return ""
     notes: list[str] = []
     if not attempt.codex_session_id.strip():
-        notes.append(NO_CODEX_SESSION_TOOLTIP)
+        notes.append(NO_AGENT_SESSION_TOOLTIP)
     has_documents = _json_array_has_items(
         attempt.audit_documents_json
     ) or audit_summary_explains_no_documents(attempt.audit_summary)
@@ -8674,7 +8684,7 @@ def _attempt_row_actions(
     )
 
 
-def _codex_event_card(event: RenderedCodexEvent | RenderedPiEvent) -> str:
+def _agent_event_card(event: RenderedCodexEvent | RenderedPiEvent) -> str:
     open_attr = " open" if event.expanded else ""
     preview = _excerpt(event.body, 140)
     return (
@@ -8894,7 +8904,7 @@ def _audit_event_uses_for_attempt(attempt: ReplyAttempt) -> list[dict[str, objec
 
 def _audit_tool_events_for_attempt(attempt: ReplyAttempt) -> list[dict[str, str]]:
     if attempt.codex_session_id.strip():
-        session_events = extract_codex_audit_events_from_session(
+        session_events = extract_pi_audit_events_from_session(
             attempt.codex_session_id.strip(),
             start_line=attempt.codex_transcript_start_line,
             end_line=(
@@ -8911,7 +8921,20 @@ def _audit_tool_events_for_attempt(attempt: ReplyAttempt) -> list[dict[str, str]
         return []
     if not isinstance(payload, list):
         return []
-    return [event for event in payload if isinstance(event, dict)]
+    persisted_events = [event for event in payload if isinstance(event, dict)]
+    if persisted_events:
+        return persisted_events
+    if attempt.codex_session_id.strip():
+        return extract_codex_audit_events_from_session(
+            attempt.codex_session_id.strip(),
+            start_line=attempt.codex_transcript_start_line,
+            end_line=(
+                attempt.codex_transcript_end_line
+                if attempt.codex_transcript_end_line > 0
+                else None
+            ),
+        )
+    return []
 
 
 def _audit_tool_uses_html(uses: list[dict[str, object]]) -> str:

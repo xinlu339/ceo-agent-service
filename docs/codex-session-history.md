@@ -14,8 +14,8 @@ Session lookup uses this order:
    exact ID match.
 4. If no exact header match exists, return missing.
 
-The request path never scans unrelated user directories or the old global
-Codex history.
+The runtime request path never scans unrelated user directories or the old
+global Codex history. Runtime resume and transcript accounting are Pi-only.
 
 ## Session contents
 
@@ -31,5 +31,8 @@ Line counts stream the file line by line. Audit extraction reads only the
 requested line range with streaming iteration instead of loading the whole
 transcript into memory.
 
-The Web UI is available at `/pi` and `/pi/{session_id}`. Legacy `/codex` routes
-redirect to the Pi pages.
+The Web UI is available at `/pi` and `/pi/{session_id}`. It prefers a matching
+Pi transcript. When no Pi transcript exists, it may fall back to the old local
+Codex history for read-only display so pre-migration audits remain accessible.
+That fallback is never used to resume or execute a Pi task. Legacy `/codex`
+routes redirect to the Pi pages.

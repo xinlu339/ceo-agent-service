@@ -632,7 +632,7 @@ class FakeStructuredRunnerForOkr:
             (),
             {
                 "envelope": self.envelope,
-                "codex_session_id": "session-okr",
+                "agent_session_id": "session-okr",
                 "transcript_start_line": 1,
                 "transcript_end_line": 10,
                 "audit_tool_events": [{"tool": "memory_recall"}],

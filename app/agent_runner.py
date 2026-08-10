@@ -198,20 +198,19 @@ class DirectAgentRunner:
         *,
         store: AutoReplyStore,
         workspace: Path,
-        codex_bin: str = "codex",
+        node_binary: str | None = None,
         executor: ProcessExecutor | None = None,
         owner: str | None = None,
-        codex_session_exists: Callable[[str], bool] | None = None,
+        session_exists: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
         self.pi = PiRunner(
             workspace=workspace,
-            node_binary=None if codex_bin == "codex" else codex_bin,
+            node_binary=node_binary,
         )
-        self.codex = self.pi
         self.executor = executor or run_process_with_idle_timeout
         self.owner = owner or f"direct-agent-{uuid4().hex}"
-        self.codex_session_exists = codex_session_exists or (
+        self.session_exists = session_exists or (
             lambda session_id: find_pi_session_path(session_id) is not None
         )
 
@@ -226,7 +225,7 @@ class DirectAgentRunner:
         if context.task_id != task.id:
             raise ValueError("agent context task does not match reply task")
         lock_owner = f"direct-agent:{task.id}:{task.execution_generation}"
-        if not self.store.acquire_codex_session_lock(
+        if not self.store.acquire_agent_session_lock(
             task.conversation_id,
             lock_owner,
         ):
@@ -243,7 +242,7 @@ class DirectAgentRunner:
             run_failed = True
             raise
         finally:
-            released = self.store.release_codex_session_lock(
+            released = self.store.release_agent_session_lock(
                 task.conversation_id,
                 lock_owner,
             )
@@ -271,12 +270,12 @@ class DirectAgentRunner:
             )
         run = claim.run
         session_id = (
-            run.codex_session_id
-            or self.store.get_codex_session_id(task.conversation_id)
+            run.agent_session_id
+            or self.store.get_agent_session_id(task.conversation_id)
             or None
         )
-        if session_id and not self.codex_session_exists(session_id):
-            self.store.clear_codex_session(task.conversation_id)
+        if session_id and not self.session_exists(session_id):
+            self.store.clear_agent_session(task.conversation_id)
             session_id = None
         transcript_start_line = count_pi_session_lines(session_id) if session_id else 0
         prompt = context.render()
@@ -290,7 +289,7 @@ class DirectAgentRunner:
                 "command. Query live state only.\n\n" + prompt
             )
             developer_instructions += "\n\n" + READ_ONLY_DEVELOPER_INSTRUCTION
-        command = self.codex.build_command(
+        command = self.pi.build_command(
             prompt=prompt,
             session_id=session_id,
             output_schema_path=AGENT_RESULT_SCHEMA_PATH,
@@ -362,7 +361,7 @@ class DirectAgentRunner:
             process = self.executor(
                 command,
                 prompt=prompt,
-                env=self.codex.build_env(preserve_local_cli_auth=True),
+                env=self.pi.build_env(preserve_local_cli_auth=True),
                 total_timeout_seconds=TOTAL_TIMEOUT_SECONDS,
                 idle_timeout_seconds=IDLE_TIMEOUT_SECONDS,
                 on_stdout_line=persist_line,
@@ -440,7 +439,7 @@ class DirectAgentRunner:
                 ) from exc
             raise RuntimeError("pi_result_invalid") from exc
 
-        persisted_session_id = self.store.get_agent_run(run.id).codex_session_id
+        persisted_session_id = self.store.get_agent_run(run.id).agent_session_id
         transcript_end_line = max(
             transcript_start_line + stream_line_count,
             count_pi_session_lines(persisted_session_id)
@@ -518,7 +517,7 @@ class DirectAgentRunner:
         lock_owner = (
             f"direct-agent-reconcile:{task.id}:{existing_run.execution_generation}"
         )
-        if not self.store.acquire_codex_session_lock(
+        if not self.store.acquire_agent_session_lock(
             task.conversation_id,
             lock_owner,
         ):
@@ -530,7 +529,7 @@ class DirectAgentRunner:
             run_failed = True
             raise
         finally:
-            released = self.store.release_codex_session_lock(
+            released = self.store.release_agent_session_lock(
                 task.conversation_id,
                 lock_owner,
             )
@@ -565,10 +564,10 @@ class DirectAgentRunner:
             "summary, proof, and error. When live read evidence cannot prove presence "
             "or absence, return needs_human with a retryable error; never guess."
         )
-        session_id = run.codex_session_id or None
-        if session_id and not self.codex_session_exists(session_id):
+        session_id = run.agent_session_id or None
+        if session_id and not self.session_exists(session_id):
             session_id = None
-        command = self.codex.build_command(
+        command = self.pi.build_command(
             prompt=prompt,
             session_id=session_id,
             use_output_schema=False,
@@ -614,7 +613,7 @@ class DirectAgentRunner:
             process = self.executor(
                 command,
                 prompt=prompt,
-                env=self.codex.build_env(preserve_local_cli_auth=True),
+                env=self.pi.build_env(preserve_local_cli_auth=True),
                 total_timeout_seconds=TOTAL_TIMEOUT_SECONDS,
                 idle_timeout_seconds=IDLE_TIMEOUT_SECONDS,
                 on_stdout_line=persist_line,

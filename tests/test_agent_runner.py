@@ -1124,7 +1124,7 @@ def test_direct_runner_reuses_one_codex_session_for_the_conversation(
         store=store,
         workspace=tmp_path,
         executor=executor,
-        codex_session_exists=lambda _session_id: True,
+            session_exists=lambda _session_id: True,
     ).run(task, _context(task.id))
 
     assert executor.commands[0][executor.commands[0].index("--session-id") + 1] == (
@@ -1277,7 +1277,7 @@ def test_direct_runner_persists_new_session_for_later_conversation_messages(
         store=store,
         workspace=tmp_path,
         executor=executor,
-        codex_session_exists=lambda _session_id: True,
+        session_exists=lambda _session_id: True,
     ).run(second, second_context)
 
     assert store.get_codex_session_id("cid") == "conversation-session"
@@ -1298,7 +1298,7 @@ def test_direct_runner_starts_fresh_when_conversation_session_is_missing(
         store=store,
         workspace=tmp_path,
         executor=executor,
-        codex_session_exists=lambda _session_id: False,
+        session_exists=lambda _session_id: False,
     ).run(task, _context(task.id))
 
     assert executor.commands[0][1].endswith("/pi/packages/coding-agent/dist/cli.js")

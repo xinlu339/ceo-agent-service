@@ -707,7 +707,7 @@ def process_okr_review_request(*, store, runner, request, single_chat: bool) -> 
     )
     store.record_okr_review_run(
         request_id=request.id,
-        codex_session_id=run.codex_session_id,
+        codex_session_id=run.agent_session_id,
         codex_transcript_start_line=run.transcript_start_line,
         codex_transcript_end_line=run.transcript_end_line,
         envelope_json=run.envelope.model_dump_json(),
@@ -723,7 +723,10 @@ def process_okr_review_request(*, store, runner, request, single_chat: bool) -> 
             kr_weight=item.kr_weight,
             item_json=item.model_dump_json(),
         )
-    store.mark_okr_review_request_done(request.id, codex_session_id=run.codex_session_id)
+    store.mark_okr_review_request_done(
+        request.id,
+        codex_session_id=run.agent_session_id,
+    )
     return render_okr_review_reply(payload)
 
 

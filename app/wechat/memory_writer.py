@@ -9,13 +9,13 @@ class MemoryWriteOutcomeUnknown(RuntimeError):
     pass
 
 
-class CodexMemoryWriteBackend:
-    def __init__(self, workspace: Path, codex_bin: str = "codex", executor=None,
+class PiMemoryWriteBackend:
+    def __init__(self, workspace: Path, node_binary: str | None = None, executor=None,
                  timeout_seconds: int = 1200, idle_timeout_seconds: int = 900):
         from app.pi_runner import PiRunner
         self.runner = PiRunner(
             workspace=workspace,
-            node_binary=None if codex_bin == "codex" else codex_bin,
+            node_binary=node_binary,
         )
         self.executor = executor
         self.timeout_seconds = timeout_seconds
@@ -45,7 +45,7 @@ class CodexMemoryWriteBackend:
         if self.executor is not None:
             raw = self.executor(command, prompt)
         else:
-            from app.codex_decision import _subprocess_failure_reason
+            from app.agent_decision import _subprocess_failure_reason
             from app.pi_runner import pi_process_failure_reason
             from app.process_runner import run_process_with_idle_timeout
             completed = run_process_with_idle_timeout(

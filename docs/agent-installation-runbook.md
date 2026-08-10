@@ -359,7 +359,7 @@ permission, fix `dws` before continuing.
    .venv/bin/pytest \
      tests/test_work_profile.py \
      tests/test_prompt.py \
-     tests/test_worker.py::test_consumer_codex_command_embeds_work_profile_content \
+     tests/test_worker.py::test_consumer_pi_command_injects_work_profile_content \
      -q
    ```
 

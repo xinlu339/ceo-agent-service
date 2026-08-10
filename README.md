@@ -68,7 +68,7 @@ DWS 可能同时返回通用错误码和更具体的服务端错误码；服务�
 
 `rerun-message --force-new-decision` 会在当前 generation 结束后创建新 generation，但继续复用该对话的 Pi session；仍在运行的 Agent 不会被抢占，普通重复提交仍按同一来源 revision 去重。
 
-部分 Python 类名仍保留 `CodexDecisionRunner` 等兼容名称，但其底层 Runner 已切换为 Pi，并统一读取 `CEO_PI_*` 配置。
+当前 Python 运行时统一使用 `AgentDecisionRunner`、`StructuredPiRunner` 和其他 Pi/Agent 中立名称，并读取 `CEO_PI_*` 配置。旧 `codex_*` 仅保留在数据库兼容字段、历史读取、旧错误码及 CLI 参数别名中。
 
 Agent 必须如实返回动作结果；只完成诊断时返回 `needs_human` 或 `failed`。服务不再根据复制的工具事件二次判断 Agent 结论。发送只允许当前 task generation 的 delivery，sender 必须先原子 claim 才能真实发送。
 

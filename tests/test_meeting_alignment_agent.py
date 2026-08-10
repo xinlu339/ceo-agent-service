@@ -5,7 +5,7 @@ import pytest
 
 from app.meeting_alignment_agent import (
     MeetingAlignmentAgent,
-    MeetingAlignmentCodexRunner,
+    MeetingAlignmentPiRunner,
     MeetingAlignmentTargetError,
     build_meeting_alignment_prompt,
     parse_meeting_alignment_decision,
@@ -380,7 +380,7 @@ def test_runner_always_starts_fresh_and_uses_schema(tmp_path: Path):
         captured["prompt"] = prompt
         return json.dumps(no_action_payload(), ensure_ascii=False)
 
-    runner = MeetingAlignmentCodexRunner(workspace=tmp_path, executor=executor)
+    runner = MeetingAlignmentPiRunner(workspace=tmp_path, executor=executor)
     decision = runner.decide(prompt="decide")
 
     assert decision.action == "no_action"
@@ -409,7 +409,7 @@ def test_runner_treats_invalid_model_decision_as_retryable(tmp_path: Path):
             "alignment_reason": "双方明确同意并承诺执行",
         }
     ]
-    runner = MeetingAlignmentCodexRunner(
+    runner = MeetingAlignmentPiRunner(
         workspace=tmp_path,
         executor=lambda command, prompt: json.dumps(payload, ensure_ascii=False),
     )
@@ -445,7 +445,7 @@ def test_runner_clears_prior_audit_metadata_before_executor_failure(tmp_path: Pa
             )
         raise RuntimeError("executor failed")
 
-    runner = MeetingAlignmentCodexRunner(workspace=tmp_path, executor=executor)
+    runner = MeetingAlignmentPiRunner(workspace=tmp_path, executor=executor)
     runner._session_line_count = lambda session_id: 17 if session_id else 0
     runner.decide(prompt="first")
     assert runner.last_session_id == "session-old"
@@ -482,7 +482,7 @@ def test_runner_rejects_memory_history_even_when_legacy_event_is_present(tmp_pat
             ]
         )
 
-    runner = MeetingAlignmentCodexRunner(workspace=tmp_path, executor=executor)
+    runner = MeetingAlignmentPiRunner(workspace=tmp_path, executor=executor)
     with pytest.raises(
         RuntimeError,
         match="Pi did not return a valid MeetingAlignmentDecision",
@@ -492,7 +492,7 @@ def test_runner_rejects_memory_history_even_when_legacy_event_is_present(tmp_pat
 
 def test_runner_accepts_configured_profile_as_unqueried_history(tmp_path: Path):
     configured = "/configured/work_profile.md"
-    runner = MeetingAlignmentCodexRunner(
+    runner = MeetingAlignmentPiRunner(
         workspace=tmp_path,
         executor=lambda command, prompt: json.dumps(
             derek_view_payload(historical_sources=[configured]), ensure_ascii=False
@@ -503,7 +503,7 @@ def test_runner_accepts_configured_profile_as_unqueried_history(tmp_path: Path):
 
 
 def test_runner_retries_unaudited_historical_sources(tmp_path: Path):
-    runner = MeetingAlignmentCodexRunner(
+    runner = MeetingAlignmentPiRunner(
         workspace=tmp_path,
         executor=lambda command, prompt: json.dumps(
             derek_view_payload(historical_sources=["某个未核验案例"]),
@@ -608,7 +608,7 @@ def _deterministic_payload(case: dict) -> dict:
 @pytest.mark.parametrize("case", _fixture_cases(), ids=lambda case: case["id"])
 def test_semantic_fixtures_with_deterministic_executor(tmp_path: Path, case: dict):
     payload = _deterministic_payload(case)
-    runner = MeetingAlignmentCodexRunner(
+    runner = MeetingAlignmentPiRunner(
         workspace=tmp_path,
         executor=lambda command, prompt: json.dumps(payload, ensure_ascii=False),
     )
