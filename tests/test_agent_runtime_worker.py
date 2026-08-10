@@ -13,7 +13,6 @@ from app.agent_runner import (
     AgentRunNoEffectEvidenceError,
     DirectAgentRunner,
     DirectAgentRunResult,
-    ReconciliationDependencyError,
     ReconciliationError,
     ReconciliationProof,
     ReconciliationResult,
@@ -49,17 +48,6 @@ class StaticGate:
     def check(self) -> ChannelGateResult:
         self.checks += 1
         return self.result
-
-
-class RecordingLoginCoordinator:
-    def __init__(self) -> None:
-        self.results: list[ChannelGateResult] = []
-
-    def handle(self, result: ChannelGateResult):
-        from app.channel_gate import LoginHandlingResult
-
-        self.results.append(result)
-        return LoginHandlingResult(launched=result.state is ChannelGateState.NEEDS_LOGIN)
 
 
 class ContextOnlyDws:
@@ -281,34 +269,6 @@ class GenerationSwitchingReconciliationRunner(ScriptedReconciliationRunner):
                     (self.task_id,),
                 )
         return result
-
-
-class FailingReconciliationRunner(ScriptedDirectAgentRunner):
-    def __init__(
-        self,
-        store: AutoReplyStore,
-        *,
-        code: str,
-        channel: str,
-        gate_state: ChannelGateState,
-    ) -> None:
-        super().__init__(store, [])
-        self.error = ReconciliationDependencyError(
-            code,
-            channel=channel,
-            gate_state=gate_state,
-            retryable=gate_state is ChannelGateState.UNAVAILABLE,
-        )
-
-    def reconcile(self, run, context, **kwargs):
-        claim = self.store.claim_unknown_agent_run(
-            run.id,
-            owner=self.owner,
-            lease_seconds=1800,
-            now=kwargs.get("now") or NOW,
-        )
-        assert claim.claimed
-        raise self.error
 
 
 class NoEffectEvidenceReconciliationRunner(ScriptedDirectAgentRunner):
@@ -1074,59 +1034,6 @@ def test_unknown_run_without_incomplete_effect_is_rotated_for_safe_rerun(
     attempt = store.get_latest_reply_attempt_for_trigger("cid-1", "msg-1")
     assert attempt is not None and attempt.send_status == "failed"
     assert attempt.send_error == "unknown_run_has_no_incomplete_effect"
-
-
-@pytest.mark.parametrize(
-    ("code", "gate_state", "should_retry"),
-    [
-        ("NETWORK_ERROR", ChannelGateState.UNAVAILABLE, True),
-        ("not_authenticated", ChannelGateState.NEEDS_LOGIN, True),
-        ("PAT_MEDIUM_RISK_NO_PERMISSION", ChannelGateState.BLOCKED, False),
-        ("PARAM_ERROR", ChannelGateState.BLOCKED, False),
-    ],
-)
-def test_worker_persists_and_schedules_typed_reconciliation_dependency_error(
-    tmp_path: Path,
-    code: str,
-    gate_state: ChannelGateState,
-    should_retry: bool,
-):
-    trigger = _message(raw_payload={"processInstanceId": "proc-1"})
-    store = AutoReplyStore(tmp_path / "runtime.sqlite3")
-    task_id = _enqueue(store, trigger)
-    unknown = _seed_unknown_run(store, task_id)
-    runner = FailingReconciliationRunner(
-        store,
-        code=code,
-        channel="dws",
-        gate_state=gate_state,
-    )
-    worker = DingTalkAutoReplyWorker(
-        store=store,
-        dws=ContextOnlyDws([trigger]),
-        codex=object(),
-        direct_agent_runner=runner,
-        channel_gates={"dingtalk": ReadyGate("dingtalk")},
-        now_provider=lambda: NOW,
-    )
-
-    assert worker.reconcile_unknown_agent_runs(limit=1) == 0
-
-    deferred = store.get_agent_run(unknown.id)
-    assert json.loads(deferred.structured_error_json) == {
-        "code": code,
-        "gate_state": gate_state.value,
-        "retryable": should_retry,
-    }
-    if should_retry:
-        assert deferred.status == "unknown"
-        assert deferred.reconciliation_suspended is False
-        assert bool(deferred.reconciliation_next_attempt_at) is True
-    else:
-        assert deferred.status == "failed"
-        assert deferred.side_effect_state == "unknown"
-        task = store.get_reply_task(task_id)
-        assert task is not None and task.status == "failed"
 
 
 @pytest.mark.parametrize(
@@ -2053,64 +1960,6 @@ def test_nonzero_native_write_uses_failed_retry_path_in_real_runner_protocol(
     assert attempt is not None
     assert attempt.send_status == "failed"
     assert attempt.send_error == "native_write_failed"
-
-
-@pytest.mark.parametrize(
-    ("gate_state", "terminal", "has_retry", "login_calls"),
-    [
-        (ChannelGateState.NEEDS_LOGIN, False, True, 1),
-        (ChannelGateState.BLOCKED, True, False, 0),
-        (ChannelGateState.UNAVAILABLE, False, True, 0),
-    ],
-)
-def test_reconciliation_dependency_uses_typed_gate_and_login_once(
-    tmp_path: Path,
-    gate_state: ChannelGateState,
-    terminal: bool,
-    has_retry: bool,
-    login_calls: int,
-):
-    trigger = _message(raw_payload={"processInstanceId": "proc-1"})
-    store = AutoReplyStore(tmp_path / "runtime.sqlite3")
-    task_id = _enqueue(store, trigger)
-    unknown = _seed_unknown_run(store, task_id)
-    runner = FailingReconciliationRunner(
-        store,
-        code=f"dingtalk_{gate_state.value}",
-        channel="dws",
-        gate_state=gate_state,
-    )
-    gate = ReadyGate("dingtalk")
-    login = RecordingLoginCoordinator()
-    worker = DingTalkAutoReplyWorker(
-        store=store,
-        dws=ContextOnlyDws([trigger]),
-        codex=object(),
-        direct_agent_runner=runner,
-        channel_gates={"dingtalk": gate},
-        login_coordinator=login,
-        now_provider=lambda: NOW,
-    )
-
-    assert worker.reconcile_unknown_agent_runs(limit=1) == 0
-
-    deferred = store.get_agent_run(unknown.id)
-    assert deferred.status == ("failed" if terminal else "unknown")
-    assert deferred.reconciliation_suspended is False
-    assert bool(deferred.reconciliation_next_attempt_at) is has_retry
-    actual_login_calls = sum(
-        result.state is ChannelGateState.NEEDS_LOGIN for result in login.results
-    )
-    assert actual_login_calls == login_calls
-    if login_calls:
-        worker.reconcile_unknown_agent_runs(limit=1)
-        assert (
-            sum(
-                result.state is ChannelGateState.NEEDS_LOGIN
-                for result in login.results
-            )
-            == 1
-        )
 
 
 def test_stale_recovery_does_not_revisit_atomically_completed_reconciliation(

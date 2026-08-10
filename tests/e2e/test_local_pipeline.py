@@ -1,7 +1,6 @@
 from datetime import datetime
 from pathlib import Path
 
-from app.agent_result import EffectKind
 from app.agent_runner import DirectAgentRunner
 from app.channel_gate import ChannelGateResult, ChannelGateState
 from app.dingtalk_models import DingTalkMessage
@@ -13,7 +12,6 @@ from app.meeting_alignment import (
     produce_meeting_alignment_jobs,
 )
 from app.meeting_alignment_models import MeetingAlignmentDecision
-from app.native_cli_metadata import NativeCliMetadataClassifier
 from app.process_runner import ProcessRunResult
 from app.worker import DingTalkAutoReplyWorker
 
@@ -262,13 +260,6 @@ def _direct_agent_pipeline(
         workspace=tmp_path,
         executor=CapturedJsonlExecutor(
             Path(__file__).parents[1] / "fixtures" / "pi_exec" / fixture_name
-        ),
-        native_cli_classifier=NativeCliMetadataClassifier(
-            reviewed_effects={
-                ("dws", "chat message send"): EffectKind.EFFECTFUL,
-                ("dws", "chat message add-text-emotion"): EffectKind.EFFECTFUL,
-                ("dws", "ding message send"): EffectKind.EFFECTFUL,
-            }
         ),
         owner="local-pipeline-agent",
     )

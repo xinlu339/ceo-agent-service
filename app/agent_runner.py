@@ -1,11 +1,8 @@
 import json
 import hashlib
-import os
-import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
-from urllib.parse import parse_qsl, urlsplit
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -14,24 +11,15 @@ from app.agent_context import AgentTaskContext
 from app.agent_result import (
     AgentOutcome,
     AgentResult,
-    EffectEventStatus,
     EffectKind,
     ExecutionReceipt,
     ResultParseError,
     SideEffectState,
-    ToolEffectEvent,
     parse_agent_result,
 )
-from app.channel_gate import ChannelGateState
-from app.dws_client import DwsClient
 from app.history import safe_observability_error
-from app.leak_check import contains_credential
-from app.native_cli_metadata import (
-    AgentReadOnlyViolationError,
-    NativeCliCommand,
-    NativeCliMetadataClassifier,
-    NativeCliMetadataUnavailableError,
-    describe_native_command,
+from app.pi_tool_metadata import (
+    reviewed_pi_command,
     structured_target_identifiers,
 )
 from app.process_runner import ProcessRunResult, run_process_with_idle_timeout
@@ -43,9 +31,6 @@ from app.store import AgentRun, AgentRunLeaseLostError, AutoReplyStore, ReplyTas
 
 AGENT_RESULT_SCHEMA_PATH = (
     Path(__file__).resolve().parent / "schemas" / "agent_result.schema.json"
-)
-DEFAULT_MCP_EFFECTS_PATH = (
-    Path(__file__).resolve().parent.parent / "config" / "mcp-tool-effects.json"
 )
 SERVICE_ROOT = Path(__file__).resolve().parent.parent
 SHARED_AGENT_RULES_PATH = Path.home() / ".agents" / "AGENT.md"
@@ -69,18 +54,6 @@ READ_ONLY_DEVELOPER_INSTRUCTION = (
     "This invocation is read-only. Use the permitted Pi read tools only. "
     "Do not perform any external write, send, approval, comment, "
     "reaction, edit, login, reset, logout, or other state-changing action."
-)
-_NATIVE_READ_ONLY_ITEM_TYPES = frozenset(
-    {"tool_search", "tool_search_call", "web_search", "web_search_call"}
-)
-_NATIVE_CLASSIFIABLE_ITEM_TYPES = frozenset(
-    {
-        "command_execution",
-        "dynamic_tool_call",
-        "function_call",
-        "mcp_tool_call",
-        "tool_call",
-    }
 )
 _PI_READ_ONLY_TOOL_NAMES = frozenset(
     {
@@ -134,49 +107,6 @@ def direct_agent_developer_instructions() -> str:
         "Do not re-read agent rule files through shell or exec.\n\n"
         + shared_rules
     )
-_SENSITIVE_KEY_NAMES = frozenset(
-    {
-        "authorization",
-        "bearer",
-        "cookie",
-        "password",
-        "secret",
-        "signature",
-        "signedurl",
-        "token",
-        "accesstoken",
-        "refreshtoken",
-        "idtoken",
-        "apikey",
-        "clientsecret",
-        "privatekey",
-        "webhook",
-    }
-)
-_SESSION_KEY_NAMES = frozenset({"sessionid", "threadid"})
-_COMMAND_KEY_NAMES = frozenset({"argv", "cmd", "command"})
-_STRUCTURED_TEXT_KEY_NAMES = frozenset({"arguments", "output", "result"})
-_COMMAND_CONTENT_FLAGS = frozenset(
-    {
-        "--body",
-        "--comment",
-        "--content",
-        "--html",
-        "--markdown",
-        "--message",
-        "--remark",
-        "--text",
-        "--title",
-    }
-)
-_RECEIPT_KEYS = frozenset(ExecutionReceipt.model_fields)
-_REDACTED = "[REDACTED]"
-_MAX_MCP_RESULT_DEPTH = 32
-_MAX_MCP_RESULT_NODES = 2048
-_MAX_MCP_RESULT_JSON_STRINGS = 64
-_MAX_MCP_RESULT_JSON_BYTES = 256 * 1024
-
-
 class AgentRunUnavailableError(RuntimeError):
     pass
 
@@ -204,20 +134,8 @@ class AgentRunNoEffectEvidenceError(RuntimeError):
     pass
 
 
-class ReconciliationDependencyError(RuntimeError):
-    def __init__(
-        self,
-        code: str,
-        *,
-        channel: str,
-        gate_state: ChannelGateState,
-        retryable: bool,
-    ) -> None:
-        self.code = code
-        self.channel = channel
-        self.gate_state = gate_state
-        self.retryable = retryable
-        super().__init__(code)
+class AgentReadOnlyViolationError(RuntimeError):
+    pass
 
 
 class ReconciliationProof(BaseModel):
@@ -271,121 +189,6 @@ class DirectAgentRunResult:
     receipts: tuple[ExecutionReceipt, ...] = ()
 
 
-@dataclass(frozen=True)
-class McpToolCall:
-    server: str
-    tool: str
-    effect: EffectKind
-    operation: str
-    operation_digest: str
-    target_identifiers: dict[str, str]
-    native_cli: str = ""
-
-
-class McpToolEffectRegistry:
-    """Exact reviewed MCP capabilities; unknown server/tool pairs fail closed."""
-
-    def __init__(
-        self,
-        effects: dict[tuple[str, str], EffectKind],
-        *,
-        dry_run_arguments: dict[tuple[str, str], str] | None = None,
-    ) -> None:
-        self._effects = dict(effects)
-        self._dry_run_arguments = dict(dry_run_arguments or {})
-
-    @classmethod
-    def from_path(cls, path: Path) -> "McpToolEffectRegistry":
-        if not path.exists():
-            return cls({})
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        tools = payload.get("tools") if isinstance(payload, dict) else None
-        if not isinstance(tools, list):
-            raise ValueError("MCP effect registry must contain a tools list")
-        effects: dict[tuple[str, str], EffectKind] = {}
-        dry_run_arguments: dict[tuple[str, str], str] = {}
-        for item in tools:
-            if not isinstance(item, dict):
-                raise ValueError("MCP effect registry tools must be objects")
-            server = item.get("server")
-            tool = item.get("tool")
-            effect = item.get("effect")
-            if not isinstance(server, str) or not server.strip():
-                raise ValueError("MCP effect registry server must be non-empty")
-            if not isinstance(tool, str) or not tool.strip():
-                raise ValueError("MCP effect registry tool must be non-empty")
-            if effect not in {EffectKind.READ_ONLY.value, EffectKind.EFFECTFUL.value}:
-                raise ValueError("MCP effect registry effect is invalid")
-            key = (server.strip(), tool.strip())
-            parsed_effect = EffectKind(effect)
-            if key in effects and effects[key] is not parsed_effect:
-                raise ValueError("MCP effect registry contains a conflicting tool")
-            effects[key] = parsed_effect
-            dry_run_argument = item.get("dry_run_argument")
-            if dry_run_argument is not None:
-                if (
-                    parsed_effect is not EffectKind.EFFECTFUL
-                    or not isinstance(dry_run_argument, str)
-                    or not dry_run_argument.strip()
-                ):
-                    raise ValueError("MCP effect registry dry-run argument is invalid")
-                dry_run_arguments[key] = dry_run_argument.strip()
-        return cls(effects, dry_run_arguments=dry_run_arguments)
-
-    @classmethod
-    def default(cls) -> "McpToolEffectRegistry":
-        configured = os.environ.get("CEO_AGENT_MCP_EFFECTS_PATH", "").strip()
-        return cls.from_path(Path(configured) if configured else DEFAULT_MCP_EFFECTS_PATH)
-
-    def classify(self, item: dict[str, object]) -> McpToolCall | None:
-        if item.get("type") != "mcp_tool_call":
-            return None
-        server = item.get("server")
-        tool = item.get("tool")
-        if not isinstance(server, str) or not isinstance(tool, str):
-            return None
-        effect = self._effects.get((server, tool))
-        if effect is None:
-            return None
-        arguments = item.get("arguments")
-        dry_run_argument = self._dry_run_arguments.get((server, tool))
-        if (
-            effect is EffectKind.EFFECTFUL
-            and dry_run_argument
-            and isinstance(arguments, dict)
-            and arguments.get(dry_run_argument) is True
-        ):
-            effect = EffectKind.READ_ONLY
-        canonical = json.dumps(
-            {"server": server, "tool": tool, "arguments": arguments},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-        return McpToolCall(
-            server=server,
-            tool=tool,
-            effect=effect,
-            operation=tool,
-            operation_digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-            target_identifiers=structured_target_identifiers(arguments),
-        )
-
-    def reviewed_read_tools(self) -> dict[str, tuple[str, ...]]:
-        grouped: dict[str, list[str]] = {}
-        for (server, tool), effect in self._effects.items():
-            if effect is EffectKind.READ_ONLY:
-                grouped.setdefault(server, []).append(tool)
-        return {server: tuple(sorted(tools)) for server, tools in grouped.items()}
-
-    def reviewed_tools(self) -> dict[str, tuple[str, ...]]:
-        grouped: dict[str, list[str]] = {}
-        for server, tool in self._effects:
-            grouped.setdefault(server, []).append(tool)
-        return {server: tuple(sorted(tools)) for server, tools in grouped.items()}
-
-
 ProcessExecutor = Callable[..., ProcessRunResult]
 
 
@@ -398,8 +201,6 @@ class DirectAgentRunner:
         codex_bin: str = "codex",
         executor: ProcessExecutor | None = None,
         owner: str | None = None,
-        native_cli_classifier: NativeCliMetadataClassifier | None = None,
-        mcp_effect_registry: McpToolEffectRegistry | None = None,
         codex_session_exists: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
@@ -410,10 +211,6 @@ class DirectAgentRunner:
         self.codex = self.pi
         self.executor = executor or run_process_with_idle_timeout
         self.owner = owner or f"direct-agent-{uuid4().hex}"
-        self.native_cli_classifier = (
-            native_cli_classifier or NativeCliMetadataClassifier()
-        )
-        self.mcp_effect_registry = mcp_effect_registry or McpToolEffectRegistry.default()
         self.codex_session_exists = codex_session_exists or (
             lambda session_id: find_pi_session_path(session_id) is not None
         )
@@ -544,7 +341,6 @@ class DirectAgentRunner:
                 )
             evidence = _pi_tool_evidence_event(
                 payload,
-                classifier=self.native_cli_classifier,
                 active_metadata=pi_tool_metadata,
             )
             if evidence is not None:
@@ -802,7 +598,6 @@ class DirectAgentRunner:
             saw_json = True
             evidence = _pi_reconciliation_evidence_event(
                 payload,
-                classifier=self.native_cli_classifier,
                 active_metadata=active_metadata,
             )
             if evidence is None:
@@ -850,83 +645,6 @@ class DirectAgentRunner:
             events=tuple(events),
         )
 
-    def _read_only_safe_event(
-        self,
-        payload: dict[str, object],
-    ) -> dict[str, object]:
-        event_type = payload.get("type")
-        item = payload.get("item")
-        if event_type not in {"item.started", "item.completed", "item.failed"}:
-            return _safe_event(payload)
-        if not isinstance(item, dict):
-            return _safe_event(payload)
-        item_type = str(item.get("type") or "")
-        if item_type == "command_execution":
-            raise AgentReadOnlyViolationError("reconciliation_shell_forbidden")
-        if item_type == "mcp_tool_call":
-            if (
-                item.get("server") == "reconciliation_cli"
-                and item.get("tool") == "execute_reviewed_read"
-            ):
-                arguments = item.get("arguments")
-                argv = arguments.get("argv") if isinstance(arguments, dict) else None
-                command_item = {"type": "command_execution", "argv": argv}
-                try:
-                    command = self.native_cli_classifier.classify_cached(command_item)
-                except NativeCliMetadataUnavailableError as exc:
-                    descriptor = describe_native_command(command_item)
-                    if descriptor is None:
-                        raise AgentReadOnlyViolationError(
-                            "reconciliation_command_unreviewed"
-                        ) from exc
-                    return _metadata_discovery_failure_event(
-                        payload,
-                        descriptor=descriptor,
-                        discovery_error=exc,
-                    )
-                if command is None or command.effect is not EffectKind.READ_ONLY:
-                    raise AgentReadOnlyViolationError("reconciliation_write_forbidden")
-                safe_event = _safe_event(payload, native_command=command)
-                if event_type == "item.completed":
-                    receipt = _controlled_cli_receipt(item.get("result"))
-                    if (
-                        receipt is None
-                        or receipt.get("operation") != command.command_path
-                        or receipt.get("operation_digest") != command.command_digest
-                        or receipt.get("target_identifiers")
-                        != command.target_identifiers
-                    ):
-                        raise AgentReadOnlyViolationError(
-                            "reconciliation_query_receipt_invalid"
-                        )
-                    safe_item = safe_event.get("item")
-                    metadata = (
-                        safe_item.get("metadata")
-                        if isinstance(safe_item, dict)
-                        else None
-                    )
-                    if isinstance(metadata, dict):
-                        receipt_error = receipt.get("error")
-                        if isinstance(receipt_error, dict):
-                            metadata["reconciliation_error"] = (
-                                _validated_reconciliation_error(receipt_error)
-                            )
-                        else:
-                            metadata["result_digest"] = receipt["result_digest"]
-                return safe_event
-            call = self.mcp_effect_registry.classify(item)
-            if call is None or call.effect is not EffectKind.READ_ONLY:
-                raise AgentReadOnlyViolationError("reconciliation_write_forbidden")
-            return _safe_event(payload, mcp_call=call)
-        if item_type in _NATIVE_READ_ONLY_ITEM_TYPES or item_type == "agent_message":
-            return _safe_event(payload)
-        if (
-            item_type.endswith("_tool_call")
-            or item_type in _NATIVE_CLASSIFIABLE_ITEM_TYPES
-        ):
-            raise AgentReadOnlyViolationError("reconciliation_unknown_tool_forbidden")
-        return _safe_event(payload)
-
     def _record_failure(
         self,
         run_id: int,
@@ -960,91 +678,6 @@ class DirectAgentRunner:
                 side_effect_state=SideEffectState.NONE.value,
                 now=now,
             )
-
-    def _persist_deferred_execution_evidence(
-        self,
-        run_id: int,
-        stdout: str,
-        *,
-        now: str | None,
-    ) -> None:
-        for line in stdout.splitlines():
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            native_command = _native_cli_command(
-                payload,
-                self.native_cli_classifier,
-                cached_only=False,
-            )
-            mcp_call = _mcp_tool_call(payload, self.mcp_effect_registry)
-            if native_command is None and mcp_call is None:
-                continue
-            safe_event = _effect_evidence_event(
-                payload,
-                native_command=native_command,
-                mcp_call=mcp_call,
-            )
-            self.store.append_agent_run_event(
-                run_id,
-                safe_event,
-                owner=self.owner,
-                now=now,
-            )
-            if (
-                native_command is not None
-                and native_command.effect is EffectKind.EFFECTFUL
-                and _native_command_completed(payload)
-            ):
-                call_id = _native_call_id(payload)
-                if call_id:
-                    self.store.record_agent_execution_receipt(
-                        run_id,
-                        receipt_id=f"native-cli:{run_id}:{call_id}",
-                        operation_id=call_id,
-                        cli=native_command.cli,
-                        command_path=native_command.command_path,
-                        command_digest=native_command.command_digest,
-                        exit_code=0,
-                        owner=self.owner,
-                        now=now,
-                    )
-            if (
-                mcp_call is not None
-                and mcp_call.effect is EffectKind.EFFECTFUL
-                and _mcp_call_completed(payload)
-            ):
-                call_id = _native_call_id(payload)
-                if call_id:
-                    self.store.record_agent_execution_receipt(
-                        run_id,
-                        receipt_id=f"mcp:{run_id}:{call_id}",
-                        operation_id=call_id,
-                        cli=f"mcp:{mcp_call.server}",
-                        command_path=mcp_call.tool,
-                        command_digest=mcp_call.operation_digest,
-                        exit_code=0,
-                        owner=self.owner,
-                        now=now,
-                    )
-
-    def _classify_persisted_execution_events(
-        self,
-        run_id: int,
-        *,
-        now: str | None,
-    ) -> None:
-        run = self.store.get_agent_run(run_id)
-        if run is None:
-            raise RuntimeError("agent run was not persisted")
-        serialized = "\n".join(
-            json.dumps(event, ensure_ascii=False) for event in run.tool_events
-        )
-        self._persist_deferred_execution_evidence(run_id, serialized, now=now)
-
 
 def unknown_effect_reference(
     events: list[dict[str, object]] | tuple[dict[str, object], ...],
@@ -1207,24 +840,10 @@ def _is_matching_reconciliation_read_event(
     metadata = item.get("metadata")
     if not isinstance(metadata, dict) or metadata.get("effect") != "read_only":
         return False
-    server = item.get("server")
-    tool = item.get("tool")
     pi_reviewed_cli = (
         item.get("type") == "command_execution"
         and metadata.get("reviewed_pi_read") is True
         and metadata.get("native_cli") in {"dws", "lark-cli"}
-    )
-    controlled_cli = (
-        server == "reconciliation_cli"
-        and tool == "execute_reviewed_read"
-        and metadata.get("native_cli") in {"dws", "lark-cli"}
-    )
-    reviewed_mcp = (
-        isinstance(server, str)
-        and server != "reconciliation_cli"
-        and isinstance(tool, str)
-        and metadata.get("mcp_server") == server
-        and metadata.get("operation") == tool
     )
     query_targets = metadata.get("target_identifiers")
     operation_digest = metadata.get("command_digest") or metadata.get(
@@ -1232,7 +851,7 @@ def _is_matching_reconciliation_read_event(
     )
     call_id = item.get("call_id") or item.get("id")
     if (
-        not (pi_reviewed_cli or controlled_cli or reviewed_mcp)
+        not pi_reviewed_cli
         or not isinstance(call_id, str)
         or not call_id
         or not isinstance(operation_digest, str)
@@ -1283,116 +902,6 @@ def _target_key_parts(value: str) -> tuple[str, ...]:
     return tuple(parts)
 
 
-def _controlled_cli_receipt(value: object) -> dict[str, object] | None:
-    if not isinstance(value, dict) or value.get("isError") is True:
-        return None
-    candidates = [value]
-    structured = value.get("structuredContent") or value.get("structured_content")
-    if isinstance(structured, dict):
-        candidates.append(structured)
-    for candidate in candidates:
-        if not isinstance(candidate.get("result_digest"), str):
-            continue
-        if not isinstance(candidate.get("operation_digest"), str):
-            continue
-        if not isinstance(candidate.get("operation"), str):
-            continue
-        if not isinstance(candidate.get("target_identifiers"), dict):
-            continue
-        return candidate
-    return None
-
-
-def _metadata_discovery_failure_event(
-    payload: dict[str, object],
-    *,
-    descriptor: NativeCliCommand,
-    discovery_error: NativeCliMetadataUnavailableError,
-) -> dict[str, object]:
-    safe_event = _safe_event(payload)
-    if payload.get("type") != "item.completed":
-        return safe_event
-    item = payload.get("item")
-    receipt = (
-        _controlled_cli_receipt(item.get("result"))
-        if isinstance(item, dict)
-        else None
-    )
-    receipt_error = receipt.get("error") if isinstance(receipt, dict) else None
-    validated_error = (
-        _validated_reconciliation_error(receipt_error)
-        if isinstance(receipt_error, dict)
-        else None
-    )
-    expected_error = {
-        "channel": discovery_error.cli,
-        "code": discovery_error.code,
-        "gate_state": ChannelGateState.UNAVAILABLE.value,
-        "retryable": discovery_error.retryable,
-    }
-    if (
-        receipt is None
-        or receipt.get("operation") != descriptor.command_path
-        or receipt.get("operation_digest") != descriptor.command_digest
-        or receipt.get("target_identifiers") != descriptor.target_identifiers
-        or validated_error != expected_error
-    ):
-        raise AgentReadOnlyViolationError("reconciliation_query_receipt_invalid")
-    safe_item = safe_event.get("item")
-    if not isinstance(safe_item, dict):
-        raise AgentReadOnlyViolationError("reconciliation_query_receipt_invalid")
-    safe_item["metadata"] = {
-        "native_cli": descriptor.cli,
-        "operation": descriptor.command_path,
-        "command_digest": descriptor.command_digest,
-        "target_identifiers": descriptor.target_identifiers,
-        "reconciliation_error": validated_error,
-    }
-    return safe_event
-
-
-def _reconciliation_dependency_error(
-    event: dict[str, object],
-) -> ReconciliationDependencyError | None:
-    item = event.get("item")
-    if not isinstance(item, dict) or item.get("type") != "mcp_tool_call":
-        return None
-    metadata = item.get("metadata")
-    if not isinstance(metadata, dict):
-        return None
-    error = metadata.get("reconciliation_error")
-    if not isinstance(error, dict):
-        return None
-    validated = _validated_reconciliation_error(error)
-    return ReconciliationDependencyError(
-        validated["code"],
-        channel=validated["channel"],
-        gate_state=ChannelGateState(validated["gate_state"]),
-        retryable=validated["retryable"],
-    )
-
-
-def _validated_reconciliation_error(error: dict[str, object]) -> dict[str, object]:
-    code = error.get("code")
-    channel = error.get("channel")
-    gate_state = error.get("gate_state")
-    retryable = error.get("retryable")
-    if (
-        not isinstance(code, str)
-        or not code
-        or channel not in {"dws", "lark-cli"}
-        or gate_state not in {state.value for state in ChannelGateState}
-        or not isinstance(retryable, bool)
-    ):
-        raise AgentReadOnlyViolationError("reconciliation_query_receipt_invalid")
-    return {
-        "channel": channel,
-        "code": code,
-        "gate_state": gate_state,
-        "retryable": retryable,
-    }
-
-
 def _session_id(payload: dict[str, object]) -> str:
     pi_session_id = pi_session_id_from_payload(payload)
     if pi_session_id:
@@ -1409,7 +918,6 @@ def _session_id(payload: dict[str, object]) -> str:
 def _pi_tool_evidence_event(
     payload: dict[str, object],
     *,
-    classifier: NativeCliMetadataClassifier,
     active_metadata: dict[str, dict[str, object]],
 ) -> dict[str, object] | None:
     event_type = str(payload.get("type") or "")
@@ -1423,7 +931,6 @@ def _pi_tool_evidence_event(
         metadata = _pi_tool_effect_metadata(
             tool_name,
             payload.get("args"),
-            classifier=classifier,
         )
         active_metadata[call_id] = metadata
         return {
@@ -1488,7 +995,6 @@ def _pi_tool_evidence_event(
 def _pi_reconciliation_evidence_event(
     payload: dict[str, object],
     *,
-    classifier: NativeCliMetadataClassifier,
     active_metadata: dict[str, dict[str, object]],
 ) -> dict[str, object] | None:
     event_type = str(payload.get("type") or "")
@@ -1506,7 +1012,6 @@ def _pi_reconciliation_evidence_event(
         metadata = _pi_tool_effect_metadata(
             tool_name,
             payload.get("args"),
-            classifier=classifier,
         )
         if metadata.get("effect") != EffectKind.READ_ONLY.value:
             raise AgentReadOnlyViolationError("reconciliation_command_unreviewed")
@@ -1558,8 +1063,6 @@ def _pi_reconciliation_evidence_event(
 def _pi_tool_effect_metadata(
     tool_name: str,
     arguments: object,
-    *,
-    classifier: NativeCliMetadataClassifier,
 ) -> dict[str, object]:
     if tool_name in _PI_XIAOQING_READ_TOOLS | {"upload_interview_result"}:
         normalized_arguments = _pi_nested_tool_arguments(arguments)
@@ -1617,48 +1120,20 @@ def _pi_tool_effect_metadata(
             "target_identifiers": structured_target_identifiers(arguments),
         }
     if tool_name in {
-        "bash",
         "execute_reviewed_read",
         "execute_reviewed_write",
         "execute_reviewed_lark_read",
         "execute_reviewed_lark_write",
     }:
-        command = ""
-        argv: object = None
-        if isinstance(arguments, dict):
-            value = arguments.get("command") or arguments.get("cmd")
-            if isinstance(value, str):
-                command = value
-            argv = arguments.get("argv")
-        native_command = None
-        if command or argv:
-            try:
-                native_command = classifier.classify(
-                    {
-                        "type": "command_execution",
-                        "command": command,
-                        "argv": argv,
-                    }
-                )
-            except NativeCliMetadataUnavailableError:
-                native_command = None
-        if native_command is not None and native_command.effect is not None:
-            expected_effect = (
-                EffectKind.READ_ONLY
-                if tool_name in {"execute_reviewed_read", "execute_reviewed_lark_read"}
-                else EffectKind.EFFECTFUL
-                if tool_name in {"execute_reviewed_write", "execute_reviewed_lark_write"}
-                else native_command.effect
-            )
-            if native_command.effect is not expected_effect:
-                return _unreviewed_pi_tool_metadata(tool_name, arguments)
+        native_command = reviewed_pi_command(tool_name, arguments)
+        if native_command is not None:
             return {
                 "effect": native_command.effect.value,
                 "native_cli": native_command.cli,
-                "operation": native_command.command_path,
-                "command_digest": native_command.command_digest,
+                "operation": native_command.operation,
+                "command_digest": native_command.operation_digest,
                 "target_identifiers": native_command.target_identifiers,
-                "reviewed_execution_digest": _pi_reviewed_execution_digest(argv),
+                "reviewed_execution_digest": native_command.operation_digest,
             }
         return _unreviewed_pi_tool_metadata(tool_name, arguments)
 
@@ -1762,19 +1237,6 @@ def _persist_pi_execution_receipt(
         owner=owner,
         now=now,
     )
-
-
-def _pi_reviewed_execution_digest(argv: object) -> str:
-    if not isinstance(argv, list) or not argv or not all(
-        isinstance(item, str) for item in argv
-    ):
-        return ""
-    serialized = json.dumps(
-        argv,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _pi_reviewed_write_confirmation(
@@ -2042,238 +1504,6 @@ def _pi_xiaoqing_write_confirmation(
     )
 
 
-def _native_cli_command(
-    payload: dict[str, object],
-    classifier: NativeCliMetadataClassifier,
-    *,
-    cached_only: bool,
-) -> NativeCliCommand | None:
-    if payload.get("type") not in {
-        "item.started",
-        "item.completed",
-        "item.failed",
-    }:
-        return None
-    item = payload.get("item")
-    if not isinstance(item, dict) or item.get("type") != "command_execution":
-        return None
-    try:
-        return (
-            classifier.classify_cached(item)
-            if cached_only
-            else classifier.classify(item)
-        )
-    except NativeCliMetadataUnavailableError:
-        return None
-
-
-def _mcp_tool_call(
-    payload: dict[str, object],
-    registry: McpToolEffectRegistry,
-) -> McpToolCall | None:
-    if payload.get("type") not in {
-        "item.started",
-        "item.completed",
-        "item.failed",
-    }:
-        return None
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return None
-    call = registry.classify(item)
-    if call is None or call.server != "reconciliation_cli":
-        return call
-    if call.tool not in {"execute_reviewed_read", "execute_reviewed_write"}:
-        return call
-    arguments = item.get("arguments")
-    argv = arguments.get("argv") if isinstance(arguments, dict) else None
-    descriptor = describe_native_command(
-        {"type": "command_execution", "argv": argv}
-    )
-    if descriptor is None:
-        return call
-    return McpToolCall(
-        server=call.server,
-        tool=call.tool,
-        effect=call.effect,
-        operation=descriptor.command_path,
-        operation_digest=descriptor.command_digest,
-        target_identifiers=descriptor.target_identifiers,
-        native_cli=descriptor.cli,
-    )
-
-
-def _native_call_id(payload: dict[str, object]) -> str:
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return ""
-    call_id = item.get("call_id") or item.get("id")
-    return call_id.strip() if isinstance(call_id, str) else ""
-
-
-def _native_command_completed(payload: dict[str, object]) -> bool:
-    if payload.get("type") != "item.completed":
-        return False
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return False
-    return item.get("exit_code") == 0 and item.get("status") == "completed"
-
-
-def _mcp_call_completed(payload: dict[str, object]) -> bool:
-    if payload.get("type") != "item.completed":
-        return False
-    item = payload.get("item")
-    if not isinstance(item, dict) or item.get("status") != "completed":
-        return False
-    result = item.get("result")
-    return _mcp_result_explicitly_succeeded(result)
-
-
-def _mcp_result_explicitly_succeeded(value: object) -> bool:
-    """Accept only a valid top-level MCP CallToolResult without error evidence."""
-    decoded_strings = 0
-    decoded_bytes = 0
-    if isinstance(value, str):
-        if len(value) > _MAX_MCP_RESULT_JSON_BYTES:
-            return False
-        try:
-            encoded_size = len(value.encode("utf-8"))
-        except (UnicodeError, MemoryError):
-            return False
-        if encoded_size > _MAX_MCP_RESULT_JSON_BYTES:
-            return False
-        try:
-            value = json.loads(value)
-        except (json.JSONDecodeError, ValueError, RecursionError, MemoryError):
-            return False
-        decoded_strings = 1
-        decoded_bytes = encoded_size
-    if not isinstance(value, dict) or not value:
-        return False
-
-    if "content" not in value:
-        return False
-    content = value["content"]
-    if not isinstance(content, list) or not all(
-        _valid_mcp_content_block(block) for block in content
-    ):
-        return False
-
-    if "isError" in value:
-        flag = value["isError"]
-        if not isinstance(flag, bool) or flag:
-            return False
-
-    structured_keys = ("structured_content", "structuredContent")
-    for key in structured_keys:
-        if key in value and value[key] is not None and not isinstance(value[key], dict):
-            return False
-
-    stack: list[tuple[object, int, bool, bool]] = [(value, 0, True, False)]
-    node_count = 0
-    while stack:
-        current, depth, inspect_errors, decode_json_strings = stack.pop()
-        node_count += 1
-        if node_count > _MAX_MCP_RESULT_NODES or depth > _MAX_MCP_RESULT_DEPTH:
-            return False
-
-        if isinstance(current, dict):
-            if len(current) > _MAX_MCP_RESULT_NODES - node_count - len(stack):
-                return False
-            if inspect_errors and _mcp_mapping_has_error(current):
-                return False
-            for key, nested in current.items():
-                if depth == 0:
-                    child_errors = key in {"result", *structured_keys}
-                    child_decode = child_errors
-                else:
-                    child_errors = inspect_errors
-                    child_decode = decode_json_strings
-                stack.append((nested, depth + 1, child_errors, child_decode))
-            continue
-        if isinstance(current, list):
-            if len(current) > _MAX_MCP_RESULT_NODES - node_count - len(stack):
-                return False
-            for nested in current:
-                stack.append(
-                    (nested, depth + 1, inspect_errors, decode_json_strings)
-                )
-            continue
-        if not decode_json_strings or not isinstance(current, str):
-            continue
-
-        stripped = current.lstrip()
-        if not stripped.startswith(("{", "[")):
-            continue
-        remaining_bytes = _MAX_MCP_RESULT_JSON_BYTES - decoded_bytes
-        if len(current) > remaining_bytes:
-            return False
-        try:
-            encoded_size = len(current.encode("utf-8"))
-        except (UnicodeError, MemoryError):
-            return False
-        if (
-            decoded_strings >= _MAX_MCP_RESULT_JSON_STRINGS
-            or encoded_size > remaining_bytes
-        ):
-            return False
-        try:
-            decoded = json.loads(current)
-        except (json.JSONDecodeError, ValueError, RecursionError, MemoryError):
-            return False
-        if not isinstance(decoded, (dict, list)):
-            continue
-        decoded_strings += 1
-        decoded_bytes += encoded_size
-        stack.append((decoded, depth + 1, inspect_errors, True))
-
-    return True
-
-
-def _mcp_mapping_has_error(value: dict[str, object]) -> bool:
-    if "isError" in value:
-        flag = value["isError"]
-        if not isinstance(flag, bool) or flag:
-            return True
-    for key, nested in value.items():
-        normalized_key = key.replace("_", "").lower()
-        if normalized_key == "error" and nested not in (None, False, ""):
-            return True
-        if normalized_key in {"errorcode", "errcode"} and nested not in (
-            None,
-            False,
-            0,
-            "",
-            "0",
-        ):
-            return True
-    return False
-
-
-def _valid_mcp_content_block(value: object) -> bool:
-    if not isinstance(value, dict):
-        return False
-    block_type = value.get("type")
-    if block_type == "text":
-        return isinstance(value.get("text"), str)
-    if block_type in {"image", "audio"}:
-        mime_type = value.get("mimeType", value.get("mime_type"))
-        return isinstance(value.get("data"), str) and isinstance(mime_type, str)
-    if block_type == "resource_link":
-        return isinstance(value.get("name"), str) and isinstance(
-            value.get("uri"), str
-        )
-    if block_type != "resource":
-        return False
-    resource = value.get("resource")
-    if not isinstance(resource, dict) or not isinstance(resource.get("uri"), str):
-        return False
-    return isinstance(resource.get("text"), str) or isinstance(
-        resource.get("blob"), str
-    )
-
-
 def _execution_receipts_for_run(
     store: AutoReplyStore,
     run_id: int,
@@ -2294,429 +1524,9 @@ def _execution_receipts_for_run(
     )
 
 
-def _effect_evidence_event(
-    payload: dict[str, object],
-    *,
-    native_command: NativeCliCommand | None,
-    mcp_call: McpToolCall | None,
-) -> dict[str, object]:
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        raise ValueError("effect evidence requires an item")
-    evidence_item: dict[str, object] = {
-        "type": str(item.get("type") or ""),
-    }
-    call_id = _native_call_id(payload)
-    if call_id:
-        evidence_item["id"] = call_id
-    if isinstance(item.get("status"), str):
-        evidence_item["status"] = item["status"]
-    evidence = {
-        "type": str(payload.get("type") or ""),
-        "item": evidence_item,
-    }
-    return _safe_event(
-        evidence,
-        native_command=native_command,
-        mcp_call=mcp_call,
-        completion_payload=payload,
-    )
-
-
-def _safe_event(
-    payload: dict[str, object],
-    *,
-    native_command: NativeCliCommand | None = None,
-    mcp_call: McpToolCall | None = None,
-    completion_payload: dict[str, object] | None = None,
-) -> dict[str, object]:
-    completion_payload = completion_payload or payload
-    safe_event = _minimal_safe_execution_event(payload)
-    item = safe_event.get("item")
-    if (
-        native_command is None
-        and mcp_call is None
-        and isinstance(item, dict)
-        and (
-            item.get("type") in _NATIVE_CLASSIFIABLE_ITEM_TYPES
-            or str(item.get("type") or "").endswith("_tool_call")
-        )
-    ):
-        item.pop("metadata", None)
-        item.pop("annotations", None)
-        metadata: dict[str, object] = {"effect": EffectKind.UNREVIEWED.value}
-        item["metadata"] = metadata
-    if native_command is not None and isinstance(item, dict):
-        metadata = item.get("metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
-            item["metadata"] = metadata
-        metadata.update(
-            {
-                "effect": native_command.effect.value,
-                "native_cli": native_command.cli,
-                "operation": native_command.command_path,
-                "command_digest": native_command.command_digest,
-                "target_identifiers": native_command.target_identifiers,
-            }
-        )
-        result_digest = _native_read_result_digest(completion_payload)
-        if result_digest:
-            metadata["result_digest"] = result_digest
-        if (
-            safe_event.get("type") == "item.completed"
-            and native_command.effect is EffectKind.EFFECTFUL
-            and not _native_command_completed(completion_payload)
-        ):
-            safe_event["type"] = "item.failed"
-    if mcp_call is not None and isinstance(item, dict):
-        item["server"] = mcp_call.server
-        item["tool"] = mcp_call.tool
-        metadata = item.get("metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
-            item["metadata"] = metadata
-        metadata.update(
-            {
-                "effect": mcp_call.effect.value,
-                "mcp_server": mcp_call.server,
-                "operation": mcp_call.operation,
-                "operation_digest": mcp_call.operation_digest,
-                "target_identifiers": mcp_call.target_identifiers,
-            }
-        )
-        if mcp_call.native_cli:
-            metadata["native_cli"] = mcp_call.native_cli
-        result_digest = _mcp_read_result_digest(completion_payload)
-        if result_digest:
-            metadata["result_digest"] = result_digest
-        if (
-            safe_event.get("type") == "item.completed"
-            and mcp_call.effect is EffectKind.EFFECTFUL
-            and not _mcp_call_completed(completion_payload)
-        ):
-            safe_event["type"] = "item.failed"
-    return safe_event
-
-
-def _native_read_result_digest(payload: dict[str, object]) -> str:
-    if not _native_command_completed(payload):
-        return ""
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return ""
-    output = item.get("aggregated_output")
-    if not isinstance(output, str):
-        return ""
-    return hashlib.sha256(output.encode("utf-8")).hexdigest()
-
-
-def _mcp_read_result_digest(payload: dict[str, object]) -> str:
-    if not _mcp_call_completed(payload):
-        return ""
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return ""
-    result = item.get("result")
-    encoded = json.dumps(
-        result,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _minimal_safe_execution_event(
-    payload: dict[str, object],
-) -> dict[str, object]:
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return {
-            str(key): _sanitize_event_value(value, key=str(key))
-            for key, value in payload.items()
-        }
-    item_type = str(item.get("type") or "")
-    if item_type == "mcp_tool_call":
-        safe_item: dict[str, object] = {"type": item_type}
-        for key in ("id", "call_id", "server", "tool", "status"):
-            value = item.get(key)
-            if isinstance(value, str) and value.strip():
-                safe_item[key] = safe_observability_error(value, limit=200)
-        return {"type": str(payload.get("type") or ""), "item": safe_item}
-    if item_type == "command_execution":
-        safe_item = {"type": item_type}
-        for key in ("id", "call_id", "status"):
-            value = item.get(key)
-            if isinstance(value, str) and value.strip():
-                safe_item[key] = safe_observability_error(value, limit=200)
-        if isinstance(item.get("exit_code"), int):
-            safe_item["exit_code"] = item["exit_code"]
-        for key in _COMMAND_KEY_NAMES:
-            if key in item:
-                safe_item[key] = _sanitize_event_value(item[key], key=key)
-                break
-        return {"type": str(payload.get("type") or ""), "item": safe_item}
-    return {
-        str(key): _sanitize_event_value(value, key=str(key))
-        for key, value in payload.items()
-    }
-
-
-def _sanitize_event_value(value: object, *, key: str = "") -> object:
-    normalized_key = _normalized_key(key)
-    if normalized_key in _SESSION_KEY_NAMES:
-        return "[stored separately]"
-    if _is_sensitive_key(normalized_key):
-        return _REDACTED
-    if isinstance(value, dict):
-        return {
-            str(item_key): _sanitize_event_value(item, key=str(item_key))
-            for item_key, item in value.items()
-        }
-    if isinstance(value, list):
-        if normalized_key in _COMMAND_KEY_NAMES and all(
-            isinstance(item, str) for item in value
-        ):
-            return _redact_argv(value)
-        return [_sanitize_event_value(item) for item in value]
-    if isinstance(value, str):
-        if normalized_key in _COMMAND_KEY_NAMES:
-            return _redact_command(value)
-        if normalized_key in _STRUCTURED_TEXT_KEY_NAMES:
-            structured = _sanitize_json_text(value)
-            if structured is not None:
-                return structured
-        if _is_signed_url(value):
-            return _REDACTED
-        return safe_observability_error(value, limit=2000)
-    if value is None or isinstance(value, bool | int | float):
-        return value
-    return safe_observability_error(str(value), limit=2000)
-
-
-def _normalized_key(key: str) -> str:
-    return "".join(character for character in key.casefold() if character.isalnum())
-
-
-def _is_sensitive_key(normalized_key: str) -> bool:
-    if normalized_key in _SENSITIVE_KEY_NAMES:
-        return True
-    if normalized_key.startswith("x") and normalized_key[1:] in _SENSITIVE_KEY_NAMES:
-        return True
-    return (
-        normalized_key.endswith("token")
-        or normalized_key.endswith("password")
-        or normalized_key.endswith("secret")
-        or normalized_key.endswith("cookie")
-        or normalized_key.endswith("authorization")
-        or normalized_key.endswith("apikey")
-        or normalized_key.endswith("signedurl")
-        or normalized_key.endswith("signature")
-    )
-
-
-def _sanitize_json_text(value: str) -> str | None:
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict | list):
-        return None
-    sanitized = _sanitize_event_value(parsed)
-    return json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
-
-
-def _redact_command(command: str) -> str:
-    try:
-        parts = shlex.split(command)
-    except ValueError:
-        return _REDACTED
-    return " ".join(shlex.join(_redact_argv(parts)).split())[:2000]
-
-
-def _redact_argv(parts: list[str]) -> list[str]:
-    sanitized: list[str] = []
-    redact_next = False
-    for part in parts:
-        if redact_next:
-            sanitized.append("[REDACTED]")
-            redact_next = False
-            continue
-        flag, separator, value = part.partition("=")
-        normalized_flag = _normalized_key(flag.lstrip("-"))
-        if (
-            flag in DwsClient.SENSITIVE_COMMAND_FLAGS
-            or flag in _COMMAND_CONTENT_FLAGS
-            or _is_sensitive_key(normalized_flag)
-        ):
-            sanitized.append(
-                f"{flag}={_REDACTED}" if separator else flag
-            )
-            redact_next = not separator
-        elif (separator and _is_signed_url(value)) or _is_signed_url(part):
-            sanitized.append(_REDACTED)
-        elif contains_credential(part):
-            sanitized.append(_REDACTED)
-        else:
-            sanitized.append(part)
-    return sanitized
-
-
-def _is_signed_url(value: str) -> bool:
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return False
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.query:
-        return False
-    return any(
-        _is_sensitive_key(_normalized_key(name))
-        for name, _value in parse_qsl(parsed.query, keep_blank_values=True)
-    )
-
-
 def _process_failure_detail(stderr: str) -> str:
     for line in stderr.splitlines():
         candidate = line.strip()
         if candidate and " WARN " not in f" {candidate} ":
             return safe_observability_error(candidate, limit=500)
     return "Pi process exited without an error message"
-
-
-def _effect_event(payload: dict[str, object]) -> ToolEffectEvent | None:
-    event_type = str(payload.get("type") or "")
-    if event_type not in {"item.started", "item.completed", "item.failed"}:
-        return None
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return None
-    item_type = str(item.get("type") or "").strip().casefold()
-    effect = _native_effect_kind(item_type, item)
-    if effect is None:
-        return None
-    call_id = item.get("call_id") or item.get("id")
-    if not isinstance(call_id, str) or not call_id.strip():
-        return None
-    return ToolEffectEvent(
-        call_id=call_id,
-        effect=effect,
-        status={
-            "item.started": EffectEventStatus.STARTED,
-            "item.completed": EffectEventStatus.COMPLETED,
-            "item.failed": EffectEventStatus.FAILED,
-        }[event_type],
-    )
-
-
-def _native_effect_kind(
-    item_type: str, item: dict[str, object]
-) -> EffectKind | None:
-    if item_type in _NATIVE_READ_ONLY_ITEM_TYPES:
-        return EffectKind.READ_ONLY
-    if item_type not in _NATIVE_CLASSIFIABLE_ITEM_TYPES and not item_type.endswith(
-        "_tool_call"
-    ):
-        return None
-    metadata = item.get("metadata")
-    if isinstance(metadata, dict):
-        effect = metadata.get("effect")
-        if effect in {
-            EffectKind.READ_ONLY.value,
-            EffectKind.EFFECTFUL.value,
-            EffectKind.UNREVIEWED.value,
-        }:
-            return EffectKind(effect)
-    for annotations in _annotation_candidates(item, metadata):
-        effect = _mcp_annotation_effect(annotations)
-        if effect is not None:
-            return effect
-    return None
-
-
-def _annotation_candidates(
-    item: dict[str, object], metadata: object
-) -> tuple[dict[str, object], ...]:
-    candidates: list[dict[str, object]] = []
-    for candidate in (
-        item.get("annotations"),
-        metadata,
-        metadata.get("annotations") if isinstance(metadata, dict) else None,
-    ):
-        if isinstance(candidate, dict):
-            candidates.append(candidate)
-    return tuple(candidates)
-
-
-def _mcp_annotation_effect(annotations: dict[str, object]) -> EffectKind | None:
-    read_only = annotations.get("readOnlyHint")
-    destructive = annotations.get("destructiveHint")
-    if read_only is True and destructive is not True:
-        return EffectKind.READ_ONLY
-    if destructive is True and read_only is not True:
-        return EffectKind.EFFECTFUL
-    return None
-
-
-def _receipt(payload: dict[str, object]) -> ExecutionReceipt | None:
-    item = payload.get("item")
-    if not isinstance(item, dict):
-        return None
-    if item.get("type") == "command_execution":
-        return None
-    operation_id = item.get("call_id") or item.get("id")
-    if not isinstance(operation_id, str) or not operation_id.strip():
-        return None
-    sources = [item[key] for key in ("result", "output") if key in item]
-    receipt = _first_valid_receipt(sources)
-    if receipt is None or receipt.operation_id != operation_id:
-        return None
-    return receipt
-
-
-def structured_execution_evidence(
-    events: tuple[dict[str, object], ...] | list[dict[str, object]],
-) -> tuple[tuple[ToolEffectEvent, ...], tuple[ExecutionReceipt, ...]]:
-    """Extract only trusted effect metadata and receipts from persisted events."""
-    effect_events: list[ToolEffectEvent] = []
-    receipts: list[ExecutionReceipt] = []
-    for event in events:
-        effect_event = _effect_event(event)
-        if effect_event is not None:
-            effect_events.append(effect_event)
-        receipt = _receipt(event)
-        if receipt is not None:
-            receipts.append(receipt)
-    return tuple(effect_events), tuple(receipts)
-
-
-def _first_valid_receipt(sources: list[object]) -> ExecutionReceipt | None:
-    for source in sources:
-        for candidate in _structured_receipt_candidates(source):
-            try:
-                return ExecutionReceipt.model_validate(candidate)
-            except ValueError:
-                continue
-    return None
-
-
-def _structured_receipt_candidates(value: object):
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return
-        if isinstance(parsed, dict | list):
-            yield from _structured_receipt_candidates(parsed)
-        return
-    if isinstance(value, list):
-        for item in value:
-            yield from _structured_receipt_candidates(item)
-        return
-    if not isinstance(value, dict):
-        return
-    if frozenset(value) == _RECEIPT_KEYS:
-        yield value
-        return
-    for nested in value.values():
-        yield from _structured_receipt_candidates(nested)

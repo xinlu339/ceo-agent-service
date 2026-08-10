@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.agent_context import AgentTaskContext
-from app.agent_result import AgentOutcome, EffectKind
+from app.agent_result import AgentOutcome
 from app.agent_runner import (
     AGENT_RESULT_SCHEMA_PATH,
     AgentConversationLockedError,
@@ -17,7 +17,6 @@ from app.agent_runner import (
     ReconciliationProof,
     direct_agent_developer_instructions,
 )
-from app.native_cli_metadata import NativeCliMetadataClassifier
 from app.process_runner import ProcessRunResult
 from app.store import AutoReplyStore
 
@@ -722,17 +721,10 @@ def test_direct_runner_persists_confirmed_pi_dws_write_and_receipt(
     executor = RecordingExecutor(
         _pi_tool_event_jsonl(command="dws chat message send --conversation cid")
     )
-    classifier = NativeCliMetadataClassifier(
-        reviewed_effects={
-            ("dws", "chat message send"): EffectKind.EFFECTFUL,
-        }
-    )
-
     result = DirectAgentRunner(
         store=store,
         workspace=tmp_path,
         executor=executor,
-        native_cli_classifier=classifier,
     ).run(task, _context(task.id))
 
     run = store.get_agent_run(result.run_id)
@@ -762,18 +754,11 @@ def test_direct_runner_requires_reviewed_pi_write_confirmation_details(
         if payload.get("type") == "tool_execution_end":
             payload["result"].pop("details")
     executor = RecordingExecutor("\n".join(json.dumps(item) for item in payloads))
-    classifier = NativeCliMetadataClassifier(
-        reviewed_effects={
-            ("dws", "chat message send"): EffectKind.EFFECTFUL,
-        }
-    )
-
     with pytest.raises(AgentRunUnknownError, match="pi_unreviewed_tool_effect"):
         DirectAgentRunner(
             store=store,
             workspace=tmp_path,
             executor=executor,
-            native_cli_classifier=classifier,
         ).run(task, _context(task.id))
 
     run = store.get_agent_run_for_task_generation(task.id, task.execution_generation)
@@ -794,18 +779,11 @@ def test_direct_runner_rejects_mismatched_pi_write_confirmation_digest(
         if payload.get("type") == "tool_execution_end":
             payload["result"]["details"]["operationDigest"] = "wrong"
     executor = RecordingExecutor("\n".join(json.dumps(item) for item in payloads))
-    classifier = NativeCliMetadataClassifier(
-        reviewed_effects={
-            ("dws", "chat message send"): EffectKind.EFFECTFUL,
-        }
-    )
-
     with pytest.raises(AgentRunUnknownError, match="pi_unreviewed_tool_effect"):
         DirectAgentRunner(
             store=store,
             workspace=tmp_path,
             executor=executor,
-            native_cli_classifier=classifier,
         ).run(task, _context(task.id))
 
     run = store.get_agent_run_for_task_generation(task.id, task.execution_generation)
@@ -955,16 +933,10 @@ def test_direct_runner_persists_confirmed_lark_write_receipt(
     store: AutoReplyStore,
 ):
     task = _task(store)
-    classifier = NativeCliMetadataClassifier(
-        reviewed_effects={
-            ("lark-cli", "im messages create"): EffectKind.EFFECTFUL,
-        }
-    )
     result = DirectAgentRunner(
         store=store,
         workspace=tmp_path,
         executor=RecordingExecutor(_pi_lark_write_jsonl()),
-        native_cli_classifier=classifier,
     ).run(task, _context(task.id))
 
     run = store.get_agent_run(result.run_id)
@@ -981,12 +953,6 @@ def test_direct_runner_keeps_unconfirmed_lark_write_unknown(
     store: AutoReplyStore,
 ):
     task = _task(store)
-    classifier = NativeCliMetadataClassifier(
-        reviewed_effects={
-            ("lark-cli", "im messages create"): EffectKind.EFFECTFUL,
-        }
-    )
-
     with pytest.raises(AgentRunUnknownError, match="pi_unreviewed_tool_effect"):
         DirectAgentRunner(
             store=store,
@@ -994,7 +960,6 @@ def test_direct_runner_keeps_unconfirmed_lark_write_unknown(
             executor=RecordingExecutor(
                 _pi_lark_write_jsonl(safe_to_confirm=False)
             ),
-            native_cli_classifier=classifier,
         ).run(task, _context(task.id))
 
 
@@ -1010,16 +975,10 @@ def test_pi_reconciliation_accepts_reviewed_lark_live_read(
         operation="im messages create",
         target_identifiers={"receive-id": "chat-1"},
     )
-    classifier = NativeCliMetadataClassifier(
-        reviewed_effects={
-            ("lark-cli", "im messages list"): EffectKind.READ_ONLY,
-        }
-    )
     result = DirectAgentRunner(
         store=store,
         workspace=tmp_path,
         executor=RecordingExecutor(_pi_lark_reconciliation_jsonl()),
-        native_cli_classifier=classifier,
     ).reconcile(unknown, _context(task.id))
 
     assert result.result.outcome is AgentOutcome.COMPLETED
@@ -1041,18 +1000,11 @@ def test_direct_runner_marks_interrupted_pi_write_unknown_without_retrying(
         ),
         timed_out=True,
     )
-    classifier = NativeCliMetadataClassifier(
-        reviewed_effects={
-            ("dws", "chat message send"): EffectKind.EFFECTFUL,
-        }
-    )
-
     with pytest.raises(AgentRunUnknownError, match="pi_process_timeout"):
         DirectAgentRunner(
             store=store,
             workspace=tmp_path,
             executor=executor,
-            native_cli_classifier=classifier,
         ).run(task, _context(task.id))
 
     run = store.get_agent_run_for_task_generation(
@@ -1075,18 +1027,11 @@ def test_direct_runner_treats_failed_pi_write_as_outcome_unknown(
             tool_error=True,
         )
     )
-    classifier = NativeCliMetadataClassifier(
-        reviewed_effects={
-            ("dws", "chat message send"): EffectKind.EFFECTFUL,
-        }
-    )
-
     with pytest.raises(AgentRunUnknownError, match="pi_unreviewed_tool_effect"):
         DirectAgentRunner(
             store=store,
             workspace=tmp_path,
             executor=executor,
-            native_cli_classifier=classifier,
         ).run(task, _context(task.id))
 
     run = store.get_agent_run_for_task_generation(
@@ -1120,16 +1065,10 @@ def test_pi_reconciliation_uses_only_reviewed_read_and_binds_live_proof(
     task = _task(store)
     unknown = _unknown_run(store, task.id)
     executor = RecordingExecutor(_pi_reconciliation_jsonl())
-    classifier = NativeCliMetadataClassifier(
-        reviewed_effects={
-            ("dws", "chat message list"): EffectKind.READ_ONLY,
-        }
-    )
     runner = DirectAgentRunner(
         store=store,
         workspace=tmp_path,
         executor=executor,
-        native_cli_classifier=classifier,
     )
 
     result = runner.reconcile(unknown, _context(task.id))

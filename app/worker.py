@@ -30,10 +30,8 @@ from app.agent_runner import (
     AgentRunNoEffectEvidenceError,
     AgentRunUnavailableError,
     ReconciliationResult,
-    ReconciliationDependencyError,
     DirectAgentRunResult,
     DirectAgentRunner,
-    structured_execution_evidence,
     unknown_effect_reference,
 )
 from app.channel_gate import (
@@ -1822,31 +1820,6 @@ class DingTalkAutoReplyWorker:
                         else "reconciliation_write_forbidden"
                     ),
                     retryable=retryable_violation,
-                )
-                continue
-            except ReconciliationDependencyError as exc:
-                service_channel = "dingtalk" if exc.channel == "dws" else "lark"
-                if exc.gate_state is ChannelGateState.NEEDS_LOGIN:
-                    self._pass_channel_results.pop(service_channel, None)
-                    self.login_coordinator.handle(
-                        ChannelGateResult(
-                            channel=service_channel,
-                            state=ChannelGateState.NEEDS_LOGIN,
-                            reason_code=exc.code,
-                        )
-                    )
-                self._defer_agent_reconciliation(
-                    run.id,
-                    runner.owner,
-                    code=exc.code,
-                    retryable=(
-                        exc.gate_state is ChannelGateState.NEEDS_LOGIN
-                        or (
-                            exc.gate_state is ChannelGateState.UNAVAILABLE
-                            and exc.retryable
-                        )
-                    ),
-                    gate_state=exc.gate_state,
                 )
                 continue
             except Exception as exc:
