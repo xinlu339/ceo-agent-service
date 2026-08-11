@@ -516,11 +516,13 @@ def start_lark_auth_login(binary: str | None = None) -> subprocess.Popen[str]:
         from app.config import feishu_cli_binary
 
         binary = feishu_cli_binary()
+    from app.pi_runner import pi_runtime_environment
+
     return subprocess.Popen(
         [binary, "auth", "login"],
         text=True,
         start_new_session=True,
-        env=os.environ.copy(),
+        env=pi_runtime_environment(),
     )
 
 
@@ -886,7 +888,9 @@ def _safe_detail(*values: str | None) -> str:
 
 
 def _lark_noninteractive_environment() -> dict[str, str]:
-    env = os.environ.copy()
+    from app.pi_runner import pi_runtime_environment
+
+    env = pi_runtime_environment()
     env.setdefault("CI", "1")
     env.setdefault("NO_COLOR", "1")
     return env

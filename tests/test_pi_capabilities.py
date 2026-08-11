@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.pi_capabilities import (
+    _reviewed_lark_status,
     _safe_probe_environment,
     _valid_external_mcp_url,
     _valid_memory_url,
@@ -79,7 +80,7 @@ def test_capability_report_uses_real_reviewed_boundaries_without_echoing_keys(
     )
     monkeypatch.setattr(
         "app.pi_capabilities._reviewed_lark_status",
-        lambda _binary: (True, "Official schema ready"),
+        lambda _binary, _node_binary: (True, "Official schema ready"),
     )
     monkeypatch.setattr(
         "app.pi_capabilities._reviewed_graphify_status",
@@ -144,7 +145,10 @@ def test_capability_report_requires_provider_key_but_not_optional_memory(
     )
     monkeypatch.setattr(
         "app.pi_capabilities._reviewed_lark_status",
-        lambda _binary: (False, "lark-cli executable is not installed"),
+        lambda _binary, _node_binary: (
+            False,
+            "lark-cli executable is not installed",
+        ),
     )
     monkeypatch.setattr(
         "app.pi_capabilities._reviewed_graphify_status",
@@ -179,7 +183,7 @@ def test_capability_subprocess_environment_strips_all_provider_and_memory_secret
     monkeypatch.setenv("PROVIDER_CLIENT_SECRET", "provider-secret")
     monkeypatch.setenv("SAFE_MARKER", "kept")
 
-    env = _safe_probe_environment()
+    env = _safe_probe_environment("node")
 
     assert env["PATH"] == "/usr/bin"
     assert env["SAFE_MARKER"] == "kept"
@@ -188,6 +192,31 @@ def test_capability_subprocess_environment_strips_all_provider_and_memory_secret
     assert "CONNECTOR_API_KEY" not in env
     assert "AUTHORIZATION" not in env
     assert "PROVIDER_CLIENT_SECRET" not in env
+
+
+def test_lark_schema_probe_adds_configured_node_directory_to_sanitized_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node_dir = tmp_path / "node22" / "bin"
+    node_dir.mkdir(parents=True)
+    node = node_dir / "node"
+    node.write_text("#!/bin/sh\nexec /bin/sh \"$@\"\n", encoding="utf-8")
+    node.chmod(0o755)
+    lark = tmp_path / "lark-cli"
+    lark.write_text(
+        "#!/usr/bin/env node\n"
+        "printf '%s\\n' '[{\"_meta\":{\"risk\":\"read\"}}]'\n",
+        encoding="utf-8",
+    )
+    lark.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("CEO_PI_API_KEY", "must-not-leak")
+
+    ready, detail = _reviewed_lark_status(str(lark), str(node))
+
+    assert ready is True
+    assert "Official schema: 1 read" in detail
 
 
 def test_capability_report_blocks_unresolvable_provider_model(
@@ -209,7 +238,7 @@ def test_capability_report_blocks_unresolvable_provider_model(
     )
     monkeypatch.setattr(
         "app.pi_capabilities._reviewed_lark_status",
-        lambda _binary: (True, "schema ready"),
+        lambda _binary, _node_binary: (True, "schema ready"),
     )
     monkeypatch.setattr(
         "app.pi_capabilities.probe_pi_model_resolution",

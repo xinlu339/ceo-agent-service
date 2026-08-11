@@ -47,6 +47,7 @@ from app.pi_runner import (
     pi_models_config_for_values,
     pi_node_binary,
     pi_node_version,
+    pi_runtime_environment,
     pi_xiaoqing_bridge_path,
     validate_pi_api,
     validate_pi_base_url,
@@ -275,7 +276,10 @@ def probe_pi_capabilities(
         graphify_binary or "graphify"
     )
     lark_binary = _configured_raw(env_values, _LARK_BINARY_ENV, "lark-cli").strip()
-    lark_ready, lark_detail = _reviewed_lark_status(lark_binary or "lark-cli")
+    lark_ready, lark_detail = _reviewed_lark_status(
+        lark_binary or "lark-cli",
+        node_binary,
+    )
 
     bridge_path = _configured_path(
         env_values,
@@ -772,7 +776,10 @@ def _reviewed_dws_status_cached(binary: str, mtime_ns: int) -> tuple[bool, str]:
     return True, f"Installed schema: {read_count} read, {write_count} write tools"
 
 
-def _reviewed_lark_status(configured_binary: str) -> tuple[bool, str]:
+def _reviewed_lark_status(
+    configured_binary: str,
+    node_binary: str | Path | None = None,
+) -> tuple[bool, str]:
     binary = (
         configured_binary
         if Path(configured_binary).is_absolute()
@@ -786,7 +793,11 @@ def _reviewed_lark_status(configured_binary: str) -> tuple[bool, str]:
         mtime_ns = Path(binary).stat().st_mtime_ns
     except OSError:
         mtime_ns = 0
-    return _reviewed_lark_status_cached(str(binary), mtime_ns)
+    return _reviewed_lark_status_cached(
+        str(binary),
+        mtime_ns,
+        str(node_binary or pi_node_binary()),
+    )
 
 
 def _reviewed_graphify_status(configured_binary: str) -> tuple[bool, str]:
@@ -809,13 +820,17 @@ def _reviewed_graphify_status(configured_binary: str) -> tuple[bool, str]:
 
 
 @lru_cache(maxsize=8)
-def _reviewed_lark_status_cached(binary: str, mtime_ns: int) -> tuple[bool, str]:
+def _reviewed_lark_status_cached(
+    binary: str,
+    mtime_ns: int,
+    node_binary: str,
+) -> tuple[bool, str]:
     del mtime_ns
     try:
         completed = run_bounded_process(
             [binary, "schema"],
             timeout=60,
-            env=_safe_probe_environment(),
+            env=_safe_probe_environment(node_binary),
         )
     except ProcessOutputLimitError:
         return False, "lark-cli schema output exceeded the limit"
@@ -850,8 +865,8 @@ def _reviewed_lark_status_cached(binary: str, mtime_ns: int) -> tuple[bool, str]
     )
 
 
-def _safe_probe_environment() -> dict[str, str]:
-    env = os.environ.copy()
+def _safe_probe_environment(node_binary: str | Path | None = None) -> dict[str, str]:
+    env = pi_runtime_environment(node_binary=node_binary)
     for key in tuple(env):
         if key.startswith("CEO_PI_") or _SECRET_ENV_PATTERN.search(key):
             env.pop(key, None)

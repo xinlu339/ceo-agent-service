@@ -234,6 +234,24 @@ def test_pi_runner_environment_uses_isolated_agent_directories(
     )
 
 
+def test_pi_runner_environment_prepends_configured_node_directory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _configure_runtime(monkeypatch, tmp_path)
+    node = tmp_path / "node22" / "bin" / "node"
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    runner = PiRunner(
+        workspace=tmp_path,
+        pi_cli_path_value="pi.js",
+        node_binary=str(node),
+    )
+
+    env = runner.build_env()
+
+    assert env["PATH"].split(":") == [str(node.parent), "/usr/bin", "/bin"]
+
+
 def test_pi_default_read_roots_do_not_depend_on_codex_skills(
     tmp_path: Path,
     monkeypatch,

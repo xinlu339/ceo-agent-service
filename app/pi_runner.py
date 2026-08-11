@@ -219,6 +219,25 @@ def pi_node_version(binary: str | Path) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups())
 
 
+def pi_runtime_environment(
+    base_env: dict[str, str] | None = None,
+    *,
+    node_binary: str | Path | None = None,
+) -> dict[str, str]:
+    env = dict(os.environ if base_env is None else base_env)
+    resolved_node = Path(node_binary or pi_node_binary()).expanduser()
+    if not resolved_node.is_absolute():
+        return env
+    node_dir = str(resolved_node.parent)
+    path_entries = [
+        entry for entry in env.get("PATH", "").split(os.pathsep) if entry
+    ]
+    env["PATH"] = os.pathsep.join(
+        [node_dir, *(entry for entry in path_entries if entry != node_dir)]
+    )
+    return env
+
+
 def pi_cli_path() -> Path:
     configured = os.environ.get(PI_CLI_PATH_ENV, "").strip()
     if configured:
@@ -503,7 +522,7 @@ class PiRunner:
         preserve_local_cli_auth: bool = False,
     ) -> dict[str, str]:
         ensure_pi_runtime_config()
-        base_env = os.environ.copy()
+        base_env = pi_runtime_environment(node_binary=self.node_binary)
         env = (
             base_env
             if preserve_local_cli_auth

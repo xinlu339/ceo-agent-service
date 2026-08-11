@@ -256,6 +256,7 @@ def test_lark_auth_login_preserves_normal_environment(
     monkeypatch, existing_ci: str | None
 ):
     monkeypatch.setenv("HOME", "/Users/tester")
+    monkeypatch.setenv("CEO_PI_NODE_BINARY", "/node22/bin/node")
     monkeypatch.setenv("NORMAL_LOCAL_VARIABLE", "preserved")
     monkeypatch.delenv("NO_COLOR", raising=False)
     if existing_ci is None:
@@ -344,7 +345,12 @@ def test_dws_gate_classifies_typed_not_authenticated_code_as_needs_login():
     assert result.reason_code == "status_auth_failed"
 
 
-def test_lark_gate_requires_verified_status_and_authenticated_probe():
+def test_lark_gate_requires_verified_status_and_authenticated_probe(
+    tmp_path, monkeypatch
+):
+    node = tmp_path / "node22" / "bin" / "node"
+    monkeypatch.setenv("CEO_PI_NODE_BINARY", str(node))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
     runner = ScriptedRunner(
         [
             completed(0, '{"authenticated":true}'),
@@ -364,6 +370,7 @@ def test_lark_gate_requires_verified_status_and_authenticated_probe():
         "user",
         "--json",
     ]
+    assert runner.calls[0]["env"]["PATH"].split(":")[0] == str(node.parent)
 
 
 @pytest.mark.parametrize(
