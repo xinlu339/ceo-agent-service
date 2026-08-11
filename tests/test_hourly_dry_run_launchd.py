@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
 import plistlib
+import subprocess
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -72,8 +74,11 @@ def test_main_launch_agent_runs_single_keepalive_service():
     assert "DWS_DISABLE_KEYCHAIN" not in command[2]
     assert "DWS_KEYCHAIN_DIR" not in command[2]
     assert 'CEO_DING_ROBOT_NAME="${CEO_DING_ROBOT_NAME:-磊哥}"' in command[2]
-    assert "CEO_NOT_SEND_MESSAGE=0" in command[2]
-    assert "CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1" in command[2]
+    assert 'CEO_SERVICE_MODE:-dry-run' in command[2]
+    assert 'service_mode_args=(--dry-run)' in command[2]
+    assert 'live service mode requires CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1' in command[2]
+    assert "CEO_NOT_SEND_MESSAGE=0" not in command[2]
+    assert "export CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1" not in command[2]
     assert "CEO_OKR_LIVE_SOURCE_COMMAND" in command[2]
     assert 'CEO_PI_PROVIDER="${CEO_PI_PROVIDER:-openai}"' in command[2]
     assert 'CEO_PI_MODEL="${CEO_PI_MODEL:-gpt-5.5}"' in command[2]
@@ -122,8 +127,78 @@ def test_hourly_dry_run_install_script_installs_and_kickstarts_launch_agent():
     assert "launchctl bootstrap" in content
     assert "launchctl kickstart -k" in content
     assert "EnvironmentVariables.CEO_SERVICE_ROOT" in content
+    assert 'service_mode="dry-run"' in content
+    assert 'service_port="${CEO_AUDIT_WEB_PORT:-8765}"' in content
+    assert "--live requires CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1" in content
+    assert "EnvironmentVariables.CEO_SERVICE_MODE" in content
+    assert "EnvironmentVariables.CEO_AUDIT_WEB_PORT" in content
+    assert "EnvironmentVariables.CEO_WORKER_DB" in content
     assert 'plutil -lint "${target_plist}"' in content
     assert "mkdir -p" in content
+
+
+def test_install_script_writes_isolated_dry_run_service_configuration(tmp_path: Path):
+    fake_home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    launchctl = fake_bin / "launchctl"
+    launchctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launchctl.chmod(0o755)
+    database = fake_home / "Library/Application Support/ceo-agent-service/test.sqlite3"
+    env = os.environ.copy()
+    env["HOME"] = str(fake_home)
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+
+    completed = subprocess.run(
+        [
+            str(REPO_ROOT / "scripts" / "install-auto-reply-agents.sh"),
+            "--dry-run",
+            "--port",
+            "8766",
+            "--db",
+            str(database),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    installed = (
+        fake_home
+        / "Library/LaunchAgents/com.ceo-agent-service.main.plist"
+    )
+    with installed.open("rb") as file:
+        plist = plistlib.load(file)
+    service_env = plist["EnvironmentVariables"]
+    assert service_env["CEO_SERVICE_MODE"] == "dry-run"
+    assert service_env["CEO_AUDIT_WEB_PORT"] == "8766"
+    assert service_env["CEO_WORKER_DB"] == str(database)
+    assert str(REPO_ROOT) == service_env["CEO_SERVICE_ROOT"]
+    assert "mode=dry-run port=8766" in completed.stdout
+
+
+def test_install_script_rejects_live_mode_without_explicit_acceptance(tmp_path: Path):
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "home")
+    env.pop("CEO_LIVE_SEND_BLOCKERS_ACCEPTED", None)
+
+    completed = subprocess.run(
+        [
+            str(REPO_ROOT / "scripts" / "install-auto-reply-agents.sh"),
+            "--live",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert completed.returncode == 64
+    assert "--live requires CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1" in completed.stderr
 
 
 def test_component_bootstrap_keeps_optional_nvwa_out_of_runtime_blockers():

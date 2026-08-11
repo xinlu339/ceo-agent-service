@@ -700,6 +700,7 @@ def test_check_mcp_reports_reviewed_bridge_configuration_state(
     monkeypatch.setenv("CEO_FEISHU_CLI_BINARY", "/missing/lark-cli")
     monkeypatch.delenv("CEO_PI_XIAOQING_ACCESS_TOKEN", raising=False)
     monkeypatch.setattr("app.pi_capabilities.pi_memory_connector_env", lambda: {})
+    monkeypatch.setattr("app.pi_capabilities.nvwa_skill_path", lambda: None)
     status = check_setup_step("mcp", repo_root=tmp_path)
 
     assert status.status == "needs_action"

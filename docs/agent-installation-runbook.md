@@ -264,8 +264,10 @@ not in `~/.agents/skills`.
    ```
 
 3. Keep dry-run on for first validation. For this codebase, dry-run can be set
-   as either `CEO_DRY_RUN=1` or `CEO_NOT_SEND_MESSAGE=1`; launchd defaults to
-   live processing, so review launchd behavior before installing the service.
+   as either `CEO_DRY_RUN=1`, `CEO_NOT_SEND_MESSAGE=1`, or the CLI
+   `--dry-run` flag. The checked-in launchd entry and installation script now
+   default to `CEO_SERVICE_MODE=dry-run`; live mode requires a separate,
+   explicit opt-in.
 
 4. Verify important paths exist:
 
@@ -448,21 +450,25 @@ Install launchd only after dry-run behavior and configuration are reviewed.
    workspace, DB, corpus path, principal/persona variables, and live-send
    defaults match the deployment.
 
-2. If launchd should start in dry-run, edit the plist or environment before
-   installation. The current template sets `CEO_NOT_SEND_MESSAGE=0`, so do not
-   install it blindly on a fresh machine.
+2. Choose a port and an absolute SQLite path. For acceptance testing, use a
+   separate port and database so the service cannot consume an existing
+   production queue. The installer defaults to dry-run and writes these
+   values into the installed user LaunchAgent.
 
 3. Install:
 
    ```sh
-   scripts/install-auto-reply-agents.sh
+   scripts/install-auto-reply-agents.sh \
+     --dry-run \
+     --port 8766 \
+     --db "$HOME/Library/Application Support/ceo-agent-service/pi-acceptance.sqlite3"
    ```
 
 4. Verify:
 
    ```sh
    launchctl print gui/$(id -u)/com.ceo-agent-service.main | sed -n '1,80p'
-   curl -fsS http://127.0.0.1:8765/ >/tmp/ceo-agent-home.html
+   curl -fsS http://127.0.0.1:8766/ >/tmp/ceo-agent-home.html
    ```
 
 5. Check logs:
@@ -480,11 +486,14 @@ Only after reviewing dry-run attempts with the user:
 
 1. Confirm the exact live scope: which chats, which aliases, which actions, and
    whether OA/calendar/task follow-up actions are allowed.
-2. Set:
+2. Set the explicit live acceptance gate and reinstall in live mode:
 
-   ```text
-   CEO_NOT_SEND_MESSAGE=0
-   CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1
+   ```sh
+   CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1 \
+     scripts/install-auto-reply-agents.sh \
+       --live \
+       --port 8765 \
+       --db "$HOME/Library/Application Support/ceo-agent-service/auto-reply.sqlite3"
    ```
 
 3. Restart launchd if runtime service behavior changed:

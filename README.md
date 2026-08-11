@@ -110,8 +110,8 @@ Agent 必须如实返回动作结果；只完成诊断时返回 `needs_human` �
 默认设计是“本地优先”：
 
 - 钉钉认证、Pi session、API Key、SQLite 数据库、语料库和业务材料不应提交到 Git。
-- 默认使用 `CEO_NOT_SEND_MESSAGE=0` 正常处理消息和日历动作。
-- dry-run 需要显式设置 `CEO_NOT_SEND_MESSAGE=1` 或使用 `--not-send-message` / `--dry-run`，只记录决策不发送。
+- 手工运行 CLI 时，未指定 dry-run 仍按命令自身的 live 默认值处理；测试和首次安装应显式使用 `--dry-run`。
+- `scripts/install-auto-reply-agents.sh` 安装的 launchd 服务默认使用 `CEO_SERVICE_MODE=dry-run`，只记录决策、不发送消息或执行外部写操作。
 - live send 仍需要 `CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1` 作为显式确认开关。
 - 回复不得暴露本地文件路径、session id、token、cookie、签名 URL 或工具原始输出。
 - OA 审批必须读取完整审批材料、流程节点、附件和 SOP；无法确定时评论追问或 handoff。
@@ -465,10 +465,31 @@ Follow-up 发送仍遵守 live-send 安全边界：默认 dry-run 时只生成/�
 本项目提供 macOS `launchd` 模板：
 
 ```bash
-scripts/install-auto-reply-agents.sh
+scripts/install-auto-reply-agents.sh --dry-run
 ```
 
-安装前请先检查 `launchd/*.plist` 中的本地路径、用户名、workspace、数据库路径和 persona 配置。开源部署时通常需要替换这些值。
+安装脚本默认是安全的 dry-run 模式。测试 Codex → Pi 迁移时，建议使用独立端口和独立数据库，避免消费已有队列：
+
+```bash
+scripts/install-auto-reply-agents.sh \
+  --dry-run \
+  --port 8766 \
+  --db "$HOME/Library/Application Support/ceo-agent-service/pi-acceptance.sqlite3"
+```
+
+安装前请检查 `launchd/*.plist` 中的本地路径、用户名、workspace、数据库路径和 persona 配置。安装脚本会把当前 checkout、运行模式、端口和数据库绝对路径写入用户级 LaunchAgent。开源部署时通常还需要替换其他部署值。
+
+真实发送不会由安装脚本默认开启。只有明确完成 dry-run 验收后，才能同时提供 `--live` 和 `CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1`；缺少显式确认时安装脚本和 launchd 入口都会拒绝启动 live 模式：
+
+```bash
+CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1 \
+  scripts/install-auto-reply-agents.sh \
+    --live \
+    --port 8765 \
+    --db "$HOME/Library/Application Support/ceo-agent-service/auto-reply.sqlite3"
+```
+
+测试人员验收步骤和功能矩阵见 [docs/pi-runtime-acceptance.md](docs/pi-runtime-acceptance.md)。
 
 运行模型只有一个 launchd job、五个内部组件；不会创建 meeting crontab 或第二个 plist：
 
@@ -491,7 +512,7 @@ meeting producer 首次启用时会持久化激活时间。服务启动恢复队
 本地 dry-run 验证：
 
 ```bash
-CEO_NOT_SEND_MESSAGE=1 .venv/bin/python -m app.cli service \
+.venv/bin/python -m app.cli service --dry-run \
   --host 127.0.0.1 --port 8765
 ```
 

@@ -46,6 +46,7 @@ def clear_fake_store(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_mcp_doctor_reports_all_reviewed_pi_integrations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("app.pi_capabilities.nvwa_skill_path", lambda: None)
     config = tmp_path / "config.toml"
     config.write_text(
         """

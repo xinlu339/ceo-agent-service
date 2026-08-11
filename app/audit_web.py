@@ -1876,13 +1876,30 @@ def _launchd_service_status(label: str) -> dict[str, object]:
             "initialized": "",
         }
     parsed = _parse_launchctl_print(completed.stdout)
+    stderr = completed.stderr.strip()
+    if completed.returncode != 0 and "Could not find service" in stderr:
+        return {
+            "label": label,
+            "target": target,
+            "ok": False,
+            "state": "not_installed",
+            "detail": (
+                "launchd service is not installed; Audit Web is running without "
+                "supervised background workers"
+            ),
+            "pid": "",
+            "runs": "",
+            "initialized": "",
+            "last_terminating_signal": "",
+            "returncode": completed.returncode,
+        }
     state = str(parsed.get("state") or ("error" if completed.returncode else "unknown"))
     initialized = str(parsed.get("initialized") or "")
     ok = completed.returncode == 0 and state == "running" and initialized != "0"
     detail = (
         "running"
         if ok
-        else (completed.stderr.strip() or parsed.get("last terminating signal") or state)
+        else (stderr or parsed.get("last terminating signal") or state)
     )
     return {
         "label": label,

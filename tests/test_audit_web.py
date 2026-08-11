@@ -5753,6 +5753,33 @@ def test_workers_routes_render_page_and_json(tmp_path: Path, monkeypatch):
     assert payload["summary"]["pending"] >= 1
 
 
+def test_launchd_service_status_reports_not_installed_without_raw_launchctl_error(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        audit_web_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["launchctl", "print"],
+            returncode=113,
+            stdout="",
+            stderr=(
+                'Bad request.\nCould not find service "com.ceo-agent-service.main" '
+                "in domain for user gui: 501\n"
+            ),
+        ),
+    )
+
+    status = audit_web_module._launchd_service_status(
+        "com.ceo-agent-service.main"
+    )
+
+    assert status["ok"] is False
+    assert status["state"] == "not_installed"
+    assert "Audit Web is running" in status["detail"]
+    assert "Bad request" not in status["detail"]
+
+
 def test_render_log_list_paginates(tmp_path: Path):
     store = AutoReplyStore(tmp_path / "worker.sqlite3")
     store.record_error("cid-1", "msg-1", "codex", "older error")
