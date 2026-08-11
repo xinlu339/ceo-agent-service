@@ -283,8 +283,9 @@ def build_task_agent_prompt(
 - project.memory_context 必须写入本次查询意图和实际依据；不要把当前项目字段伪装成来自 Memory 的证据。
 - 如果上下文无法支撑稳定项目名称，不要创建模糊项目；生成 follow_up_draft 询问项目、目标、owner。
 - AI听记或本地听记的说话人标签只能作为弱证据；如果多人会议的 transcript 大段只有同一个 speaker，说明说话人标注不可信，不能据此认定 owner，也不能直接私聊该 speaker。
-- 当前 Pi 运行时也没有安装 Xiaoqing bridge。不得调用或声称调用 xiaoqing_interview、search_candidates 或 get_interview_context，也不得用 curl、DWS 文档读取或本地搜索冒充小青候选人记录。
-- 若 Work Item、候选项目或 follow-up 涉及候选人的推进、淘汰、人才池、offer、最终决策或流程关闭，而当前输入没有可信的最新状态，不得关闭/抑制 TODO、不得断言候选人终态，也不要创建要求 HR 代查小青的状态 follow-up。没有独立的重要风险时 discard；有独立风险时只记录已有证据支持的风险，不推断流程状态。
+- 候选人流程状态 follow-up 不能只依赖本地项目里的旧摘要或 AI 听记。若 Work Item、候选项目或 follow-up 涉及候选人的推进、淘汰、人才池、offer、最终决策或流程关闭，先用 reviewed Xiaoqing Pi read tools 读取候选人当前阶段、最终决策、决策时间和决策说明；优先使用 search_candidates、get_interview_context 和 list_candidate_interviews，并以真实工具事件为准。
+- 小青已给出终态时，关闭/抑制对应 TODO 和 follow-up，不要再问 HR “是否继续/是否关闭”。小青仍是 pending/waiting 且缺决策说明时，才可以生成面向 HR 的状态确认 follow-up。
+- 如果 reviewed Xiaoqing bridge 报告未配置、授权失败或运行失败，不得用 curl、网页抓取、DWS 文档读取或本地搜索冒充小青候选人记录；不要断言候选人终态，也不要创建要求 HR 代查小青的状态 follow-up。没有独立的重要风险时 discard；有独立风险时只记录已有证据支持的风险，不推断流程状态。
 - 行政、工商、法务、财务、人事合规类事项必须区分汇报人、推动人和实际执行 owner；只有材料明确写出“某人负责/待办/owner/由某人完成”且不是低可信说话人标签推导时，才能给该人生成 follow_up_draft。否则只更新项目背景或生成需要确认真实 owner 的 TODO，不要直接私聊。
 - 只有消息、会议纪要或文档明确证明 TODO 完成时，才能自动清理 TODO，并写入 completion_evidence。
 - Work Item 来源为 follow_up_completion_check 时，只是在提醒你检查已有 follow-up 是否完成；只有 sources、DWS 检索或会议纪要明确证明 owner 已完成时，才能 close TODO。completion_evidence 必须写 source、reason、description、completed_at；证据不足时不要 close，也不要新建 TODO。

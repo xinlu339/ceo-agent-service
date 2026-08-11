@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -21,6 +22,11 @@ const MAX_EXA_REQUEST_BYTES = 64 * 1024;
 const EXA_BRIDGE_TIMEOUT_MS = 120_000;
 const MAX_XIAOQING_REQUEST_BYTES = 1024 * 1024;
 const XIAOQING_BRIDGE_TIMEOUT_MS = 150_000;
+const MAX_DINGTALK_IMAGE_REQUEST_BYTES = 16 * 1024;
+const MAX_DINGTALK_IMAGE_RESPONSE_BYTES = 15 * 1024 * 1024;
+const DINGTALK_IMAGE_BRIDGE_TIMEOUT_MS = 150_000;
+const MAX_GRAPHIFY_VALUE_BYTES = 16 * 1024;
+const MAX_REVIEWED_IMAGE_BYTES = 10 * 1024 * 1024;
 const BLOCKED_COMMAND_SEGMENTS = new Set([
 	"auth",
 	"authorize",
@@ -131,6 +137,24 @@ function configuredLarkBinary(): string {
 	const configured = process.env.CEO_FEISHU_CLI_BINARY?.trim() || "lark-cli";
 	if (path.basename(configured) !== "lark-cli") throw new Error("reviewed_lark_binary_invalid");
 	return configured;
+}
+
+function configuredGraphifyBinary(): string {
+	const configured = process.env.CEO_GRAPHIFY_BINARY?.trim() || "graphify";
+	if (path.basename(configured) !== "graphify") throw new Error("reviewed_graphify_binary_invalid");
+	return configured;
+}
+
+function validateGraphifyValue(value: string): string {
+	const normalized = value.trim();
+	if (!normalized) throw new Error("reviewed_graphify_argument_missing");
+	if (normalized.includes("\0") || normalized.includes("\n") || normalized.includes("\r")) {
+		throw new Error("reviewed_graphify_control_character");
+	}
+	if (Buffer.byteLength(normalized, "utf8") > MAX_GRAPHIFY_VALUE_BYTES) {
+		throw new Error("reviewed_graphify_argument_too_large");
+	}
+	return normalized;
 }
 
 function validateLarkArgv(argv: string[]): void {
@@ -255,6 +279,49 @@ function commandDigest(argv: string[]): string {
 	return createHash("sha256").update(JSON.stringify(argv)).digest("hex");
 }
 
+function reviewedImageMimeType(data: Buffer): string | undefined {
+	if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+		return "image/png";
+	}
+	if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return "image/jpeg";
+	if (data.length >= 6) {
+		const header = data.subarray(0, 6).toString("ascii");
+		if (header === "GIF87a" || header === "GIF89a") return "image/gif";
+	}
+	if (
+		data.length >= 12 &&
+		data.subarray(0, 4).toString("ascii") === "RIFF" &&
+		data.subarray(8, 12).toString("ascii") === "WEBP"
+	) return "image/webp";
+	return undefined;
+}
+
+async function readReviewedImage(imagePath: string) {
+	const stat = await fs.stat(imagePath);
+	if (!stat.isFile() || stat.size <= 0) throw new Error("reviewed_image_missing");
+	if (stat.size > MAX_REVIEWED_IMAGE_BYTES) throw new Error("reviewed_image_too_large");
+	const data = await fs.readFile(imagePath);
+	const mimeType = reviewedImageMimeType(data);
+	if (!mimeType) throw new Error("reviewed_image_format_unsupported");
+	return {
+		content: { type: "image" as const, data: data.toString("base64"), mimeType },
+		digest: createHash("sha256").update(data).digest("hex"),
+		byteLength: data.length,
+	};
+}
+
+function replaceOutputPath(argv: string[], outputPath: string): string[] {
+	const rewritten = [...argv];
+	const index = rewritten.indexOf("--output");
+	if (index >= 0) {
+		if (index + 1 >= rewritten.length) throw new Error("reviewed_image_output_invalid");
+		rewritten[index + 1] = outputPath;
+		return rewritten;
+	}
+	rewritten.push("--output", outputPath);
+	return rewritten;
+}
+
 function targetIdentifiers(argv: string[]): Record<string, string> {
 	const identifiers: Record<string, string> = {};
 	for (let index = 1; index < argv.length; index += 1) {
@@ -345,6 +412,13 @@ function safeXiaoqingEnvironment(): NodeJS.ProcessEnv {
 		const value = process.env[key];
 		if (value) env[key] = value;
 	}
+	return env;
+}
+
+function safeDingtalkImageEnvironment(): NodeJS.ProcessEnv {
+	const env = safeChildEnvironment();
+	const bridge = process.env.CEO_PI_DINGTALK_IMAGE_BRIDGE_PATH;
+	if (bridge) env.CEO_PI_DINGTALK_IMAGE_BRIDGE_PATH = bridge;
 	return env;
 }
 
@@ -568,6 +642,80 @@ async function callXiaoqingBridge(
 	});
 }
 
+async function callDingtalkImageBridge(
+	args: Record<string, unknown>,
+	signal: AbortSignal,
+): Promise<MemoryBridgeResponse> {
+	const python = process.env.CEO_PI_PYTHON_BINARY?.trim();
+	const bridge = process.env.CEO_PI_DINGTALK_IMAGE_BRIDGE_PATH?.trim();
+	if (!python || !bridge || !path.isAbsolute(bridge)) throw new Error("dingtalk_image_bridge_not_configured");
+	const request = JSON.stringify({ tool: "download_dingtalk_image", arguments: args });
+	if (Buffer.byteLength(request, "utf8") > MAX_DINGTALK_IMAGE_REQUEST_BYTES) {
+		throw new Error("dingtalk_image_request_too_large");
+	}
+	return await new Promise<MemoryBridgeResponse>((resolve, reject) => {
+		const child = spawn(python, [bridge], {
+			env: safeDingtalkImageEnvironment(),
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		const stdout: Buffer[] = [];
+		const stderr: Buffer[] = [];
+		let stdoutBytes = 0;
+		let stderrBytes = 0;
+		let settled = false;
+		const finish = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			signal.removeEventListener("abort", abort);
+			callback();
+		};
+		const abort = () => {
+			child.kill("SIGTERM");
+			finish(() => reject(new Error("dingtalk_image_bridge_aborted")));
+		};
+		const timer = setTimeout(() => {
+			child.kill("SIGTERM");
+			finish(() => reject(new Error("dingtalk_image_bridge_timeout")));
+		}, DINGTALK_IMAGE_BRIDGE_TIMEOUT_MS);
+		signal.addEventListener("abort", abort, { once: true });
+		child.on("error", (error) => finish(() => reject(error)));
+		child.stdout.on("data", (chunk: Buffer) => {
+			stdoutBytes += chunk.length;
+			if (stdoutBytes > MAX_DINGTALK_IMAGE_RESPONSE_BYTES) {
+				child.kill("SIGTERM");
+				finish(() => reject(new Error("dingtalk_image_bridge_output_too_large")));
+				return;
+			}
+			stdout.push(chunk);
+		});
+		child.stderr.on("data", (chunk: Buffer) => {
+			stderrBytes += chunk.length;
+			if (stderrBytes <= MAX_OUTPUT_BYTES) stderr.push(chunk);
+		});
+		child.on("close", (code) => {
+			finish(() => {
+				if (code !== 0) {
+					reject(new Error(boundedText(Buffer.concat(stderr).toString("utf8")) || "dingtalk_image_bridge_failed"));
+					return;
+				}
+				try {
+					const response = JSON.parse(Buffer.concat(stdout).toString("utf8")) as MemoryBridgeResponse;
+					if (
+						response.ok !== true ||
+						response.tool !== "download_dingtalk_image" ||
+						response.effect !== "read"
+					) throw new Error("dingtalk_image_bridge_response_invalid");
+					resolve(response);
+				} catch (error) {
+					reject(error instanceof Error ? error : new Error("dingtalk_image_bridge_response_invalid"));
+				}
+			});
+		});
+		child.stdin.end(request);
+	});
+}
+
 async function executeMemoryTool(
 	tool: string,
 	args: Record<string, unknown>,
@@ -648,6 +796,54 @@ async function executeXiaoqingTool(
 	};
 }
 
+async function executeDingtalkImageTool(
+	args: Record<string, unknown>,
+	signal: AbortSignal,
+) {
+	const response = await callDingtalkImageBridge(args, signal);
+	const result = response.result as Record<string, unknown>;
+	const data = result?.data;
+	const mimeType = result?.mime_type;
+	const byteLength = result?.byte_length;
+	if (
+		typeof data !== "string" ||
+		!data ||
+		typeof mimeType !== "string" ||
+		!new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]).has(mimeType) ||
+		typeof byteLength !== "number" ||
+		!Number.isInteger(byteLength) ||
+		byteLength <= 0 ||
+		byteLength > MAX_REVIEWED_IMAGE_BYTES
+	) throw new Error("dingtalk_image_bridge_response_invalid");
+	const decoded = Buffer.from(data, "base64");
+	if (decoded.length !== byteLength || reviewedImageMimeType(decoded) !== mimeType) {
+		throw new Error("dingtalk_image_bridge_response_invalid");
+	}
+	const responseText = JSON.stringify({ imageAttached: true, mimeType, byteLength });
+	return {
+		content: [
+			{ type: "text" as const, text: responseText },
+			{ type: "image" as const, data, mimeType },
+		],
+		details: {
+			protocolVersion: RECEIPT_PROTOCOL_VERSION,
+			bridge: "dingtalk_image",
+			effect: "read",
+			operation: "download_dingtalk_image",
+			operationDigest: memoryOperationDigest("download_dingtalk_image", args),
+			targetIdentifiers: {},
+			resultDigest: createHash("sha256").update(decoded).digest("hex"),
+			exitCode: 0,
+			completed: true,
+			safeToConfirm: false,
+			receipt: {},
+			imageAttached: true,
+			imageMimeType: mimeType,
+			imageByteLength: byteLength,
+		},
+	};
+}
+
 const xiaoqingArguments = Type.Record(
 	Type.String({ minLength: 1, maxLength: 256 }),
 	Type.Unknown(),
@@ -704,31 +900,67 @@ async function executeReviewedDws(argv: string[], effect: "read" | "write", sign
 	const metadata = commandMetadata(argv, tools);
 	if (!metadata) throw new Error("reviewed_dws_command_unknown");
 	assertReviewedCommand(argv, metadata, effect);
-	const result = await execFileAsync(argv[0], argv.slice(1), {
-		env: safeChildEnvironment(),
-		timeout: COMMAND_TIMEOUT_MS,
-		maxBuffer: MAX_OUTPUT_BYTES,
-		signal,
-	});
-	const stdout = boundedText(result.stdout || "");
-	const stderr = boundedText(result.stderr || "");
-	const responseText = stdout || stderr || "{}";
-	return {
-		content: [{ type: "text" as const, text: responseText }],
-		details: {
-			protocolVersion: RECEIPT_PROTOCOL_VERSION,
-			cli: "dws",
-			effect,
-			operation: metadata.cli_path,
-			operationDigest: commandDigest(argv),
-			targetIdentifiers: targetIdentifiers(argv),
-			resultDigest: createHash("sha256").update(responseText).digest("hex"),
-			exitCode: 0,
-			completed: true,
-			safeToConfirm: effect === "write",
-			stderr: stderr || undefined,
-		},
-	};
+	const originalArgv = [...argv];
+	const imageDownload = effect === "read" && metadata.cli_path === "chat message download-media";
+	let imageTempDir: string | undefined;
+	let imagePath: string | undefined;
+	let executionArgv = originalArgv;
+	if (imageDownload) {
+		imageTempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ceo-agent-pi-image-"));
+		imagePath = path.join(imageTempDir, "downloaded-image");
+		executionArgv = replaceOutputPath(originalArgv, imagePath);
+	}
+	try {
+		const result = await execFileAsync(executionArgv[0], executionArgv.slice(1), {
+			env: safeChildEnvironment(),
+			timeout: COMMAND_TIMEOUT_MS,
+			maxBuffer: MAX_OUTPUT_BYTES,
+			signal,
+		});
+		const stdout = boundedText(result.stdout || "");
+		const stderr = boundedText(result.stderr || "");
+		let responseText = stdout || stderr || "{}";
+		let content: Array<
+			{ type: "text"; text: string } |
+			{ type: "image"; data: string; mimeType: string }
+		> = [{ type: "text", text: responseText }];
+		let resultDigest = createHash("sha256").update(responseText).digest("hex");
+		let imageDetails: Record<string, unknown> = {};
+		if (imagePath) {
+			const image = await readReviewedImage(imagePath);
+			responseText = JSON.stringify({
+				imageAttached: true,
+				mimeType: image.content.mimeType,
+				byteLength: image.byteLength,
+			});
+			content = [{ type: "text", text: responseText }, image.content];
+			resultDigest = image.digest;
+			imageDetails = {
+				imageAttached: true,
+				imageMimeType: image.content.mimeType,
+				imageByteLength: image.byteLength,
+			};
+		}
+		return {
+			content,
+			details: {
+				protocolVersion: RECEIPT_PROTOCOL_VERSION,
+				cli: "dws",
+				effect,
+				operation: metadata.cli_path,
+				operationDigest: commandDigest(originalArgv),
+				targetIdentifiers: targetIdentifiers(originalArgv),
+				resultDigest,
+				exitCode: 0,
+				completed: true,
+				safeToConfirm: effect === "write",
+				stderr: stderr || undefined,
+				...imageDetails,
+			},
+		};
+	} finally {
+		if (imageTempDir) await fs.rm(imageTempDir, { recursive: true, force: true });
+	}
 }
 
 async function executeReviewedLark(argv: string[], effect: "read" | "write", signal: AbortSignal) {
@@ -769,6 +1001,58 @@ async function executeReviewedLark(argv: string[], effect: "read" | "write", sig
 			completed: true,
 			safeToConfirm,
 			receipt: safeToConfirm ? { resultIdentifiers, processingStatus: "completed" } : {},
+			stderr: stderr || undefined,
+		},
+	};
+}
+
+async function executeReviewedGraphify(
+	params: { operation: "query" | "explain" | "path"; query?: string; source?: string; target?: string },
+	signal: AbortSignal,
+	cwd: string,
+) {
+	let argv: string[];
+	if (params.operation === "query" || params.operation === "explain") {
+		if (params.source !== undefined || params.target !== undefined) {
+			throw new Error("reviewed_graphify_arguments_invalid");
+		}
+		argv = [params.operation, validateGraphifyValue(params.query ?? "")];
+	} else if (params.operation === "path") {
+		if (params.query !== undefined) throw new Error("reviewed_graphify_arguments_invalid");
+		argv = [
+			"path",
+			validateGraphifyValue(params.source ?? ""),
+			validateGraphifyValue(params.target ?? ""),
+		];
+	} else {
+		throw new Error("reviewed_graphify_operation_invalid");
+	}
+	const binary = configuredGraphifyBinary();
+	const result = await execFileAsync(binary, argv, {
+		env: safeChildEnvironment(),
+		cwd,
+		timeout: COMMAND_TIMEOUT_MS,
+		maxBuffer: MAX_OUTPUT_BYTES,
+		signal,
+	});
+	const stdout = boundedText(result.stdout || "");
+	const stderr = boundedText(result.stderr || "");
+	const responseText = stdout || stderr || "{}";
+	const command = ["graphify", ...argv];
+	return {
+		content: [{ type: "text" as const, text: responseText }],
+		details: {
+			protocolVersion: RECEIPT_PROTOCOL_VERSION,
+			cli: "graphify",
+			effect: "read",
+			operation: `graphify ${params.operation}`,
+			operationDigest: commandDigest(command),
+			targetIdentifiers: {},
+			resultDigest: createHash("sha256").update(responseText).digest("hex"),
+			exitCode: 0,
+			completed: true,
+			safeToConfirm: false,
+			receipt: {},
 			stderr: stderr || undefined,
 		},
 	};
@@ -915,6 +1199,33 @@ export default function ceoAgentTools(pi: ExtensionAPI) {
 		parameters: Type.Object({ argv: Type.Array(Type.String(), { minItems: 2, maxItems: MAX_ARG_COUNT }) }),
 		async execute(_toolCallId, params, signal) {
 			return executeReviewedDws(params.argv, "read", signal);
+		},
+	});
+
+	pi.registerTool({
+		name: "graphify_read",
+		label: "Graphify Read",
+		description: "Run one installed Graphify query, explain, or path operation. This adapter is permanently read-only and never exposes shell execution.",
+		parameters: Type.Object({
+			operation: Type.Union([Type.Literal("query"), Type.Literal("explain"), Type.Literal("path")]),
+			query: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_GRAPHIFY_VALUE_BYTES })),
+			source: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_GRAPHIFY_VALUE_BYTES })),
+			target: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_GRAPHIFY_VALUE_BYTES })),
+		}),
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			return executeReviewedGraphify(params, signal, ctx.cwd);
+		},
+	});
+
+	pi.registerTool({
+		name: "download_dingtalk_image",
+		label: "DingTalk Image Download",
+		description: "Resolve one exact DingTalk robot image download code through the configured DWS identity and return the image pixels without exposing its signed URL.",
+		parameters: Type.Object({
+			download_code: Type.String({ minLength: 1, maxLength: 4096 }),
+		}),
+		async execute(_toolCallId, params, signal) {
+			return executeDingtalkImageTool(params, signal);
 		},
 	});
 

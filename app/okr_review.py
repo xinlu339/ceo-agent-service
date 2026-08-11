@@ -604,7 +604,7 @@ trigger_text: {trigger_text}
 - 逐 KR 阅读 `krDetailsUpdatesAggregated` 和 KR progress updates。
 - 从 KR进度更新中抽取员工主张、完成时间、产出和指标。
 - 给出员工主张信息打分。
-- 使用已注入材料、本地文件以及 reviewed DWS 只读工具搜索和读取进行事实核实。Friday Memory reviewed read tools 配置可用时，可以用 memory_recall 补充历史背景；若工具明确报告未配置或授权失败，继续使用当前材料并记录证据缺口。不得调用 memory_write、document_upload 或任何写工具；Lark、Xiaoqing 和 Exa 当前不受支持。
+- 使用已注入材料、本地文件以及 reviewed DWS 只读工具搜索和读取进行事实核实。Friday Memory reviewed read tools 配置可用时，可以用 memory_recall 补充历史背景；相关证据位于 Lark 时使用 reviewed Lark read，涉及公开资料时可使用 Exa，只在招聘或候选人 KR 确实需要时使用 Xiaoqing read。只能调用本轮实际暴露且已配置的 read tools；工具未配置或授权失败时继续使用其他材料并记录证据缺口。不得调用 memory_write、document_upload 或任何写工具。
 - 给出事实核实后打分。
 - 两套分数都必须考虑超期、时差、业务影响和表述是否可衡量。
 - 只输出当前 AgentEnvelope JSON，不要输出旧格式 `request_id/status/result`。

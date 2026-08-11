@@ -35,7 +35,7 @@ ceo-agent = "app.cli:main"
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
-  "live: explicit opt-in tests that may call real dws, Codex, or DingTalk"
+  "live: explicit opt-in tests that may call real DWS, Pi Agent, or DingTalk"
 ]
 
 [build-system]

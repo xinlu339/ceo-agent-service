@@ -1,7 +1,7 @@
 {
   "name": "ceo-agent-service",
   "version": "0.1.0",
-  "description": "Local-first DingTalk executive auto-reply service powered by dws, Codex, graphify, and SQLite.",
+  "description": "Local-first DingTalk executive auto-reply service powered by Pi Agent, reviewed tools, and SQLite.",
   "type": "module",
   "license": "MIT",
   "repository": {

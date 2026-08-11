@@ -19,6 +19,7 @@ from app.nvwa_review import nvwa_skill_path
 from app.pi_runner import (
     DEFAULT_PI_EXA_MCP_URL,
     DEFAULT_PI_XIAOQING_MCP_URL,
+    GRAPHIFY_BINARY_ENV,
     DEFAULT_PI_API,
     DEFAULT_PI_MODEL,
     DEFAULT_PI_PROVIDER,
@@ -119,6 +120,7 @@ process.stdout.write(JSON.stringify({
 
 REQUESTED_PI_INTEGRATION_KEYS = (
     "dws_reviewed_tools",
+    "graphify",
     "memory_tools",
     "xiaoqing_interview",
     "exa",
@@ -264,6 +266,14 @@ def probe_pi_capabilities(
     api_key_ready = bool(_configured_raw(env_values, PI_API_KEY_ENV, "").strip())
 
     dws_ready, dws_detail = _reviewed_dws_status()
+    graphify_binary = _configured_raw(
+        env_values,
+        GRAPHIFY_BINARY_ENV,
+        "graphify",
+    ).strip()
+    graphify_ready, graphify_detail = _reviewed_graphify_status(
+        graphify_binary or "graphify"
+    )
     lark_binary = _configured_raw(env_values, _LARK_BINARY_ENV, "lark-cli").strip()
     lark_ready, lark_detail = _reviewed_lark_status(lark_binary or "lark-cli")
 
@@ -371,6 +381,13 @@ def probe_pi_capabilities(
             ready=dws_ready,
             detail=dws_detail,
             required=True,
+        ),
+        PiCapability(
+            key="graphify",
+            label="Graphify read tools",
+            state="ready" if graphify_ready else "missing_cli",
+            ready=graphify_ready,
+            detail=graphify_detail,
         ),
         PiCapability(
             key="memory_bridge",
@@ -770,6 +787,25 @@ def _reviewed_lark_status(configured_binary: str) -> tuple[bool, str]:
     except OSError:
         mtime_ns = 0
     return _reviewed_lark_status_cached(str(binary), mtime_ns)
+
+
+def _reviewed_graphify_status(configured_binary: str) -> tuple[bool, str]:
+    binary = (
+        configured_binary
+        if Path(configured_binary).is_absolute()
+        else shutil.which(configured_binary)
+    )
+    if not binary:
+        return False, "graphify executable is not installed"
+    binary_path = Path(binary)
+    if binary_path.name != "graphify":
+        return False, "configured Graphify binary must be named graphify"
+    if not binary_path.is_file() or not os.access(binary_path, os.X_OK):
+        return False, "graphify executable is not runnable"
+    return (
+        True,
+        f"Installed read-only adapter: {binary_path} · query, explain, path",
+    )
 
 
 @lru_cache(maxsize=8)

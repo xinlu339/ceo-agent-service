@@ -72,6 +72,7 @@ url = "https://xiaoqing.example/mcp"
     assert by_name["memory_connector"].recover_command == ""
     assert "memory-secret" not in str(by_name["memory_connector"].as_dict())
     assert by_name["exa"].state == "ready"
+    assert by_name["graphify"].state in {"ready", "missing_cli"}
     assert by_name["xiaoqing_interview"].state == "missing_auth"
     assert by_name["xiaoqing_interview"].authorization_required is True
     assert by_name["lark"].state == "missing_cli"

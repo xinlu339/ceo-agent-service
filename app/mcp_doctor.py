@@ -101,6 +101,7 @@ def check_mcp_statuses(
             "dws_reviewed_tools",
             name="dws_reviewed_tools",
         ),
+        _capability_status(report, "graphify", name="graphify"),
         _capability_status(
             report,
             "xiaoqing_interview",

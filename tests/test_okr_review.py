@@ -181,6 +181,10 @@ def test_build_okr_review_prompt_includes_live_source_and_claim_scoring():
     assert "request_id: 7" in prompt
     assert "KR进度更新" in prompt
     assert "员工主张信息打分" in prompt
+    assert "reviewed Lark read" in prompt
+    assert "可使用 Exa" in prompt
+    assert "使用 Xiaoqing read" in prompt
+    assert "Lark、Xiaoqing 和 Exa 当前不受支持" not in prompt
     assert "事实核实后打分" in prompt
     assert "不要输出旧格式 `request_id/status/result`" in prompt
     assert "`system_actions` 必须包含" in prompt

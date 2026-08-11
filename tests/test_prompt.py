@@ -142,11 +142,40 @@ def test_developer_prompt_uses_only_reviewed_pi_integrations():
     assert "Friday Memory 只允许通过已注册的" in template
     assert "永远不要传 user_id、graph_id 或 graph_ids" in template
     assert "不得伪造查询或写入结果" in template
-    assert "Lark、Xiaoqing 和 Exa 当前没有 reviewed Pi 工具" in template
+    assert "Exa 只读检索、Xiaoqing 招聘上下文，以及 Lark reviewed read tools" in template
+    assert "具体范围以本轮实际暴露的本地只读、DWS、Friday Memory、Exa、Xiaoqing 和 Lark adapter 为准" in template
     assert "critical_info_unavailable:memory_connector" in template
     assert "memory_connector MCP 可用" not in template
     assert "优先调用 memory_recall 获取可复用上下文" not in template
-    assert "调用 memory_write 记录一条业务 episode" not in template
+    assert "调用 memory_write 记录一条业务 episode" in template
+    assert "当前运行不能写入长期 Memory" not in template
+    assert "Lark、Xiaoqing 和 Exa 当前没有 reviewed Pi 工具" not in template
+    assert "只读 graphify_read 工具" in template
+    assert 'graphify query "<具体问题>"' not in template
+
+
+def test_read_developer_prompt_migrates_only_known_legacy_pi_restrictions(tmp_path):
+    prompt_path = tmp_path / "developer.md"
+    prompt_path.write_text(
+        "自定义规则必须保留。\n"
+        '- 当问题依赖本地知识图谱关系、跨文档背景或历史决策链时，可以使用 graphify。先阅读 `graphify-out/GRAPH_REPORT.md` 的相关部分，再用 `graphify query "<具体问题>"`、`graphify explain "<具体概念>"` 或 `graphify path "<A>" "<B>"` 找关系，并只打开与当前回复直接相关的文件。\n'
+        "- 默认不了解当前业务背景；除非问题只是寒暄、确认收到、简单排期或上下文事实已经完整，否则先检索必要背景再判断。检索优先级是：当前消息和已注入上下文、本地文件、reviewed DWS 搜索与知识库工具，以及配置可用时的 Friday Memory reviewed read tools；同时善用 DWS 获取审批、日程、文档、链接、图片等材料。Lark、Xiaoqing 和 Exa 当前没有 reviewed Pi 工具，不得调用或声称调用。\n"
+        "- 当前运行不能写入长期 Memory。不要为了补偿这一缺口把一次性状态、系统运行事件、失败恢复过程或任务生命周期事件写入其他材料，也不要在 user_response.text 暴露 Memory、工具或运行时细节。\n"
+        "- Direct Agent 边界：DWS 可用性由服务在启动 Pi 前检查；你不得调用 dws auth login，也不得通过登录、刷新凭证或弹出授权页来修复依赖。你必须自行读取材料并只调用获准的 reviewed Pi 工具：本地只读工具、DWS reviewed read/write 工具，以及配置可用时的 Friday Memory tools。Lark、Xiaoqing、Exa、任意 bash 和未注册 MCP 均不可用。服务只负责校验、权限 gate、去重、事件与回执持久化以及投递。外部动作结果为 UNKNOWN 时必须停止自动重试并交由人工核对，不能假定成功或再次执行。\n",
+        encoding="utf-8",
+    )
+
+    migrated = read_developer_prompt_template(prompt_path)
+
+    assert "自定义规则必须保留。" in migrated
+    assert "Exa 只读检索、Xiaoqing 招聘上下文，以及 Lark reviewed read tools" in migrated
+    assert "调用 memory_write 记录一条业务 episode" in migrated
+    assert "Lark high-risk-write 永远阻断" in migrated
+    assert "只读 graphify_read 工具" in migrated
+    assert 'graphify query "<具体问题>"' not in migrated
+    assert "当前没有 reviewed Pi 工具" not in migrated
+    assert "Lark、Xiaoqing、Exa、任意 bash 和未注册 MCP 均不可用" not in migrated
+    assert prompt_path.read_text(encoding="utf-8") == migrated
 
 
 def test_developer_prompt_keeps_business_metrics_out_of_personnel_sensitivity():
@@ -707,7 +736,7 @@ def test_thread_prompt_defaults_to_business_context_retrieval():
     assert "默认不了解当前业务背景" in prompt
     assert "本地文件" in prompt
     assert "reviewed DWS 搜索与知识库工具" in prompt
-    assert "Friday Memory reviewed read tools" in prompt
+    assert "配置可用时的 Friday Memory" in prompt
     assert "审批、日程、文档、链接、图片" in prompt
     assert "若这些材料已经足以判断是否回复和回复内容，不要再做本地 workspace 或 graphify 检索" not in prompt
 

@@ -86,7 +86,7 @@ def test_pi_runner_read_only_command_allows_only_read_tools(tmp_path: Path, monk
     )
 
     assert command[command.index("--tools") + 1] == (
-        "workspace_read,workspace_search,workspace_list,execute_reviewed_read,"
+        "workspace_read,workspace_search,workspace_list,graphify_read,download_dingtalk_image,execute_reviewed_read,"
         "execute_reviewed_lark_read,"
         "user_get,memory_recall,memory_get,timeline_get,web_search_exa,web_fetch_exa,"
         "search_candidates,get_dashboard_stats,get_interview_context,"
@@ -107,7 +107,7 @@ def test_pi_runner_effectful_command_exposes_only_reviewed_extension_tools(
     )
 
     assert command[command.index("--tools") + 1] == (
-        "workspace_read,workspace_search,workspace_list,execute_reviewed_read,"
+        "workspace_read,workspace_search,workspace_list,graphify_read,download_dingtalk_image,execute_reviewed_read,"
         "execute_reviewed_lark_read,"
         "user_get,memory_recall,memory_get,timeline_get,web_search_exa,web_fetch_exa,"
         "search_candidates,get_dashboard_stats,get_interview_context,"

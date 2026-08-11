@@ -1128,7 +1128,7 @@ def _tutorial_steps() -> list[_TutorialStep]:
                 "API Key is stored only in the mode-0600 .env and is never rendered back to the page",
                 "DWS reviewed schema and the reviewed Pi extension load successfully",
                 "Friday Memory requires the reviewed bridge, Connector URL, and a local API key",
-                "Exa uses reviewed read-only tools; Xiaoqing uses a reviewed OAuth bridge; Lark uses the reviewed official CLI adapter; Nvwa is limited to explicit work-profile review",
+                "Graphify exposes only query/explain/path; Exa uses reviewed read-only tools; Xiaoqing uses a reviewed OAuth bridge; Lark uses the reviewed official CLI adapter; Nvwa is limited to explicit work-profile review",
                 "CEO_NOT_SEND_MESSAGE=1 or CEO_DRY_RUN=1 remains enabled",
             ],
             "commands": [
@@ -2626,7 +2626,7 @@ def _render_agent_config(*, saved: bool = False) -> str:
         if not item.ready
     ]
     integration_summary = (
-        "DWS、Friday Memory、Xiaoqing、Exa、Lark 与 Nvwa 均已就绪，"
+        "DWS、Graphify、Friday Memory、Xiaoqing、Exa、Lark 与 Nvwa 均已就绪，"
         "各 reviewed adapter 可在同一套 Pi 配置下同时使用。"
         if not missing_integrations
         else "仍需配置或认证：" + "、".join(missing_integrations) + "。"

@@ -2378,12 +2378,8 @@ class DingTalkAutoReplyWorker:
                         sort_keys=True,
                     )
                     commands = (
-                        "dws api POST /v1.0/robot/messageFiles/download"
-                        " --data \"$(jq -cn --arg downloadCode "
-                        + shlex.quote(download_code)
-                        + " --arg robotCode \"$DINGTALK_DING_ROBOT_CODE\""
-                        " '{downloadCode:$downloadCode,robotCode:$robotCode}')\""
-                        " --format json",
+                        "download_dingtalk_image --download-code "
+                        + shlex.quote(download_code),
                     )
                 else:
                     continue

@@ -9469,6 +9469,36 @@ def test_image_download_failure_is_passed_to_codex_prompt(
     assert worker.store.list_errors() == []
 
 
+def test_robot_image_download_code_uses_reviewed_pi_image_tool(
+    tmp_path: Path, monkeypatch
+):
+    trigger = message(
+        "@Alex Chen(明哥) 看下这张机器人图片",
+        message_id="msg-robot-image-1",
+    )
+    trigger.raw_payload = {
+        "content": {"pictureDownloadCode": "download-code-1"}
+    }
+    dws = FakeDws([conversation()], {"cid-1": [trigger]})
+    codex = FakeCodex(
+        AgentDecision(
+            action=AgentAction.NO_REPLY,
+            reason="image reviewed",
+            audit_summary="只需上下文判断，不需要回复。",
+        )
+    )
+    worker = make_worker(tmp_path, dws, codex, monkeypatch)
+    script_no_action(worker)
+
+    worker.run_once()
+
+    prompt = agent_prompt(worker)
+    assert "download_dingtalk_image --download-code download-code-1" in prompt
+    assert "jq -cn" not in prompt
+    assert "/v1.0/robot/messageFiles/download" not in prompt
+    assert dws.robot_message_file_download_calls == []
+
+
 def test_dingtalk_doc_read_failure_setup_does_not_block_codex(
     tmp_path: Path, monkeypatch
 ):

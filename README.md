@@ -276,7 +276,7 @@ CEO Agent Service 会把“知识库”分成三类：`CEO_WORKSPACE` 下的本�
 1. 把可检索的业务材料整理到 `CEO_WORKSPACE`，优先使用 Markdown、文本、可读的导出文档或已抽取正文的文件。
 2. 在 `.env` 里设置 `CEO_WORKSPACE=/path/to/workspace`。
 3. 对需要稳定执行的规则，放到明确路径，例如 `management/OA/审批原则.md`、`management/OA/日历规则.md`。
-4. 可选运行 graphify，让 agent 先读 `graphify-out/GRAPH_REPORT.md`，再用本地文件验证具体事实。
+4. 可选安装并运行 graphify。Pi 通过永久只读的 `graphify_read` adapter 执行 `query`、`explain`、`path`；未安装时 capability doctor 会明确报告 `missing_cli`，不会回退到 shell。
 5. 不要把真实知识库、会议记录、简历、审批材料放进 Git；这些内容应该留在本地 workspace 或被 Git 忽略的运行目录。
 
 运行时，agent 会按 Prompt 规则先判断是否需要背景信息；需要时优先检索本地文件，再使用外部知识入口。回复正文不会暴露本地路径、检索命令、工具输出或内部审计细节。
@@ -438,7 +438,9 @@ CEO_NOT_SEND_MESSAGE=1 .venv/bin/ceo-agent daily-task-maintenance --not-send-mes
 Pi 的能力边界由 `pi_extensions/ceo_agent_tools.ts` 定义：
 
 - 本地只读：`workspace_read`、`workspace_search`、`workspace_list`，并限制在配置的 read roots，包含 symlink realpath 防逃逸和 1 MiB 上限。
+- Graphify：`graphify_read` 只允许 `query`、`explain`、`path`，参数通过 `execFile` 传递且 Provider secret 不进入子进程。
 - DWS：`execute_reviewed_read` 与 `execute_reviewed_write`，每次按安装版 `dws schema --all --compact --format json` 的 effect metadata 校验；认证、安装、破坏性和需要人工确认的命令拒绝。
+- DingTalk 图片：普通 `mediaId` 下载会在隔离临时文件中完成并把图片像素直接返回 Pi；机器人 `downloadCode` 使用只读 bridge，签名 URL 不进入模型输出或审计摘要。
 - Friday Memory：配置可用时提供 reviewed read/write tools；Python bridge 使用官方 MCP client，认证 scope 由 API Key 身份 ACL 决定，Provider secret 不传给 bridge 子进程。
 - Exa：`web_search_exa`、`web_fetch_exa`，永久只读，并拒绝私网、localhost、metadata endpoint 和带内嵌凭证的 URL。
 - Xiaoqing：5 个 reviewed reads 与 `upload_interview_result`；非 dry-run 上传必须有明确完成状态和结果记录 ID，否则保持 unknown，不自动重放。
@@ -448,7 +450,7 @@ Pi 的能力边界由 `pi_extensions/ceo_agent_tools.ts` 定义：
 
 Pi 的原生 session JSONL 是运行审计。服务只保存 session ID 和每个 run 的 transcript 起止行。只读 Runner 使用 read allowlist；Direct Agent 只有在非 dry-run 且业务路径明确允许写入时才增加 reviewed write tools；工具全禁用的 WeChat 决策使用空 `--tools`。
 
-兼容命令 `doctor-mcp` 现在报告真实 Pi capability：reviewed DWS schema、Friday Memory、Exa、Xiaoqing、Lark 和 Nvwa 的 ready / missing auth / missing config 状态；它不会因为旧 Codex MCP 配置存在就宣称 Pi 可用：
+兼容命令 `doctor-mcp` 现在报告真实 Pi capability：reviewed DWS schema、Graphify、Friday Memory、Exa、Xiaoqing、Lark 和 Nvwa 的 ready / missing CLI / missing auth / missing config 状态；它不会因为旧 Codex MCP 配置存在就宣称 Pi 可用：
 
 ```bash
 .venv/bin/ceo-agent doctor-mcp --verify-live

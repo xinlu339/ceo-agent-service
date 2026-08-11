@@ -120,7 +120,7 @@ SETUP_WIZARD_STEPS: tuple[SetupStepDefinition, ...] = (
         id="mcp",
         title="Pi Reviewed Integrations",
         phase="Phase 2",
-        description="Verify the reviewed Memory, Exa, Xiaoqing, Lark, and Nvwa integration boundaries.",
+        description="Verify the reviewed Graphify, Memory, Exa, Xiaoqing, Lark, and Nvwa integration boundaries.",
         depends_on=["cli_components"],
         actions=[
             SetupAction(id="check_mcp", label="Check", step_id="mcp", kind="check"),
@@ -553,6 +553,7 @@ def check_setup_step(
         memory_url = report.get("memory_url")
         memory_api_key = report.get("memory_api_key")
         memory_tools = report.get("memory_tools")
+        graphify = report.get("graphify")
         xiaoqing = report.get("xiaoqing_interview")
         exa = report.get("exa")
         lark = report.get("lark")
@@ -562,6 +563,8 @@ def check_setup_step(
             "memory_url_configured": memory_url.ready,
             "memory_api_key_configured": memory_api_key.ready,
             "memory_tools_ready": memory_tools.ready,
+            "graphify_ready": graphify.ready,
+            "graphify_state": graphify.state,
             "xiaoqing_supported": xiaoqing.ready,
             "xiaoqing_state": xiaoqing.state,
             "exa_supported": exa.ready,
@@ -603,7 +606,7 @@ def check_setup_step(
             title="Pi Reviewed Integrations",
             status="done",
             summary=(
-                "Friday Memory and Exa reviewed tools are ready. Xiaoqing uses the "
+                "Graphify, Friday Memory, and Exa reviewed read tools are ready. Xiaoqing uses the "
                 f"reviewed bridge ({xiaoqing.state}); Lark uses the reviewed official "
                 f"CLI adapter ({lark.state}); Nvwa profile review is {nvwa.state}."
             ),
@@ -1179,6 +1182,8 @@ def _setup_service_config(
         "CEO_PI_XIAOQING_MCP_URL": "https://interview.hr.startask.net/mcp",
         "CEO_PI_XIAOQING_ACCESS_TOKEN": "",
         "CEO_PI_XIAOQING_BRIDGE_PATH": "",
+        "CEO_PI_DINGTALK_IMAGE_BRIDGE_PATH": "",
+        "CEO_GRAPHIFY_BINARY": "",
         "CEO_WORKSPACE": "workspace",
         "CEO_WORKER_DB": "$HOME/Library/Application Support/ceo-agent-service/auto-reply.sqlite3",
         "CEO_CORPUS_DIR": "data/corpus",

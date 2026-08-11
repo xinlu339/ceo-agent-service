@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import stat
@@ -34,6 +35,7 @@ def _fake_dws(tmp_path: Path, *, tools: list[dict], stdout: str = "{}") -> tuple
     binary = binary_dir / "dws"
     binary.write_text(
         """#!/usr/bin/env python3
+import base64
 import json
 import os
 import sys
@@ -58,6 +60,18 @@ record = {
 }
 with open(config["log_path"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\\n")
+image_base64 = os.environ.get("FAKE_DWS_IMAGE_BASE64")
+if image_base64:
+    output_index = args.index("--output") + 1
+    output_path = args[output_index]
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "wb") as handle:
+        handle.write(base64.b64decode(image_base64))
+    sys.stdout.write(json.dumps({
+        "localPath": output_path,
+        "downloadUrl": "https://signed.example/private-image",
+    }))
+    raise SystemExit(0)
 sys.stdout.write(config["stdout"])
 """,
         encoding="utf-8",
@@ -129,6 +143,39 @@ sys.stdout.write(config["stdout"])
     return binary, log_path
 
 
+def _fake_graphify(tmp_path: Path, binary_dir: Path) -> Path:
+    log_path = tmp_path / "fake-graphify-log.json"
+    binary = binary_dir / "graphify"
+    binary.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+record = {
+    "argv": ["graphify", *sys.argv[1:]],
+    "cwd": os.getcwd(),
+    "secrets": {
+        key: os.environ[key]
+        for key in (
+            "CEO_PI_API_KEY",
+            "OPENAI_API_KEY",
+            "AUTHORIZATION",
+            "PROVIDER_CLIENT_SECRET",
+        )
+        if key in os.environ
+    },
+}
+with open(os.environ["FAKE_GRAPHIFY_LOG"], "w", encoding="utf-8") as handle:
+    json.dump(record, handle)
+sys.stdout.write(os.environ.get("FAKE_GRAPHIFY_STDOUT", "{}"))
+""",
+        encoding="utf-8",
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    return log_path
+
+
 def _run_tool(
     tmp_path: Path,
     *,
@@ -149,6 +196,7 @@ def _run_tool(
         shortcuts=lark_shortcuts or {},
         stdout=lark_stdout,
     )
+    graphify_log_path = _fake_graphify(tmp_path, binary_dir)
     env = os.environ.copy()
     env.update(
         {
@@ -157,6 +205,7 @@ def _run_tool(
             "CEO_PI_ALLOWED_READ_ROOTS": str(tmp_path),
             "CEO_FEISHU_CLI_BINARY": str(lark_binary),
             "FAKE_LARK_CONFIG": str(tmp_path / "fake-lark.json"),
+            "FAKE_GRAPHIFY_LOG": str(graphify_log_path),
         }
     )
     env.update(extra_env or {})
@@ -229,12 +278,14 @@ def test_extension_registers_all_reviewed_capabilities_together(tmp_path: Path):
         [
             "document_upload",
             "download_attachment",
+            "download_dingtalk_image",
             "execute_reviewed_lark_read",
             "execute_reviewed_lark_write",
             "execute_reviewed_read",
             "execute_reviewed_write",
             "get_dashboard_stats",
             "get_interview_context",
+            "graphify_read",
             "list_candidate_interviews",
             "memory_get",
             "memory_recall",
@@ -251,6 +302,68 @@ def test_extension_registers_all_reviewed_capabilities_together(tmp_path: Path):
             "write_work_profile",
         ]
     )
+
+
+def test_graphify_read_executes_only_reviewed_operations_without_shell(
+    tmp_path: Path,
+):
+    marker = tmp_path / "must-not-exist"
+    query = f"dependency chain; touch {marker}"
+    result, _ = _run_tool(
+        tmp_path,
+        tool_name="graphify_read",
+        params={"operation": "query", "query": query},
+        extra_env={
+            "FAKE_GRAPHIFY_STDOUT": "reviewed graph result",
+            "CEO_PI_API_KEY": "pi-secret",
+            "OPENAI_API_KEY": "provider-secret",
+            "AUTHORIZATION": "Bearer provider-secret",
+        },
+    )
+
+    assert result["ok"] is True
+    assert marker.exists() is False
+    details = result["result"]["details"]
+    assert details["cli"] == "graphify"
+    assert details["effect"] == "read"
+    assert details["operation"] == "graphify query"
+    assert details["safeToConfirm"] is False
+    record = json.loads(
+        (tmp_path / "fake-graphify-log.json").read_text(encoding="utf-8")
+    )
+    assert record == {
+        "argv": ["graphify", "query", query],
+        "cwd": str(tmp_path),
+        "secrets": {},
+    }
+
+
+def test_graphify_read_validates_path_shape_and_control_characters(tmp_path: Path):
+    path_result, _ = _run_tool(
+        tmp_path / "path",
+        tool_name="graphify_read",
+        params={"operation": "path", "source": "A", "target": "B"},
+    )
+    invalid_shape, _ = _run_tool(
+        tmp_path / "shape",
+        tool_name="graphify_read",
+        params={"operation": "path", "query": "A to B"},
+    )
+    control_character, _ = _run_tool(
+        tmp_path / "control",
+        tool_name="graphify_read",
+        params={"operation": "explain", "query": "A\nB"},
+    )
+
+    assert path_result["ok"] is True
+    assert invalid_shape == {
+        "ok": False,
+        "error": "reviewed_graphify_arguments_invalid",
+    }
+    assert control_character == {
+        "ok": False,
+        "error": "reviewed_graphify_control_character",
+    }
 
 
 def _fake_xiaoqing_bridge(tmp_path: Path) -> tuple[Path, Path]:
@@ -287,6 +400,45 @@ response = {
     } if write else {},
 }
 json.dump(response, sys.stdout)
+""",
+        encoding="utf-8",
+    )
+    return bridge, log_path
+
+
+def _fake_dingtalk_image_bridge(tmp_path: Path) -> tuple[Path, Path]:
+    bridge = tmp_path / "fake-dingtalk-image-bridge.py"
+    log_path = tmp_path / "fake-dingtalk-image-bridge-log.json"
+    bridge.write_text(
+        """import base64
+import json
+import os
+import sys
+
+request = json.load(sys.stdin)
+with open(os.environ["FAKE_DINGTALK_IMAGE_LOG"], "w", encoding="utf-8") as handle:
+    json.dump({
+        "request": request,
+        "provider_secrets": {
+            key: os.environ[key]
+            for key in ("CEO_PI_API_KEY", "OPENAI_API_KEY", "AUTHORIZATION")
+            if key in os.environ
+        },
+        "robot_name": os.environ.get("CEO_DING_ROBOT_NAME", ""),
+    }, handle)
+image = b"\\x89PNG\\r\\n\\x1a\\nbridge-image"
+json.dump({
+    "ok": True,
+    "tool": "download_dingtalk_image",
+    "result": {
+        "data": base64.b64encode(image).decode("ascii"),
+        "mime_type": "image/png",
+        "byte_length": len(image),
+    },
+    "effect": "read",
+    "confirmed": False,
+    "receipt": {},
+}, sys.stdout)
 """,
         encoding="utf-8",
     )
@@ -393,6 +545,64 @@ def test_reviewed_extension_uses_argv_without_shell_and_strips_provider_secrets(
     assert records == [{"argv": argv, "secrets": {}}]
 
 
+def test_reviewed_dws_image_download_returns_pixels_and_deletes_temp_file(
+    tmp_path: Path,
+):
+    png = b"\x89PNG\r\n\x1a\nreviewed-image"
+    argv = [
+        "dws",
+        "chat",
+        "message",
+        "download-media",
+        "--type",
+        "mediaId",
+        "--resource-id",
+        "@image-1",
+        "--message-id",
+        "message-1",
+        "--open-conversation-id",
+        "conversation-1",
+        "--output",
+        "<local-path>",
+        "--format",
+        "json",
+        "--yes",
+    ]
+    result, log_path = _run_tool(
+        tmp_path,
+        tool_name="execute_reviewed_read",
+        params={"argv": argv},
+        tools=[_metadata("chat message download-media", "read")],
+        extra_env={
+            "FAKE_DWS_IMAGE_BASE64": base64.b64encode(png).decode(),
+            "CEO_PI_API_KEY": "pi-secret",
+            "OPENAI_API_KEY": "provider-secret",
+            "AUTHORIZATION": "Bearer provider-secret",
+        },
+    )
+
+    assert result["ok"] is True
+    content = result["result"]["content"]
+    assert content[0]["type"] == "text"
+    assert "private-image" not in content[0]["text"]
+    assert "localPath" not in content[0]["text"]
+    assert content[1] == {
+        "type": "image",
+        "data": base64.b64encode(png).decode(),
+        "mimeType": "image/png",
+    }
+    details = result["result"]["details"]
+    assert details["effect"] == "read"
+    assert details["imageAttached"] is True
+    assert details["imageMimeType"] == "image/png"
+    record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+    output_path = Path(record["argv"][record["argv"].index("--output") + 1])
+    assert output_path.name == "downloaded-image"
+    assert str(output_path) != "<local-path>"
+    assert output_path.exists() is False
+    assert record["secrets"] == {}
+
+
 def test_xiaoqing_extension_strips_provider_secrets_and_keeps_reviewed_token(
     tmp_path: Path,
 ):
@@ -424,6 +634,42 @@ def test_xiaoqing_extension_strips_provider_secrets_and_keeps_reviewed_token(
     }
     assert record["provider_secrets"] == {}
     assert record["xiaoqing_token_present"] is True
+
+
+def test_dingtalk_image_extension_returns_bridge_pixels_without_signed_url(
+    tmp_path: Path,
+):
+    bridge, log_path = _fake_dingtalk_image_bridge(tmp_path)
+    result, _ = _run_tool(
+        tmp_path,
+        tool_name="download_dingtalk_image",
+        params={"download_code": "download-code-1"},
+        extra_env={
+            "CEO_PI_PYTHON_BINARY": sys.executable,
+            "CEO_PI_DINGTALK_IMAGE_BRIDGE_PATH": str(bridge),
+            "FAKE_DINGTALK_IMAGE_LOG": str(log_path),
+            "CEO_DING_ROBOT_NAME": "Friday Robot",
+            "CEO_PI_API_KEY": "provider-secret",
+            "OPENAI_API_KEY": "provider-secret",
+            "AUTHORIZATION": "Bearer provider-secret",
+        },
+    )
+
+    assert result["ok"] is True
+    content = result["result"]["content"]
+    assert content[0]["type"] == "text"
+    assert content[1]["type"] == "image"
+    assert content[1]["mimeType"] == "image/png"
+    assert result["result"]["details"]["bridge"] == "dingtalk_image"
+    record = json.loads(log_path.read_text(encoding="utf-8"))
+    assert record == {
+        "request": {
+            "tool": "download_dingtalk_image",
+            "arguments": {"download_code": "download-code-1"},
+        },
+        "provider_secrets": {},
+        "robot_name": "Friday Robot",
+    }
 
 
 def test_xiaoqing_extension_requires_completed_receipt_for_real_write(

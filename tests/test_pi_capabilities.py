@@ -9,6 +9,7 @@ from app.pi_capabilities import (
     probe_pi_capabilities,
 )
 from app.pi_runner import (
+    GRAPHIFY_BINARY_ENV,
     PI_API_ENV,
     PI_API_KEY_ENV,
     PI_BASE_URL_ENV,
@@ -55,6 +56,7 @@ def _runtime_paths(tmp_path: Path) -> dict[str, str]:
         PI_API_ENV: "openai-responses",
         PI_BASE_URL_ENV: "https://gateway.example/v1",
         PI_API_KEY_ENV: "provider-secret",
+        GRAPHIFY_BINARY_ENV: str(tmp_path / "bin" / "graphify"),
     }
 
 
@@ -80,6 +82,10 @@ def test_capability_report_uses_real_reviewed_boundaries_without_echoing_keys(
         lambda _binary: (True, "Official schema ready"),
     )
     monkeypatch.setattr(
+        "app.pi_capabilities._reviewed_graphify_status",
+        lambda _binary: (True, "Graphify ready"),
+    )
+    monkeypatch.setattr(
         "app.pi_capabilities.probe_pi_model_resolution",
         lambda **_kwargs: (True, "Resolved offline"),
     )
@@ -100,6 +106,7 @@ def test_capability_report_uses_real_reviewed_boundaries_without_echoing_keys(
     assert report.runtime_ready is True
     assert report.get("reviewed_extension").ready is True
     assert report.get("dws_reviewed_tools").ready is True
+    assert report.get("graphify").ready is True
     assert report.get("memory_tools").ready is True
     assert report.get("xiaoqing_interview").state == "ready"
     assert report.get("xiaoqing_interview").ready is True
@@ -138,6 +145,10 @@ def test_capability_report_requires_provider_key_but_not_optional_memory(
     monkeypatch.setattr(
         "app.pi_capabilities._reviewed_lark_status",
         lambda _binary: (False, "lark-cli executable is not installed"),
+    )
+    monkeypatch.setattr(
+        "app.pi_capabilities._reviewed_graphify_status",
+        lambda _binary: (False, "graphify executable is not installed"),
     )
     monkeypatch.setattr(
         "app.pi_capabilities.probe_pi_model_resolution",

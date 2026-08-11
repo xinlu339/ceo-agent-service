@@ -18,6 +18,7 @@ from app.weekly_okr_report import (
     ManagerReportAnalysis,
     PublishedDocument,
     WeeklyOkrAnalysis,
+    build_weekly_okr_prompt,
     _manager_scorecards,
     _extract_report_payload,
     refresh_company_okr_archive,
@@ -27,6 +28,28 @@ from app.weekly_okr_report import (
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def test_weekly_okr_prompt_preserves_reviewed_codex_read_capabilities(tmp_path):
+    prompt = build_weekly_okr_prompt(
+        source_path=tmp_path / "okr.json",
+        managers=[
+            ManagerIdentity(
+                name="甲",
+                title="VP",
+                user_id="u-1",
+                open_dingtalk_id="open-u-1",
+            )
+        ],
+        period_label="2026 Q3",
+        week_start=datetime(2026, 8, 3, tzinfo=SHANGHAI).date(),
+        week_end=datetime(2026, 8, 9, tzinfo=SHANGHAI).date(),
+    )
+
+    assert "reviewed Lark read" in prompt
+    assert "可使用 Exa" in prompt
+    assert "使用 Xiaoqing read" in prompt
+    assert "Lark、Xiaoqing 和 Exa 当前不受支持" not in prompt
 
 
 class FakeStore:

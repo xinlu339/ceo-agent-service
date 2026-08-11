@@ -41,11 +41,12 @@ DIRECT_AGENT_DEVELOPER_INSTRUCTIONS = """You are the Direct Agent for one queued
 
 - The Agent owns evidence reads, business judgment, direct execution and verification.
 - Use raw identifiers, references, exact read commands, and live tool results. Do not rely on service-side target assumptions.
-- Complete authorized work only through the installed reviewed Pi tools. Use workspace_read/workspace_search/workspace_list for local evidence, execute_reviewed_read/execute_reviewed_write for reviewed DWS operations, execute_reviewed_lark_read/execute_reviewed_lark_write for reviewed Lark operations, the explicitly registered Memory tools for Friday Memory, Exa for public web reads, and Xiaoqing tools for reviewed interview operations when configured. Arbitrary bash, edit, write, authentication, package installation, destructive commands, and unregistered MCP capabilities are unavailable. Do not produce plans, action arrays, or requests for service execution.
+- Complete authorized work only through the installed reviewed Pi tools. Use workspace_read/workspace_search/workspace_list for local evidence, graphify_read for the installed read-only Graphify query/explain/path operations, download_dingtalk_image for DingTalk robot image download codes, execute_reviewed_read/execute_reviewed_write for reviewed DWS operations, execute_reviewed_lark_read/execute_reviewed_lark_write for reviewed Lark operations, the explicitly registered Memory tools for Friday Memory, Exa for public web reads, and Xiaoqing tools for reviewed interview operations when configured. Arbitrary bash, edit, write, authentication, package installation, destructive commands, and unregistered MCP capabilities are unavailable. Do not produce plans, action arrays, or requests for service execution.
 - Return only one JSON result with outcome, summary, and error. The outcome is completed, no_action, needs_human, or failed; summary is a nonempty factual description; error is always an object with code, retryable, and authorization_required, using an empty code and false flags when there is no error.
 - Never run authentication login, reset, or logout commands. Authentication readiness belongs to the service gate.
 - Never expose credentials, tokens, cookies, authorization codes, signed URLs, or local credential paths.
 - Read an applicable installed SKILL.md through workspace_read before using a business capability. The reviewed Memory tools are user_get, memory_recall, memory_get, timeline_get, memory_write, and document_upload when configured. Never pass user_id, graph_id, or graph_ids; authenticated ACL owns scope. Exa is read-only. Xiaoqing exposes five reads plus upload_interview_result; put native Xiaoqing MCP fields inside its arguments object, use dry_run=true when only validating, and never claim a real upload without a completed result-record receipt. Lark uses official lark-cli risk metadata: read and ordinary write are available, high-risk-write and auth/config/update commands are always rejected.
+- For a DingTalk image material with a media ID, run the supplied reviewed `dws chat message download-media` command. The adapter replaces `<local-path>` with an isolated temporary file, returns the image pixels directly to this turn, and deletes the file. For a robot `download_code`, call download_dingtalk_image with that exact code; the bridge resolves and fetches the image without exposing its signed URL. Judge the image only after the tool result includes an image attachment; never claim to have seen an image from an ID, code, filename, URL, or localPath text alone.
 - When an OA action is performed, include oa_action_receipt with the exact process_instance_id, task_id, action, remark, and put the live read-back result in oa_action_receipt.result. Use null when no OA action was performed.
 - After any confirmed OA action (approve, reject, return, or comment), identify the OA originator from the approval detail and notify that applicant through DingTalk before returning AgentResult. State the actual action and, when relevant, the next node or material needed. Use the real originator identifier; do not notify someone merely because they forwarded the request. Verify the send was accepted. If the originator cannot be resolved or notification fails, report that concrete exception in the final summary; do not invent delivery.
 - After an OA review that does not approve, reject, or return the approval, notify that same applicant through DingTalk before returning AgentResult. Say that the approval remains pending, give the concrete missing material or other factual reason, and state the next action needed. Verify the send was accepted; do not silently rely on an OA comment or a group reminder as notice to the applicant.
@@ -60,6 +61,8 @@ _PI_READ_ONLY_TOOL_NAMES = frozenset(
         "workspace_read",
         "workspace_search",
         "workspace_list",
+        "graphify_read",
+        "download_dingtalk_image",
         "execute_reviewed_read",
         "execute_reviewed_lark_read",
         "user_get",
@@ -1063,6 +1066,39 @@ def _pi_tool_effect_metadata(
     tool_name: str,
     arguments: object,
 ) -> dict[str, object]:
+    if tool_name == "graphify_read":
+        operation = ""
+        if isinstance(arguments, dict):
+            operation = str(arguments.get("operation") or "").strip().casefold()
+        canonical = json.dumps(
+            {"tool": tool_name, "arguments": arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return {
+            "effect": EffectKind.READ_ONLY.value,
+            "native_cli": "graphify",
+            "operation": f"graphify {operation}".strip(),
+            "command_digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "target_identifiers": {},
+        }
+    if tool_name == "download_dingtalk_image":
+        canonical = json.dumps(
+            {"tool": tool_name, "arguments": arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return {
+            "effect": EffectKind.READ_ONLY.value,
+            "native_cli": "dws",
+            "operation": "robot message image download",
+            "command_digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "target_identifiers": {},
+        }
     if tool_name in _PI_XIAOQING_READ_TOOLS | {"upload_interview_result"}:
         normalized_arguments = _pi_nested_tool_arguments(arguments)
         dry_run = (

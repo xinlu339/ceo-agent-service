@@ -34,12 +34,17 @@ the reviewed extension:
 
 1. `workspace_read`, `workspace_search`, and `workspace_list` inside configured
    read roots, with realpath/symlink escape checks and bounded output.
-2. `execute_reviewed_read` for DWS commands whose exact installed schema effect
+2. `graphify_read` for the installed Graphify `query`, `explain`, and `path`
+   operations only. Pi never receives a general shell fallback.
+3. `execute_reviewed_read` for DWS commands whose exact installed schema effect
    is `read`.
-3. `execute_reviewed_write` only on authorized non-dry-run Direct Agent paths,
+4. `download_dingtalk_image` for DingTalk robot image download codes; media-ID
+   downloads are also converted into image tool content by the reviewed DWS
+   adapter, without exposing signed URLs.
+5. `execute_reviewed_write` only on authorized non-dry-run Direct Agent paths,
    and only when installed metadata classifies the exact command as a
    non-destructive write that does not require product-level user confirmation.
-4. Friday Memory read/write tools when the reviewed bridge, Connector URL, and
+6. Friday Memory read/write tools when the reviewed bridge, Connector URL, and
    local API key are configured. Memory scope comes from authenticated ACL;
    `user_id`, `graph_id`, and `graph_ids` are forbidden.
 

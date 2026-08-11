@@ -397,12 +397,15 @@ def test_task_agent_prompt_requires_xiaoqing_before_candidate_status_follow_up()
 
     prompt = build_task_agent_prompt(item, "候选项目:\n[]\n\n近期 follow-up 候选:\n[]")
 
-    assert "xiaoqing_interview" in prompt
-    assert "没有安装 Xiaoqing bridge" in prompt
-    assert "不得调用或声称调用" in prompt
-    assert "不得关闭/抑制 TODO" in prompt
-    assert "不得断言候选人终态" in prompt
+    assert "reviewed Xiaoqing Pi read tools" in prompt
+    assert "search_candidates" in prompt
+    assert "get_interview_context" in prompt
+    assert "list_candidate_interviews" in prompt
+    assert "小青已给出终态时，关闭/抑制对应 TODO" in prompt
+    assert "未配置、授权失败或运行失败" in prompt
+    assert "不要断言候选人终态" in prompt
     assert "不要创建要求 HR 代查小青的状态 follow-up" in prompt
+    assert "没有安装 Xiaoqing bridge" not in prompt
 
 
 def test_process_work_item_accepts_lily_owner_correction_reply(tmp_path):

@@ -158,6 +158,8 @@ def test_prompt_contains_full_transcript_and_behavioral_contracts():
     assert "Derek 的观点输出解读" in prompt
     assert "只能解释 Derek 在会议中明确表达的观点" in prompt
     assert "不能用历史信息发明或替换 Derek 的立场" in prompt
+    assert "reviewed memory_recall" in prompt
+    assert "未经 memory_recall 核验时" in prompt
     assert "能只靠会议证据解释时，historical_sources 必须为空数组" in prompt
     assert "必须逐字填写 `/configured/work_profile.md`" in prompt
     assert "不得改写、加标题或写成说明性文字" in prompt
@@ -389,6 +391,9 @@ def test_runner_always_starts_fresh_and_uses_schema(tmp_path: Path):
     assert "--offline" in captured["command"]
     assert "--no-context-files" in captured["command"]
     assert "--output-schema" not in captured["command"]
+    enabled_tools = captured["command"][captured["command"].index("--tools") + 1]
+    assert "execute_reviewed_read" in enabled_tools.split(",")
+    assert "memory_recall" in enabled_tools.split(",")
     assert "meeting_alignment_decision.schema.json" not in " ".join(
         captured["command"]
     )
@@ -461,7 +466,7 @@ def test_runner_clears_prior_audit_metadata_before_executor_failure(tmp_path: Pa
     assert runner.last_audit_tool_events == []
 
 
-def test_runner_rejects_memory_history_even_when_legacy_event_is_present(tmp_path: Path):
+def test_runner_accepts_historical_sources_with_memory_recall_audit(tmp_path: Path):
     payload = derek_view_payload(historical_sources=["历史上线案例"])
 
     def executor(command, prompt):
@@ -483,11 +488,11 @@ def test_runner_rejects_memory_history_even_when_legacy_event_is_present(tmp_pat
         )
 
     runner = MeetingAlignmentPiRunner(workspace=tmp_path, executor=executor)
-    with pytest.raises(
-        RuntimeError,
-        match="Pi did not return a valid MeetingAlignmentDecision",
-    ):
-        runner.decide(prompt="decide")
+    assert runner.decide(prompt="decide").action == "send"
+    assert any(
+        "memory_recall" in event.get("tool", "")
+        for event in runner.last_audit_tool_events
+    )
 
 
 def test_runner_accepts_configured_profile_as_unqueried_history(tmp_path: Path):

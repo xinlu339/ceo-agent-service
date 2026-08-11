@@ -1054,6 +1054,9 @@ def test_direct_agent_requires_oa_applicant_notification_after_confirmed_action(
     assert "does not approve, reject, or return the approval" in instructions
     assert "reviewed Memory tools" in instructions
     assert "Exa is read-only" in instructions
+    assert "graphify_read" in instructions
+    assert "returns the image pixels directly to this turn" in instructions
+    assert "download_dingtalk_image" in instructions
     assert "Xiaoqing exposes five reads" in instructions
     assert "official lark-cli risk metadata" in instructions
 
@@ -1081,7 +1084,7 @@ def test_pi_reconciliation_uses_only_reviewed_read_and_binds_live_proof(
     command = executor.commands[0]
     tools = command[command.index("--tools") + 1]
     assert tools == (
-        "workspace_read,workspace_search,workspace_list,execute_reviewed_read,"
+        "workspace_read,workspace_search,workspace_list,graphify_read,download_dingtalk_image,execute_reviewed_read,"
         "execute_reviewed_lark_read,"
         "user_get,memory_recall,memory_get,timeline_get,web_search_exa,web_fetch_exa,"
         "search_candidates,get_dashboard_stats,get_interview_context,"
@@ -1377,7 +1380,7 @@ def test_read_only_run_uses_native_tools_with_never_approval_policy(
 
     command_text = " ".join(executor.commands[0])
     assert executor.commands[0][executor.commands[0].index("--tools") + 1] == (
-        "workspace_read,workspace_search,workspace_list,execute_reviewed_read,"
+        "workspace_read,workspace_search,workspace_list,graphify_read,download_dingtalk_image,execute_reviewed_read,"
         "execute_reviewed_lark_read,"
         "user_get,memory_recall,memory_get,timeline_get,web_search_exa,web_fetch_exa,"
         "search_candidates,get_dashboard_stats,get_interview_context,"

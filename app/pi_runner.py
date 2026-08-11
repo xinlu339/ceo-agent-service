@@ -33,7 +33,9 @@ PI_EXA_BRIDGE_PATH_ENV = "CEO_PI_EXA_BRIDGE_PATH"
 PI_XIAOQING_MCP_URL_ENV = "CEO_PI_XIAOQING_MCP_URL"
 PI_XIAOQING_ACCESS_TOKEN_ENV = "CEO_PI_XIAOQING_ACCESS_TOKEN"
 PI_XIAOQING_BRIDGE_PATH_ENV = "CEO_PI_XIAOQING_BRIDGE_PATH"
+PI_DINGTALK_IMAGE_BRIDGE_PATH_ENV = "CEO_PI_DINGTALK_IMAGE_BRIDGE_PATH"
 PI_WORK_PROFILE_PATH_ENV = "CEO_PI_WORK_PROFILE_PATH"
+GRAPHIFY_BINARY_ENV = "CEO_GRAPHIFY_BINARY"
 
 DEFAULT_PI_PROVIDER = "openai"
 DEFAULT_PI_MODEL = "gpt-5.5"
@@ -58,6 +60,8 @@ READ_ONLY_PI_TOOLS = (
     "workspace_read",
     "workspace_search",
     "workspace_list",
+    "graphify_read",
+    "download_dingtalk_image",
     "execute_reviewed_read",
     "execute_reviewed_lark_read",
     "user_get",
@@ -288,6 +292,13 @@ def pi_xiaoqing_bridge_path() -> Path:
     if configured:
         return Path(os.path.expandvars(configured)).expanduser()
     return repo_root() / "app" / "pi_xiaoqing_bridge.py"
+
+
+def pi_dingtalk_image_bridge_path() -> Path:
+    configured = os.environ.get(PI_DINGTALK_IMAGE_BRIDGE_PATH_ENV, "").strip()
+    if configured:
+        return Path(os.path.expandvars(configured)).expanduser()
+    return repo_root() / "app" / "pi_dingtalk_image_bridge.py"
 
 
 def pi_allowed_read_roots(workspace: Path) -> tuple[Path, ...]:
@@ -524,6 +535,9 @@ class PiRunner:
             or DEFAULT_PI_EXA_MCP_URL
         )
         env[PI_XIAOQING_BRIDGE_PATH_ENV] = str(pi_xiaoqing_bridge_path())
+        env[PI_DINGTALK_IMAGE_BRIDGE_PATH_ENV] = str(
+            pi_dingtalk_image_bridge_path()
+        )
         env[PI_XIAOQING_MCP_URL_ENV] = (
             os.environ.get(PI_XIAOQING_MCP_URL_ENV, "").strip()
             or DEFAULT_PI_XIAOQING_MCP_URL
