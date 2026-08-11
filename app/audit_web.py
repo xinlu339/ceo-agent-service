@@ -2670,8 +2670,7 @@ def _render_agent_config(*, saved: bool = False) -> str:
         "Configured" if xiaoqing_token_configured else "Not configured"
     )
     model_catalog = pi_builtin_model_catalog(Path(cli_value))
-    provider_picker = _pi_provider_picker(provider, model_catalog)
-    model_picker = _pi_model_picker(provider, model, model_catalog)
+    model_picker = _pi_global_model_picker(provider, model, model_catalog)
     model_catalog_json = json.dumps(
         model_catalog,
         ensure_ascii=False,
@@ -2699,25 +2698,14 @@ def _render_agent_config(*, saved: bool = False) -> str:
                 cli_value,
                 name="pi_cli_path",
             ),
-            _agent_config_picker_row(
-                "Provider",
-                picker_html=provider_picker,
-                input_id="pi-provider-input",
-                input_name="pi_provider",
-                value=provider,
-                hint="选择 Pi 内置 Provider 会自动填入；也可以直接输入公司网关或自定义 Provider。",
-            ),
-            _agent_config_picker_row(
-                "Model",
+            _agent_config_model_row(
                 picker_html=model_picker,
-                input_id="pi-model-input",
-                input_name="pi_model",
                 value=model,
-                hint=(
-                    "选择内置模型会自动带出 API protocol 和官方 Base URL；"
-                    "下方输入框仍可填写网关提供的自定义模型 ID。"
-                ),
-                hint_id="pi-model-hint",
+            ),
+            _agent_config_text_row(
+                "Provider（自动填充/可自定义）",
+                provider,
+                name="pi_provider",
             ),
             _agent_config_text_row(
                 "Model metadata",
@@ -2794,7 +2782,8 @@ def _render_agent_config(*, saved: bool = False) -> str:
         "只应配置可信 HTTPS endpoint；HTTP 仅允许本机 loopback。"
         "匹配 Pi 内置模型和协议时会保留其 reasoning、图片、上下文及输出能力；"
         "只有真正的自定义模型或协议才生成独立模型定义。"
-        "页面可以直接选择 Pi 内置 Provider 和模型，同时保留自定义输入。"
+        "页面可以跨 Provider 搜索并选择 Pi 内置模型；选择后自动填写 Provider、"
+        "模型 ID、协议和官方 Base URL，同时保留自定义输入。"
         "未填写 Base URL 时，API protocol 必须与 Pi 内置模型的真实协议一致；"
         "不一致的配置会在保存前拒绝，避免页面配置与实际请求协议不同。"
         "保存后新启动的 Agent 调用立即使用新配置。</p>"
@@ -2834,43 +2823,47 @@ _PI_PROVIDER_LABELS = {
 }
 
 
-def _pi_provider_picker(
-    provider: str,
-    catalog: Mapping[str, list[dict[str, object]]],
-) -> str:
-    options = ['<option value="">选择内置 Provider…</option>']
-    priority = {"openai": 0, "deepseek": 1, "anthropic": 2, "google": 3}
-    for value in sorted(
-        catalog,
-        key=lambda item: (priority.get(item, 100), item.casefold()),
-    ):
-        display = _PI_PROVIDER_LABELS.get(value, value.replace("-", " ").title())
-        selected = " selected" if value == provider else ""
-        options.append(
-            f'<option value="{escape(value)}"{selected}>'
-            f"{escape(display)} ({escape(value)})</option>"
-        )
-    return (
-        '<select id="pi-provider-preset" aria-label="选择内置 Provider">'
-        + "".join(options)
-        + "</select>"
-    )
-
-
-def _pi_model_picker(
+def _pi_global_model_picker(
     provider: str,
     model: str,
     catalog: Mapping[str, list[dict[str, object]]],
 ) -> str:
     options = ['<option value="">选择内置模型…</option>']
-    for item in catalog.get(provider, []):
-        model_id = str(item["id"])
-        name = str(item["name"])
-        selected = " selected" if model_id == model else ""
-        options.append(
-            f'<option value="{escape(model_id)}"{selected}>'
-            f"{escape(name)} ({escape(model_id)})</option>"
+    priority = {"openai": 0, "deepseek": 1, "anthropic": 2, "google": 3}
+    option_index = 0
+    for provider_id in sorted(
+        catalog,
+        key=lambda item: (priority.get(item, 100), item.casefold()),
+    ):
+        display = _PI_PROVIDER_LABELS.get(
+            provider_id,
+            provider_id.replace("-", " ").title(),
         )
+        provider_options: list[str] = []
+        for item in catalog[provider_id]:
+            model_id = str(item["id"])
+            name = str(item["name"])
+            selected = (
+                " selected"
+                if provider_id == provider and model_id == model
+                else ""
+            )
+            option_index += 1
+            provider_options.append(
+                f'<option value="model-{option_index}"{selected} '
+                f'data-provider="{escape(provider_id)}" '
+                f'data-model-id="{escape(model_id)}" '
+                f'data-api="{escape(str(item["api"]))}" '
+                f'data-base-url="{escape(str(item["baseUrl"]))}">'
+                f"{escape(display)} · {escape(name)} ({escape(model_id)})"
+                "</option>"
+            )
+        if provider_options:
+            options.append(
+                f'<optgroup label="{escape(display)} ({escape(provider_id)})">'
+                + "".join(provider_options)
+                + "</optgroup>"
+            )
     return (
         '<select id="pi-model-preset" aria-label="选择内置模型">'
         + "".join(options)
@@ -2878,25 +2871,24 @@ def _pi_model_picker(
     )
 
 
-def _agent_config_picker_row(
-    label: str,
+def _agent_config_model_row(
     *,
     picker_html: str,
-    input_id: str,
-    input_name: str,
     value: str,
-    hint: str,
-    hint_id: str = "",
 ) -> str:
-    hint_attribute = f' id="{escape(hint_id)}"' if hint_id else ""
     return (
-        f"<tr><td>{escape(label)}</td><td>"
+        "<tr><td>Model</td><td>"
         '<div class="config-model-picker">'
+        '<input class="config-value-input" id="pi-model-search" type="search" '
+        'placeholder="搜索全部 Pi 模型，例如 deepseek、gpt、claude" '
+        'aria-label="搜索内置模型">'
         f"{picker_html}"
-        f'<input class="config-value-input" id="{escape(input_id)}" '
-        f'type="text" name="{escape(input_name)}" value="{escape(value)}" '
-        f'aria-label="{escape(label)}">'
-        f'<p class="config-model-hint"{hint_attribute}>{escape(hint)}</p>'
+        f'<input class="config-value-input" id="pi-model-input" type="text" '
+        f'name="pi_model" value="{escape(value)}" aria-label="Model ID">'
+        '<p class="config-model-hint" id="pi-model-search-status">'
+        "输入关键词可以跨 Provider 搜索全部 Pi 内置模型；也可以直接填写自定义模型 ID。"
+        "</p>"
+        '<p class="config-model-hint" id="pi-model-hint"></p>'
         "</div></td></tr>"
     )
 
@@ -2905,15 +2897,17 @@ def _pi_model_picker_script() -> str:
     return r"""
 (() => {
   const catalogNode = document.getElementById("pi-model-catalog");
-  const providerPreset = document.getElementById("pi-provider-preset");
-  const providerInput = document.getElementById("pi-provider-input");
+  const providerInput = document.querySelector('input[name="pi_provider"]');
+  const modelSearch = document.getElementById("pi-model-search");
   const modelPreset = document.getElementById("pi-model-preset");
   const modelInput = document.getElementById("pi-model-input");
+  const searchStatus = document.getElementById("pi-model-search-status");
   const modelHint = document.getElementById("pi-model-hint");
   const apiSelect = document.getElementById("pi-api");
   const baseUrlInput = document.querySelector('input[name="pi_base_url"]');
-  if (!catalogNode || !providerPreset || !providerInput || !modelPreset ||
-      !modelInput || !modelHint || !apiSelect || !baseUrlInput) return;
+  if (!catalogNode || !providerInput || !modelSearch || !modelPreset ||
+      !modelInput || !searchStatus || !modelHint || !apiSelect ||
+      !baseUrlInput) return;
 
   let catalog = {};
   try { catalog = JSON.parse(catalogNode.textContent || "{}"); } catch (_) { return; }
@@ -2925,16 +2919,18 @@ def _pi_model_picker_script() -> str:
     if (number >= 1000) return `${Math.round(number / 1000)}K`;
     return String(number);
   };
-  const modelsFor = (provider) => Array.isArray(catalog[provider]) ? catalog[provider] : [];
-  const selectedModel = () => modelsFor(providerInput.value.trim()).find(
-    (item) => item.id === modelInput.value.trim()
-  );
+  const modelOptions = () => Array.from(modelPreset.querySelectorAll("option[data-provider]"));
+  const selectedOption = () => modelPreset.selectedOptions[0]?.dataset?.provider
+    ? modelPreset.selectedOptions[0] : null;
+  const catalogModel = (option) => {
+    if (!option) return null;
+    const models = Array.isArray(catalog[option.dataset.provider])
+      ? catalog[option.dataset.provider] : [];
+    return models.find((item) => item.id === option.dataset.modelId) || null;
+  };
   const updateHint = (item) => {
     if (!item) {
-      const count = modelsFor(providerInput.value.trim()).length;
-      modelHint.textContent = count
-        ? `这个 Provider 有 ${count} 个 Pi 内置模型；也可以直接输入自定义模型 ID。`
-        : "当前是自定义 Provider/模型配置，请手工确认 API protocol 和 Base URL。";
+      modelHint.textContent = "当前是自定义模型配置，请手工确认 Provider、API protocol 和 Base URL。";
       return;
     }
     modelHint.textContent = [
@@ -2945,58 +2941,53 @@ def _pi_model_picker_script() -> str:
       item.images ? "支持图片" : "仅文本",
     ].join(" · ");
   };
-  const rebuildModels = (preferredModel) => {
-    const models = modelsFor(providerInput.value.trim());
-    modelPreset.replaceChildren();
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = models.length ? "选择内置模型…" : "没有匹配的内置模型";
-    modelPreset.appendChild(placeholder);
-    for (const item of models) {
-      const option = document.createElement("option");
-      option.value = item.id;
-      option.textContent = `${item.name} (${item.id})`;
-      modelPreset.appendChild(option);
-    }
-    const match = models.find((item) => item.id === preferredModel);
-    modelPreset.value = match ? match.id : "";
-    updateHint(match);
-  };
-  const syncProviderPreset = () => {
-    const provider = providerInput.value.trim();
-    providerPreset.value = Object.prototype.hasOwnProperty.call(catalog, provider)
-      ? provider : "";
-  };
   const syncModelPreset = () => {
-    const item = selectedModel();
-    modelPreset.value = item ? item.id : "";
-    updateHint(item);
+    const match = modelOptions().find(
+      (option) => option.dataset.provider === providerInput.value.trim() &&
+        option.dataset.modelId === modelInput.value.trim()
+    );
+    modelPreset.value = match ? match.value : "";
+    updateHint(catalogModel(match));
+  };
+  const filterModels = () => {
+    const query = modelSearch.value.trim().toLocaleLowerCase();
+    let visibleCount = 0;
+    for (const group of modelPreset.querySelectorAll("optgroup")) {
+      let groupCount = 0;
+      for (const option of group.querySelectorAll("option")) {
+        const haystack = [
+          option.textContent,
+          option.dataset.provider,
+          option.dataset.modelId,
+        ].join(" ").toLocaleLowerCase();
+        option.hidden = Boolean(query) && !haystack.includes(query);
+        if (!option.hidden) groupCount += 1;
+      }
+      group.hidden = groupCount === 0;
+      visibleCount += groupCount;
+    }
+    if (selectedOption()?.hidden) modelPreset.value = "";
+    searchStatus.textContent = query
+      ? `找到 ${visibleCount} 个匹配模型；从下拉框选择后会自动填写 Provider、协议和 Base URL。`
+      : `共 ${modelOptions().length} 个 Pi 内置模型；也可以直接填写自定义模型 ID。`;
   };
 
-  providerPreset.addEventListener("change", () => {
-    if (!providerPreset.value) return;
-    providerInput.value = providerPreset.value;
-    modelInput.value = "";
-    rebuildModels("");
-  });
+  modelSearch.addEventListener("input", filterModels);
   modelPreset.addEventListener("change", () => {
-    const item = modelsFor(providerInput.value.trim()).find(
-      (candidate) => candidate.id === modelPreset.value
-    );
+    const option = selectedOption();
+    const item = catalogModel(option);
     if (!item) return;
-    modelInput.value = item.id;
+    providerInput.value = option.dataset.provider;
+    modelInput.value = option.dataset.modelId;
     apiSelect.value = item.api;
     baseUrlInput.value = item.baseUrl || "";
     updateHint(item);
   });
-  providerInput.addEventListener("input", () => {
-    syncProviderPreset();
-    rebuildModels(modelInput.value.trim());
-  });
+  providerInput.addEventListener("input", syncModelPreset);
   modelInput.addEventListener("input", syncModelPreset);
 
-  syncProviderPreset();
-  rebuildModels(modelInput.value.trim());
+  filterModels();
+  syncModelPreset();
 })();
 """
 

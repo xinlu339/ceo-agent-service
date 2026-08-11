@@ -83,7 +83,7 @@ def test_pi_agent_config_page_never_renders_existing_api_key(
     assert "Pi bash" not in html
 
 
-def test_pi_agent_config_page_offers_builtin_provider_and_model_pickers(
+def test_pi_agent_config_page_offers_global_searchable_model_picker(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -98,6 +98,19 @@ def test_pi_agent_config_page_offers_builtin_provider_and_model_pickers(
     monkeypatch.setattr(
         "app.audit_web.pi_builtin_model_catalog",
         lambda _path: {
+            "openai": [
+                {
+                    "provider": "openai",
+                    "id": "gpt-5.5",
+                    "name": "GPT-5.5",
+                    "api": "openai-responses",
+                    "baseUrl": "https://api.openai.com/v1",
+                    "reasoning": True,
+                    "images": True,
+                    "contextWindow": 272_000,
+                    "maxTokens": 128_000,
+                }
+            ],
             "deepseek": [
                 {
                     "provider": "deepseek",
@@ -116,21 +129,22 @@ def test_pi_agent_config_page_offers_builtin_provider_and_model_pickers(
 
     html = render_config_page(active_tab="agent")
 
-    assert 'id="pi-provider-preset"' in html
-    assert 'aria-label="选择内置 Provider"' in html
-    assert '<option value="deepseek" selected>DeepSeek (deepseek)</option>' in html
+    assert 'id="pi-model-search"' in html
+    assert 'placeholder="搜索全部 Pi 模型，例如 deepseek、gpt、claude"' in html
     assert 'id="pi-model-preset"' in html
     assert 'aria-label="选择内置模型"' in html
     assert (
-        '<option value="deepseek-v4-pro" selected>'
-        "DeepSeek V4 Pro (deepseek-v4-pro)</option>"
+        'data-provider="deepseek" data-model-id="deepseek-v4-pro" '
+        'data-api="openai-completions" '
+        'data-base-url="https://api.deepseek.com">'
+        "DeepSeek · DeepSeek V4 Pro (deepseek-v4-pro)</option>"
     ) in html
-    assert 'id="pi-provider-input"' in html
-    assert 'name="pi_provider" value="deepseek"' in html
     assert 'id="pi-model-input"' in html
     assert 'name="pi_model" value="deepseek-v4-pro"' in html
+    assert 'name="pi_provider" value="deepseek"' in html
     assert 'id="pi-model-catalog"' in html
-    assert "选择内置模型会自动带出 API protocol 和官方 Base URL" in html
+    assert "输入关键词可以跨 Provider 搜索全部 Pi 内置模型" in html
+    assert "选择后自动填写 Provider、模型 ID、协议和官方 Base URL" in html
 
 
 def test_pi_agent_config_preserves_blank_api_key_and_writes_reference_only(
