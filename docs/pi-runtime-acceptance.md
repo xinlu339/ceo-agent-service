@@ -59,6 +59,17 @@ session evidence.
   resolver before the configuration is accepted.
 - A real Provider call succeeds using the saved local configuration.
 
+Run the read-only Provider smoke against a temporary workspace. Despite the
+`live` pytest marker, this check only calls the configured model and does not
+send a message or execute an external write:
+
+```sh
+acceptance_workspace=$(mktemp -d /tmp/ceo-pi-provider-smoke.XXXXXX)
+CEO_LIVE_PI_E2E=1 CEO_PI_E2E_WORKSPACE="$acceptance_workspace" \
+  .venv/bin/pytest --run-live -q \
+  tests/e2e/test_live_smoke.py::test_live_pi_exec_json_smoke
+```
+
 ### 3. Existing Friday behavior on Pi
 
 Run or inspect representative dry-run attempts for each applicable path:

@@ -4,12 +4,17 @@ from pathlib import Path
 import pytest
 
 from app.agent_decision import AgentDecisionRunner
+from app.config import load_env_file, repo_root
 from app.dingtalk_models import AgentAction
 from app.dws_client import DwsClient
 
 
 def _enabled(name: str) -> bool:
     return os.getenv(name) == "1"
+
+
+def _pi_live_enabled() -> bool:
+    return _enabled("CEO_LIVE_PI_E2E") or _enabled("CEO_LIVE_CODEX_E2E")
 
 
 @pytest.mark.live
@@ -29,11 +34,17 @@ def test_live_dws_read_only_smoke():
 
 @pytest.mark.live
 @pytest.mark.skipif(
-    not _enabled("CEO_LIVE_CODEX_E2E"),
-    reason="set CEO_LIVE_CODEX_E2E=1 to run live Codex exec smoke test",
+    not _pi_live_enabled(),
+    reason="set CEO_LIVE_PI_E2E=1 to run the live Pi Provider smoke test",
 )
-def test_live_codex_exec_json_smoke():
-    workspace = Path(os.getenv("CEO_CODEX_E2E_WORKSPACE", "/Users/principal/Documents/memory"))
+def test_live_pi_exec_json_smoke():
+    live_env = Path(os.getenv("CEO_LIVE_ENV_FILE", repo_root() / ".env"))
+    load_env_file(live_env)
+    workspace = Path(
+        os.getenv("CEO_PI_E2E_WORKSPACE")
+        or os.getenv("CEO_CODEX_E2E_WORKSPACE")
+        or "/Users/principal/Documents/memory"
+    )
     assert workspace.exists()
     runner = AgentDecisionRunner(workspace=workspace, timeout_seconds=120)
 
