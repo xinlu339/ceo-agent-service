@@ -178,6 +178,7 @@ def test_install_script_writes_isolated_dry_run_service_configuration(tmp_path: 
     assert service_env["CEO_WORKER_DB"] == str(database)
     assert str(REPO_ROOT) == service_env["CEO_SERVICE_ROOT"]
     assert "mode=dry-run port=8766" in completed.stdout
+    assert "Could not modify plist" not in completed.stdout + completed.stderr
 
 
 def test_install_script_rejects_live_mode_without_explicit_acceptance(tmp_path: Path):

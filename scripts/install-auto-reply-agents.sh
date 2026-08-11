@@ -100,8 +100,10 @@ set_plist_string() {
   local plist_path="$1"
   local key_path="$2"
   local value="$3"
-  plutil -remove "${key_path}" "${plist_path}" 2>/dev/null || true
-  plutil -insert "${key_path}" -string "${value}" "${plist_path}"
+  if ! plutil -replace "${key_path}" -string "${value}" "${plist_path}" \
+    >/dev/null 2>&1; then
+    plutil -insert "${key_path}" -string "${value}" "${plist_path}"
+  fi
 }
 
 for label in "${obsolete_labels[@]}"; do
