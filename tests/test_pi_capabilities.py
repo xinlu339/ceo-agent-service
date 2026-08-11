@@ -8,6 +8,7 @@ from app.pi_capabilities import (
     _valid_external_mcp_url,
     _valid_memory_url,
     probe_pi_capabilities,
+    probe_pi_model_resolution,
 )
 from app.pi_runner import (
     GRAPHIFY_BINARY_ENV,
@@ -25,6 +26,8 @@ from app.pi_runner import (
     PI_MODEL_ENV,
     PI_NODE_BINARY_ENV,
     PI_PROVIDER_ENV,
+    pi_cli_path,
+    pi_node_binary,
 )
 
 
@@ -266,3 +269,31 @@ def test_capability_urls_allow_http_only_for_loopback():
     assert _valid_external_mcp_url("https://mcp.example/mcp") is True
     assert _valid_external_mcp_url("http://localhost:9999/mcp") is True
     assert _valid_external_mcp_url("http://mcp.example/mcp") is False
+
+
+def test_model_probe_rejects_pi_custom_id_fallback_as_builtin():
+    ready, detail = probe_pi_model_resolution(
+        node_binary=pi_node_binary(),
+        cli_path=pi_cli_path(),
+        provider="openai",
+        model="deepseek-v4-pro",
+        model_source="builtin",
+        api="openai-responses",
+        base_url="https://gateway.example/v1",
+    )
+
+    assert ready is False
+    assert "Using custom model id" in detail
+
+    custom_ready, custom_detail = probe_pi_model_resolution(
+        node_binary=pi_node_binary(),
+        cli_path=pi_cli_path(),
+        provider="openai",
+        model="deepseek-v4-pro",
+        model_source="custom",
+        api="openai-responses",
+        base_url="https://gateway.example/v1",
+    )
+
+    assert custom_ready is True
+    assert "custom model metadata" in custom_detail

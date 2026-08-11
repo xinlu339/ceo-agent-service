@@ -49,6 +49,7 @@ from app.pi_runner import (
     pi_node_version,
     pi_runtime_environment,
     pi_xiaoqing_bridge_path,
+    normalize_pi_model_selection,
     validate_pi_api,
     validate_pi_base_url,
     validate_pi_model,
@@ -74,7 +75,7 @@ if (loaded.errors.length > 0 || loaded.extensions.length !== 1) {
 """
 _MODEL_RESOLUTION_PROBE_SCRIPT = r"""
 import { pathToFileURL } from "node:url";
-const [runtimePath, resolverPath, modelsPath, authPath, modelsStorePath, provider, model, expectedApi, expectedBaseUrl] = process.argv.slice(1);
+const [runtimePath, resolverPath, modelsPath, authPath, modelsStorePath, provider, model, modelSource, expectedApi, expectedBaseUrl] = process.argv.slice(1);
 const { ModelRuntime } = await import(pathToFileURL(runtimePath).href);
 const { resolveCliModel } = await import(pathToFileURL(resolverPath).href);
 const runtime = await ModelRuntime.create({
@@ -96,6 +97,10 @@ const resolved = resolveCliModel({
 });
 if (resolved.error || !resolved.model) {
   process.stderr.write(resolved.error || "model resolution failed");
+  process.exit(1);
+}
+if (modelSource === "builtin" && resolved.warning) {
+  process.stderr.write(resolved.warning);
   process.exit(1);
 }
 if (resolved.model.provider.toLowerCase() !== provider.toLowerCase() || resolved.model.id !== model) {
@@ -235,15 +240,18 @@ def probe_pi_capabilities(
     api_raw = _configured_raw(env_values, PI_API_ENV, DEFAULT_PI_API)
     base_url_raw = _configured_raw(env_values, PI_BASE_URL_ENV, "")
     try:
-        provider = validate_pi_provider(provider_raw)
-        model = validate_pi_model(model_raw)
-        model_source = (
-            validate_pi_model_source(model_source_raw)
-            if model_source_raw
-            else None
+        selection = normalize_pi_model_selection(
+            provider=provider_raw,
+            model=model_raw,
+            model_source=model_source_raw,
+            api=api_raw,
+            base_url=base_url_raw,
         )
-        api = validate_pi_api(api_raw)
-        base_url = validate_pi_base_url(base_url_raw)
+        provider = selection.provider
+        model = selection.model
+        model_source = selection.model_source
+        api = selection.api
+        base_url = selection.base_url
     except ValueError as exc:
         provider_ready = False
         provider_detail = str(exc)
@@ -603,6 +611,7 @@ def _probe_pi_model_resolution_cached(
                     str(root / "models-store.json"),
                     provider,
                     model,
+                    model_source,
                     api,
                     base_url,
                 ],

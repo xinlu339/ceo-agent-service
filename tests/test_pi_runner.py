@@ -8,11 +8,16 @@ from app.pi_runner import (
     PI_MODEL_SOURCE_ENV,
     PiRunner,
     ensure_pi_runtime_config,
+    normalize_pi_model_selection,
     pi_allowed_read_roots,
     pi_memory_connector_config_issue,
     pi_models_config,
+    pi_models_config_for_values,
     pi_process_failure_reason,
+    selected_pi_api,
     selected_pi_base_url,
+    selected_pi_model_source,
+    selected_pi_provider,
 )
 
 
@@ -171,6 +176,71 @@ def test_pi_runtime_models_config_preserves_builtin_model_metadata(
     assert "models" not in provider
     assert "super-secret-key" not in path.read_text(encoding="utf-8")
     assert session_dir.is_dir()
+
+
+def test_legacy_openai_deepseek_responses_config_uses_builtin_deepseek_protocol(
+    tmp_path: Path,
+    monkeypatch,
+):
+    agent_dir, _session_dir = _configure_runtime(monkeypatch, tmp_path)
+    monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
+    monkeypatch.setenv("CEO_PI_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv(PI_MODEL_SOURCE_ENV, "builtin")
+    monkeypatch.setenv("CEO_PI_API", "openai-responses")
+    monkeypatch.setenv("CEO_PI_BASE_URL", "https://gateway.example/v1")
+
+    assert selected_pi_provider() == "deepseek"
+    assert selected_pi_api() == "openai-completions"
+    assert selected_pi_model_source() == "builtin"
+
+    path = ensure_pi_runtime_config()
+    provider = json.loads(path.read_text(encoding="utf-8"))["providers"][
+        "deepseek"
+    ]
+    assert path == agent_dir / "models.json"
+    assert provider == {
+        "apiKey": f"${PI_API_KEY_ENV}",
+        "baseUrl": "https://gateway.example/v1",
+    }
+
+    command = PiRunner(workspace=tmp_path, pi_cli_path_value="pi.js").build_command(
+        prompt="hello",
+        session_id=None,
+    )
+    assert command[command.index("--provider") + 1] == "deepseek"
+    assert command[command.index("--model") + 1] == "deepseek-v4-pro"
+
+
+def test_custom_deepseek_series_model_uses_completions_and_deepseek_compat():
+    selection = normalize_pi_model_selection(
+        provider="openai",
+        model="deepseek-r1-company",
+        model_source="builtin",
+        api="openai-responses",
+        base_url="https://gateway.example/v1",
+    )
+
+    assert selection.provider == "deepseek"
+    assert selection.api == "openai-completions"
+    assert selection.model_source == "custom"
+
+    provider = pi_models_config_for_values(
+        provider=selection.provider,
+        model=selection.model,
+        model_source=selection.model_source,
+        api=selection.api,
+        base_url=selection.base_url,
+    )["providers"]["deepseek"]
+    model = provider["models"][0]
+    assert provider["api"] == "openai-completions"
+    assert model["id"] == "deepseek-r1-company"
+    assert model["reasoning"] is True
+    assert model["compat"] == {
+        "supportsStore": False,
+        "supportsDeveloperRole": False,
+        "requiresReasoningContentOnAssistantMessages": True,
+        "thinkingFormat": "deepseek",
+    }
 
 
 def test_pi_runtime_models_config_defines_genuinely_custom_model(

@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -92,6 +93,21 @@ PROFILE_DISTILLATION_PI_TOOLS = (
 MINIMUM_PI_NODE_VERSION = (22, 19, 0)
 _PI_PROVIDER_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _NODE_VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
+_DEEPSEEK_BUILTIN_MODELS = frozenset(
+    {
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+    }
+)
+
+
+@dataclass(frozen=True)
+class PiModelSelection:
+    provider: str
+    model: str
+    model_source: str
+    api: str
+    base_url: str
 
 
 def pi_memory_connector_config_issue() -> str:
@@ -339,8 +355,7 @@ def pi_allowed_read_roots(workspace: Path) -> tuple[Path, ...]:
 
 
 def selected_pi_provider() -> str:
-    value = os.environ.get(PI_PROVIDER_ENV, DEFAULT_PI_PROVIDER)
-    return validate_pi_provider(value)
+    return selected_pi_model_selection().provider
 
 
 def validate_pi_provider(raw_value: str) -> str:
@@ -351,7 +366,7 @@ def validate_pi_provider(raw_value: str) -> str:
 
 
 def selected_pi_model() -> str:
-    return validate_pi_model(os.environ.get(PI_MODEL_ENV, DEFAULT_PI_MODEL))
+    return selected_pi_model_selection().model
 
 
 def validate_pi_model(raw_value: str) -> str:
@@ -362,12 +377,7 @@ def validate_pi_model(raw_value: str) -> str:
 
 
 def selected_pi_model_source() -> str:
-    configured = os.environ.get(PI_MODEL_SOURCE_ENV, "").strip()
-    if configured:
-        return validate_pi_model_source(configured)
-    if selected_pi_base_url():
-        return "custom"
-    return DEFAULT_PI_MODEL_SOURCE
+    return selected_pi_model_selection().model_source
 
 
 def validate_pi_model_source(raw_value: str) -> str:
@@ -378,7 +388,7 @@ def validate_pi_model_source(raw_value: str) -> str:
 
 
 def selected_pi_api() -> str:
-    return validate_pi_api(os.environ.get(PI_API_ENV, DEFAULT_PI_API))
+    return selected_pi_model_selection().api
 
 
 def validate_pi_api(raw_value: str) -> str:
@@ -402,7 +412,7 @@ def validate_pi_thinking_level(raw_value: str) -> str:
 
 
 def selected_pi_base_url() -> str:
-    return validate_pi_base_url(os.environ.get(PI_BASE_URL_ENV, ""))
+    return selected_pi_model_selection().base_url
 
 
 def validate_pi_base_url(raw_value: str) -> str:
@@ -423,13 +433,68 @@ def validate_pi_base_url(raw_value: str) -> str:
     return value
 
 
+def normalize_pi_model_selection(
+    *,
+    provider: str,
+    model: str,
+    model_source: str = "",
+    api: str,
+    base_url: str,
+) -> PiModelSelection:
+    """Normalize legacy DeepSeek settings to Pi's supported wire protocol."""
+
+    provider = validate_pi_provider(provider)
+    model = validate_pi_model(model)
+    api = validate_pi_api(api)
+    base_url = validate_pi_base_url(base_url)
+    source = (
+        validate_pi_model_source(model_source)
+        if model_source.strip()
+        else "custom"
+        if base_url
+        else DEFAULT_PI_MODEL_SOURCE
+    )
+
+    model_key = model.casefold()
+    unqualified_model_key = model_key.rsplit("/", 1)[-1]
+    deepseek_model = unqualified_model_key.startswith("deepseek")
+    if deepseek_model and provider.casefold() == "openai":
+        provider = "deepseek"
+    if provider.casefold() == "deepseek":
+        api = "openai-completions"
+        source = (
+            "builtin"
+            if model_key in _DEEPSEEK_BUILTIN_MODELS
+            else "custom"
+        )
+
+    return PiModelSelection(
+        provider=provider,
+        model=model,
+        model_source=source,
+        api=api,
+        base_url=base_url,
+    )
+
+
+def selected_pi_model_selection() -> PiModelSelection:
+    return normalize_pi_model_selection(
+        provider=os.environ.get(PI_PROVIDER_ENV, DEFAULT_PI_PROVIDER),
+        model=os.environ.get(PI_MODEL_ENV, DEFAULT_PI_MODEL),
+        model_source=os.environ.get(PI_MODEL_SOURCE_ENV, ""),
+        api=os.environ.get(PI_API_ENV, DEFAULT_PI_API),
+        base_url=os.environ.get(PI_BASE_URL_ENV, ""),
+    )
+
+
 def pi_models_config() -> dict[str, object]:
+    selection = selected_pi_model_selection()
     return pi_models_config_for_values(
-        provider=selected_pi_provider(),
-        model=selected_pi_model(),
-        model_source=selected_pi_model_source(),
-        api=selected_pi_api(),
-        base_url=selected_pi_base_url(),
+        provider=selection.provider,
+        model=selection.model,
+        model_source=selection.model_source,
+        api=selection.api,
+        base_url=selection.base_url,
     )
 
 
@@ -451,18 +516,32 @@ def pi_models_config_for_values(
     }
     if base_url:
         provider_config["baseUrl"] = base_url
-        if model_source == "custom":
-            provider_config.update(
+    if model_source == "custom" and (
+        base_url or provider.casefold() == "deepseek"
+    ):
+        model_config: dict[str, object] = {
+            "id": model,
+            "name": model,
+        }
+        if provider.casefold() == "deepseek" or "deepseek" in model.casefold():
+            model_config.update(
                 {
-                    "api": api,
-                    "models": [
-                        {
-                            "id": model,
-                            "name": model,
-                        }
-                    ],
+                    "reasoning": True,
+                    "input": ["text"],
+                    "compat": {
+                        "supportsStore": False,
+                        "supportsDeveloperRole": False,
+                        "requiresReasoningContentOnAssistantMessages": True,
+                        "thinkingFormat": "deepseek",
+                    },
                 }
             )
+        provider_config.update(
+            {
+                "api": api,
+                "models": [model_config],
+            }
+        )
     return {"providers": {provider: provider_config}}
 
 
@@ -595,6 +674,7 @@ class PiRunner:
         if approval_policy not in {"untrusted", "never"}:
             raise ValueError("unsupported approval policy")
         ensure_pi_runtime_config()
+        model_selection = selected_pi_model_selection()
         extension_path = pi_extension_path()
         if not extension_path.is_file():
             raise ValueError(f"Pi reviewed extension does not exist: {extension_path}")
@@ -607,9 +687,9 @@ class PiRunner:
             "--session-dir",
             str(pi_session_dir()),
             "--provider",
-            selected_pi_provider(),
+            model_selection.provider,
             "--model",
-            selected_pi_model(),
+            model_selection.model,
             "--thinking",
             selected_pi_thinking_level(),
             "--approve",

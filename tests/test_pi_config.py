@@ -372,6 +372,55 @@ def test_pi_agent_config_selects_custom_metadata_only_when_builtin_model_fails(
     assert provider["models"] == [{"id": "custom-model", "name": "custom-model"}]
 
 
+def test_pi_agent_config_normalizes_openai_deepseek_responses_to_builtin_deepseek(
+    tmp_path: Path,
+    monkeypatch,
+):
+    env_path = tmp_path / ".env"
+    monkeypatch.setenv("CEO_ENV_FILE", str(env_path))
+    probes: list[dict[str, object]] = []
+
+    def fake_resolution(**kwargs):
+        probes.append(kwargs)
+        expected = (
+            kwargs["provider"] == "deepseek"
+            and kwargs["model"] == "deepseek-v4-pro"
+            and kwargs["model_source"] == "builtin"
+            and kwargs["api"] == "openai-completions"
+        )
+        return expected, "resolved" if expected else "unexpected selection"
+
+    monkeypatch.setattr(
+        "app.audit_web.probe_pi_model_resolution",
+        fake_resolution,
+    )
+
+    status, _, _ = handle_agent_config_post(
+        _agent_form(
+            tmp_path,
+            pi_provider="openai",
+            pi_model="deepseek-v4-pro",
+            pi_api="openai-responses",
+            pi_base_url="https://gateway.example/v1",
+        )
+    )
+
+    assert status == 303
+    saved = read_env_file(env_path)
+    assert saved["CEO_PI_PROVIDER"] == "deepseek"
+    assert saved["CEO_PI_MODEL"] == "deepseek-v4-pro"
+    assert saved["CEO_PI_API"] == "openai-completions"
+    assert saved[PI_MODEL_SOURCE_ENV] == "builtin"
+    assert len(probes) == 1
+    provider = json.loads(
+        (tmp_path / "pi-agent" / "models.json").read_text(encoding="utf-8")
+    )["providers"]["deepseek"]
+    assert provider == {
+        "apiKey": f"${PI_API_KEY_ENV}",
+        "baseUrl": "https://gateway.example/v1",
+    }
+
+
 def test_pi_agent_config_rejects_api_protocol_that_would_be_silently_ignored(
     tmp_path: Path,
     monkeypatch,

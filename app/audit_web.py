@@ -97,6 +97,7 @@ from app.pi_runner import (
     SUPPORTED_PI_APIS,
     SUPPORTED_PI_THINKING_LEVELS,
     ensure_pi_runtime_config,
+    normalize_pi_model_selection,
     pi_agent_dir,
     pi_cli_path,
     pi_node_binary,
@@ -2602,6 +2603,22 @@ def _render_agent_config(*, saved: bool = False) -> str:
         PI_BASE_URL_ENV,
         os.environ.get(PI_BASE_URL_ENV, ""),
     )
+    try:
+        normalized_selection = normalize_pi_model_selection(
+            provider=provider,
+            model=model,
+            model_source=model_source,
+            api=api,
+            base_url=base_url,
+        )
+    except ValueError:
+        pass
+    else:
+        provider = normalized_selection.provider
+        model = normalized_selection.model
+        model_source = normalized_selection.model_source
+        api = normalized_selection.api
+        base_url = normalized_selection.base_url
     exa_mcp_url = env_values.get(
         PI_EXA_MCP_URL_ENV,
         os.environ.get(PI_EXA_MCP_URL_ENV, DEFAULT_PI_EXA_MCP_URL),
@@ -2784,6 +2801,8 @@ def _render_agent_config(*, saved: bool = False) -> str:
         "只有真正的自定义模型或协议才生成独立模型定义。"
         "页面可以跨 Provider 搜索并选择 Pi 内置模型；选择后自动填写 Provider、"
         "模型 ID、协议和官方 Base URL，同时保留自定义输入。"
+        "DeepSeek 系列统一使用 Pi 已验证的 deepseek Provider 与 "
+        "openai-completions 协议；自定义网关只需覆盖 Base URL。"
         "未填写 Base URL 时，API protocol 必须与 Pi 内置模型的真实协议一致；"
         "不一致的配置会在保存前拒绝，避免页面配置与实际请求协议不同。"
         "保存后新启动的 Agent 调用立即使用新配置。</p>"
@@ -2928,6 +2947,16 @@ def _pi_model_picker_script() -> str:
       ? catalog[option.dataset.provider] : [];
     return models.find((item) => item.id === option.dataset.modelId) || null;
   };
+  const normalizeDeepSeekSelection = () => {
+    const modelId = modelInput.value.trim().toLocaleLowerCase();
+    const leafModelId = modelId.split("/").pop() || "";
+    if (!leafModelId.startsWith("deepseek")) return;
+    const provider = providerInput.value.trim().toLocaleLowerCase();
+    if (!provider || provider === "openai") providerInput.value = "deepseek";
+    if (providerInput.value.trim().toLocaleLowerCase() === "deepseek") {
+      apiSelect.value = "openai-completions";
+    }
+  };
   const updateHint = (item) => {
     if (!item) {
       modelHint.textContent = "当前是自定义模型配置，请手工确认 Provider、API protocol 和 Base URL。";
@@ -2983,9 +3012,16 @@ def _pi_model_picker_script() -> str:
     baseUrlInput.value = item.baseUrl || "";
     updateHint(item);
   });
-  providerInput.addEventListener("input", syncModelPreset);
-  modelInput.addEventListener("input", syncModelPreset);
+  providerInput.addEventListener("input", () => {
+    normalizeDeepSeekSelection();
+    syncModelPreset();
+  });
+  modelInput.addEventListener("input", () => {
+    normalizeDeepSeekSelection();
+    syncModelPreset();
+  });
 
+  normalizeDeepSeekSelection();
   filterModels();
   syncModelPreset();
 })();
@@ -6984,6 +7020,15 @@ def handle_agent_config_post(body: bytes) -> tuple[int, dict[str, str], str]:
         model = validate_pi_model(parsed.get("pi_model", [""])[0])
         api = validate_pi_api(parsed.get("pi_api", [""])[0])
         base_url = validate_pi_base_url(parsed.get("pi_base_url", [""])[0])
+        normalized_selection = normalize_pi_model_selection(
+            provider=provider,
+            model=model,
+            api=api,
+            base_url=base_url,
+        )
+        provider = normalized_selection.provider
+        model = normalized_selection.model
+        api = normalized_selection.api
         exa_mcp_url = parsed.get("pi_exa_mcp_url", [""])[0].strip().rstrip("/")
         from app.pi_exa_bridge import PiExaBridgeError
         from app.pi_exa_bridge import exa_mcp_url as validate_exa_mcp_url
@@ -7035,7 +7080,15 @@ def handle_agent_config_post(body: bytes) -> tuple[int, dict[str, str], str]:
         model_ready = False
         model_detail = "Pi model configuration could not be resolved"
         model_source = ""
-        for candidate in (("builtin", "custom") if base_url else ("builtin",)):
+        if provider.casefold() == "deepseek":
+            candidates = (
+                ("builtin", "custom")
+                if normalized_selection.model_source == "builtin"
+                else ("custom",)
+            )
+        else:
+            candidates = (("builtin", "custom") if base_url else ("builtin",))
+        for candidate in candidates:
             candidate_ready, candidate_detail = probe_pi_model_resolution(
                 node_binary=node_candidate,
                 cli_path=cli_path,
