@@ -71,6 +71,7 @@ from app.config import (
 from app.embedding import EmbeddingClient
 from app.history import safe_observability_error
 from app.pi_capabilities import probe_pi_capabilities, probe_pi_model_resolution
+from app.pi_model_catalog import pi_builtin_model_catalog
 from app.pi_runner import (
     DEFAULT_PI_EXA_MCP_URL,
     DEFAULT_PI_XIAOQING_MCP_URL,
@@ -204,6 +205,10 @@ th{background:var(--surface-soft);color:var(--steel);font-size:12px;font-weight:
 .config-variable-table input[type="text"]{height:28px;padding:4px 7px;border-radius:6px;font-size:12px;line-height:1.35}
 .config-key-input{font-family:"Geist Mono","SF Mono",Menlo,Consolas,monospace;color:var(--steel);background:var(--surface-soft)}
 .config-value-input{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.config-model-picker{display:grid;gap:6px;min-width:0}
+.config-model-picker select,.config-model-picker input{width:100%;min-height:36px}
+.config-model-picker select{border:1px solid var(--hairline);border-radius:7px;background:var(--canvas);padding:6px 9px;color:var(--ink);font-size:13px}
+.config-model-hint{margin:0;color:var(--steel);font-size:12px;line-height:1.4;overflow-wrap:anywhere}
 .config-value{display:inline-flex;max-width:100%;padding:4px 8px;border-radius:7px;background:var(--surface);border:1px solid var(--hairline-soft);color:var(--charcoal);font-family:"Geist Mono","SF Mono",Menlo,Consolas,monospace;font-size:12px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
 .config-token{display:inline-flex;max-width:100%;padding:3px 7px;border-radius:6px;background:#ddfff6;border:1px solid rgba(0,180,138,.55);color:#005b49;font-family:"Geist Mono","SF Mono",Menlo,Consolas,monospace;font-size:12px;font-weight:700;line-height:1.4;white-space:pre-wrap;word-break:break-word;box-shadow:0 0 0 2px rgba(0,212,164,.12)}
 .system-config-table th:first-child,.system-config-table td:first-child{width:260px}
@@ -2664,6 +2669,14 @@ def _render_agent_config(*, saved: bool = False) -> str:
     xiaoqing_token_status = (
         "Configured" if xiaoqing_token_configured else "Not configured"
     )
+    model_catalog = pi_builtin_model_catalog(Path(cli_value))
+    provider_picker = _pi_provider_picker(provider, model_catalog)
+    model_picker = _pi_model_picker(provider, model, model_catalog)
+    model_catalog_json = json.dumps(
+        model_catalog,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("<", "\\u003c")
     capability_rows = "".join(
         "<tr>"
         f"<td>{escape(item.label)}</td>"
@@ -2686,8 +2699,26 @@ def _render_agent_config(*, saved: bool = False) -> str:
                 cli_value,
                 name="pi_cli_path",
             ),
-            _agent_config_text_row("Provider", provider, name="pi_provider"),
-            _agent_config_text_row("Model", model, name="pi_model"),
+            _agent_config_picker_row(
+                "Provider",
+                picker_html=provider_picker,
+                input_id="pi-provider-input",
+                input_name="pi_provider",
+                value=provider,
+                hint="选择 Pi 内置 Provider 会自动填入；也可以直接输入公司网关或自定义 Provider。",
+            ),
+            _agent_config_picker_row(
+                "Model",
+                picker_html=model_picker,
+                input_id="pi-model-input",
+                input_name="pi_model",
+                value=model,
+                hint=(
+                    "选择内置模型会自动带出 API protocol 和官方 Base URL；"
+                    "下方输入框仍可填写网关提供的自定义模型 ID。"
+                ),
+                hint_id="pi-model-hint",
+            ),
             _agent_config_text_row(
                 "Model metadata",
                 (
@@ -2763,6 +2794,7 @@ def _render_agent_config(*, saved: bool = False) -> str:
         "只应配置可信 HTTPS endpoint；HTTP 仅允许本机 loopback。"
         "匹配 Pi 内置模型和协议时会保留其 reasoning、图片、上下文及输出能力；"
         "只有真正的自定义模型或协议才生成独立模型定义。"
+        "页面可以直接选择 Pi 内置 Provider 和模型，同时保留自定义输入。"
         "未填写 Base URL 时，API protocol 必须与 Pi 内置模型的真实协议一致；"
         "不一致的配置会在保存前拒绝，避免页面配置与实际请求协议不同。"
         "保存后新启动的 Agent 调用立即使用新配置。</p>"
@@ -2773,6 +2805,8 @@ def _render_agent_config(*, saved: bool = False) -> str:
         f"{rows}</table>"
         "<p><button type=\"submit\">Save Pi Agent config</button></p>"
         "</form>"
+        f'<script type="application/json" id="pi-model-catalog">{model_catalog_json}</script>'
+        f"<script>{_pi_model_picker_script()}</script>"
         "<h3>Runtime check</h3>"
         '<table class="system-config-table">'
         "<tr><th>Check</th><th>Status</th><th>Detail</th></tr>"
@@ -2782,6 +2816,189 @@ def _render_agent_config(*, saved: bool = False) -> str:
         "系统不会回退到 bash、旧 Codex MCP 配置或未审查的 CLI 调用。</p>"
         "</section>"
     )
+
+
+_PI_PROVIDER_LABELS = {
+    "anthropic": "Anthropic",
+    "deepseek": "DeepSeek",
+    "google": "Google Gemini",
+    "groq": "Groq",
+    "minimax": "MiniMax",
+    "moonshotai": "Moonshot AI",
+    "nvidia": "NVIDIA",
+    "openai": "OpenAI",
+    "openrouter": "OpenRouter",
+    "together": "Together AI",
+    "xai": "xAI",
+    "zai": "Z.AI",
+}
+
+
+def _pi_provider_picker(
+    provider: str,
+    catalog: Mapping[str, list[dict[str, object]]],
+) -> str:
+    options = ['<option value="">选择内置 Provider…</option>']
+    priority = {"openai": 0, "deepseek": 1, "anthropic": 2, "google": 3}
+    for value in sorted(
+        catalog,
+        key=lambda item: (priority.get(item, 100), item.casefold()),
+    ):
+        display = _PI_PROVIDER_LABELS.get(value, value.replace("-", " ").title())
+        selected = " selected" if value == provider else ""
+        options.append(
+            f'<option value="{escape(value)}"{selected}>'
+            f"{escape(display)} ({escape(value)})</option>"
+        )
+    return (
+        '<select id="pi-provider-preset" aria-label="选择内置 Provider">'
+        + "".join(options)
+        + "</select>"
+    )
+
+
+def _pi_model_picker(
+    provider: str,
+    model: str,
+    catalog: Mapping[str, list[dict[str, object]]],
+) -> str:
+    options = ['<option value="">选择内置模型…</option>']
+    for item in catalog.get(provider, []):
+        model_id = str(item["id"])
+        name = str(item["name"])
+        selected = " selected" if model_id == model else ""
+        options.append(
+            f'<option value="{escape(model_id)}"{selected}>'
+            f"{escape(name)} ({escape(model_id)})</option>"
+        )
+    return (
+        '<select id="pi-model-preset" aria-label="选择内置模型">'
+        + "".join(options)
+        + "</select>"
+    )
+
+
+def _agent_config_picker_row(
+    label: str,
+    *,
+    picker_html: str,
+    input_id: str,
+    input_name: str,
+    value: str,
+    hint: str,
+    hint_id: str = "",
+) -> str:
+    hint_attribute = f' id="{escape(hint_id)}"' if hint_id else ""
+    return (
+        f"<tr><td>{escape(label)}</td><td>"
+        '<div class="config-model-picker">'
+        f"{picker_html}"
+        f'<input class="config-value-input" id="{escape(input_id)}" '
+        f'type="text" name="{escape(input_name)}" value="{escape(value)}" '
+        f'aria-label="{escape(label)}">'
+        f'<p class="config-model-hint"{hint_attribute}>{escape(hint)}</p>'
+        "</div></td></tr>"
+    )
+
+
+def _pi_model_picker_script() -> str:
+    return r"""
+(() => {
+  const catalogNode = document.getElementById("pi-model-catalog");
+  const providerPreset = document.getElementById("pi-provider-preset");
+  const providerInput = document.getElementById("pi-provider-input");
+  const modelPreset = document.getElementById("pi-model-preset");
+  const modelInput = document.getElementById("pi-model-input");
+  const modelHint = document.getElementById("pi-model-hint");
+  const apiSelect = document.getElementById("pi-api");
+  const baseUrlInput = document.querySelector('input[name="pi_base_url"]');
+  if (!catalogNode || !providerPreset || !providerInput || !modelPreset ||
+      !modelInput || !modelHint || !apiSelect || !baseUrlInput) return;
+
+  let catalog = {};
+  try { catalog = JSON.parse(catalogNode.textContent || "{}"); } catch (_) { return; }
+
+  const formatTokens = (value) => {
+    const number = Number(value || 0);
+    if (!number) return "unknown";
+    if (number >= 1000000) return `${number / 1000000}M`;
+    if (number >= 1000) return `${Math.round(number / 1000)}K`;
+    return String(number);
+  };
+  const modelsFor = (provider) => Array.isArray(catalog[provider]) ? catalog[provider] : [];
+  const selectedModel = () => modelsFor(providerInput.value.trim()).find(
+    (item) => item.id === modelInput.value.trim()
+  );
+  const updateHint = (item) => {
+    if (!item) {
+      const count = modelsFor(providerInput.value.trim()).length;
+      modelHint.textContent = count
+        ? `这个 Provider 有 ${count} 个 Pi 内置模型；也可以直接输入自定义模型 ID。`
+        : "当前是自定义 Provider/模型配置，请手工确认 API protocol 和 Base URL。";
+      return;
+    }
+    modelHint.textContent = [
+      item.api,
+      `上下文 ${formatTokens(item.contextWindow)}`,
+      `最大输出 ${formatTokens(item.maxTokens)}`,
+      item.reasoning ? "支持推理" : "普通模型",
+      item.images ? "支持图片" : "仅文本",
+    ].join(" · ");
+  };
+  const rebuildModels = (preferredModel) => {
+    const models = modelsFor(providerInput.value.trim());
+    modelPreset.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = models.length ? "选择内置模型…" : "没有匹配的内置模型";
+    modelPreset.appendChild(placeholder);
+    for (const item of models) {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = `${item.name} (${item.id})`;
+      modelPreset.appendChild(option);
+    }
+    const match = models.find((item) => item.id === preferredModel);
+    modelPreset.value = match ? match.id : "";
+    updateHint(match);
+  };
+  const syncProviderPreset = () => {
+    const provider = providerInput.value.trim();
+    providerPreset.value = Object.prototype.hasOwnProperty.call(catalog, provider)
+      ? provider : "";
+  };
+  const syncModelPreset = () => {
+    const item = selectedModel();
+    modelPreset.value = item ? item.id : "";
+    updateHint(item);
+  };
+
+  providerPreset.addEventListener("change", () => {
+    if (!providerPreset.value) return;
+    providerInput.value = providerPreset.value;
+    modelInput.value = "";
+    rebuildModels("");
+  });
+  modelPreset.addEventListener("change", () => {
+    const item = modelsFor(providerInput.value.trim()).find(
+      (candidate) => candidate.id === modelPreset.value
+    );
+    if (!item) return;
+    modelInput.value = item.id;
+    apiSelect.value = item.api;
+    baseUrlInput.value = item.baseUrl || "";
+    updateHint(item);
+  });
+  providerInput.addEventListener("input", () => {
+    syncProviderPreset();
+    rebuildModels(modelInput.value.trim());
+  });
+  modelInput.addEventListener("input", syncModelPreset);
+
+  syncProviderPreset();
+  rebuildModels(modelInput.value.trim());
+})();
+"""
 
 
 def _agent_config_text_row(

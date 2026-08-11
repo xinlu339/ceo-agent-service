@@ -83,6 +83,56 @@ def test_pi_agent_config_page_never_renders_existing_api_key(
     assert "Pi bash" not in html
 
 
+def test_pi_agent_config_page_offers_builtin_provider_and_model_pickers(
+    tmp_path: Path,
+    monkeypatch,
+):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "CEO_PI_PROVIDER=deepseek\n"
+        "CEO_PI_MODEL=deepseek-v4-pro\n"
+        "CEO_PI_API=openai-completions\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CEO_ENV_FILE", str(env_path))
+    monkeypatch.setattr(
+        "app.audit_web.pi_builtin_model_catalog",
+        lambda _path: {
+            "deepseek": [
+                {
+                    "provider": "deepseek",
+                    "id": "deepseek-v4-pro",
+                    "name": "DeepSeek V4 Pro",
+                    "api": "openai-completions",
+                    "baseUrl": "https://api.deepseek.com",
+                    "reasoning": True,
+                    "images": False,
+                    "contextWindow": 1_000_000,
+                    "maxTokens": 384_000,
+                }
+            ]
+        },
+    )
+
+    html = render_config_page(active_tab="agent")
+
+    assert 'id="pi-provider-preset"' in html
+    assert 'aria-label="选择内置 Provider"' in html
+    assert '<option value="deepseek" selected>DeepSeek (deepseek)</option>' in html
+    assert 'id="pi-model-preset"' in html
+    assert 'aria-label="选择内置模型"' in html
+    assert (
+        '<option value="deepseek-v4-pro" selected>'
+        "DeepSeek V4 Pro (deepseek-v4-pro)</option>"
+    ) in html
+    assert 'id="pi-provider-input"' in html
+    assert 'name="pi_provider" value="deepseek"' in html
+    assert 'id="pi-model-input"' in html
+    assert 'name="pi_model" value="deepseek-v4-pro"' in html
+    assert 'id="pi-model-catalog"' in html
+    assert "选择内置模型会自动带出 API protocol 和官方 Base URL" in html
+
+
 def test_pi_agent_config_preserves_blank_api_key_and_writes_reference_only(
     tmp_path: Path,
     monkeypatch,
