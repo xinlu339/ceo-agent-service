@@ -2850,7 +2850,7 @@ def _pi_global_model_picker(
     catalog: Mapping[str, list[dict[str, object]]],
 ) -> str:
     options = ['<option value="">选择内置模型…</option>']
-    priority = {"openai": 0, "deepseek": 1, "anthropic": 2, "google": 3}
+    priority = {"deepseek": 0, "openai": 1, "anthropic": 2, "google": 3}
     option_index = 0
     for provider_id in sorted(
         catalog,

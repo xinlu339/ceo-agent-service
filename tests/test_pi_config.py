@@ -6,7 +6,12 @@ from urllib.parse import urlencode
 import pytest
 from fastapi.testclient import TestClient
 
-from app.audit_web import create_audit_app, handle_agent_config_post, render_config_page
+from app.audit_web import (
+    _pi_global_model_picker,
+    create_audit_app,
+    handle_agent_config_post,
+    render_config_page,
+)
 from app.config import read_env_file
 from app.pi_runner import (
     PI_API_KEY_ENV,
@@ -145,6 +150,34 @@ def test_pi_agent_config_page_offers_global_searchable_model_picker(
     assert 'id="pi-model-catalog"' in html
     assert "输入关键词可以跨 Provider 搜索全部 Pi 内置模型" in html
     assert "选择后自动填写 Provider、模型 ID、协议和官方 Base URL" in html
+
+
+def test_pi_model_picker_prioritizes_deepseek_but_keeps_openai_available():
+    html = _pi_global_model_picker(
+        "deepseek",
+        "deepseek-v4-pro",
+        {
+            "openai": [
+                {
+                    "id": "gpt-5.5",
+                    "name": "GPT-5.5",
+                    "api": "openai-responses",
+                    "baseUrl": "https://api.openai.com/v1",
+                }
+            ],
+            "deepseek": [
+                {
+                    "id": "deepseek-v4-pro",
+                    "name": "DeepSeek V4 Pro",
+                    "api": "openai-completions",
+                    "baseUrl": "https://api.deepseek.com",
+                }
+            ],
+        },
+    )
+
+    assert html.index("DeepSeek · DeepSeek V4 Pro") < html.index("OpenAI · GPT-5.5")
+    assert 'data-provider="openai" data-model-id="gpt-5.5"' in html
 
 
 def test_pi_agent_config_preserves_blank_api_key_and_writes_reference_only(

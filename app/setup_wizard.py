@@ -1168,10 +1168,10 @@ def _setup_service_config(
     defaults = {
         "CEO_PI_NODE_BINARY": "",
         "CEO_PI_CLI_PATH": "../pi/packages/coding-agent/dist/cli.js",
-        "CEO_PI_PROVIDER": "openai",
-        "CEO_PI_MODEL": "gpt-5.5",
+        "CEO_PI_PROVIDER": "deepseek",
+        "CEO_PI_MODEL": "deepseek-v4-pro",
         "CEO_PI_MODEL_SOURCE": "builtin",
-        "CEO_PI_API": "openai-responses",
+        "CEO_PI_API": "openai-completions",
         "CEO_PI_BASE_URL": "",
         "CEO_PI_API_KEY": "",
         "CEO_PI_THINKING_LEVEL": "medium",

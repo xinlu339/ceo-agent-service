@@ -14,9 +14,9 @@ def test_local_service_script_runs_single_main_service():
 
     assert '${HOME}/.local/bin' in content
     assert 'export CEO_PI_CLI_PATH="${CEO_PI_CLI_PATH:-${repo_root}/../pi/' in content
-    assert 'export CEO_PI_PROVIDER="${CEO_PI_PROVIDER:-openai}"' in content
-    assert 'export CEO_PI_MODEL="${CEO_PI_MODEL:-gpt-5.5}"' in content
-    assert 'export CEO_PI_API="${CEO_PI_API:-openai-responses}"' in content
+    assert 'export CEO_PI_PROVIDER="${CEO_PI_PROVIDER:-deepseek}"' in content
+    assert 'export CEO_PI_MODEL="${CEO_PI_MODEL:-deepseek-v4-pro}"' in content
+    assert 'export CEO_PI_API="${CEO_PI_API:-openai-completions}"' in content
     assert 'export CEO_PI_THINKING_LEVEL="${CEO_PI_THINKING_LEVEL:-medium}"' in content
     assert "CEO_PI_API_KEY" not in content
     assert "CODEX_HOME" not in content
@@ -80,9 +80,9 @@ def test_main_launch_agent_runs_single_keepalive_service():
     assert "CEO_NOT_SEND_MESSAGE=0" not in command[2]
     assert "export CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1" not in command[2]
     assert "CEO_OKR_LIVE_SOURCE_COMMAND" in command[2]
-    assert 'CEO_PI_PROVIDER="${CEO_PI_PROVIDER:-openai}"' in command[2]
-    assert 'CEO_PI_MODEL="${CEO_PI_MODEL:-gpt-5.5}"' in command[2]
-    assert 'CEO_PI_API="${CEO_PI_API:-openai-responses}"' in command[2]
+    assert 'CEO_PI_PROVIDER="${CEO_PI_PROVIDER:-deepseek}"' in command[2]
+    assert 'CEO_PI_MODEL="${CEO_PI_MODEL:-deepseek-v4-pro}"' in command[2]
+    assert 'CEO_PI_API="${CEO_PI_API:-openai-completions}"' in command[2]
     assert 'CEO_PI_THINKING_LEVEL="${CEO_PI_THINKING_LEVEL:-medium}"' in command[2]
     assert "CEO_PI_API_KEY" not in command[2]
     assert "CEO_CODEX_MODEL" not in command[2]

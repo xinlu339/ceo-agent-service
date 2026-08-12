@@ -4,9 +4,13 @@ from pathlib import Path
 import pytest
 
 from app.pi_runner import (
+    DEFAULT_PI_API,
+    DEFAULT_PI_MODEL,
+    DEFAULT_PI_PROVIDER,
     PI_API_KEY_ENV,
     PI_MODEL_SOURCE_ENV,
     PiRunner,
+    SUPPORTED_PI_APIS,
     ensure_pi_runtime_config,
     normalize_pi_model_selection,
     pi_allowed_read_roots,
@@ -19,6 +23,14 @@ from app.pi_runner import (
     selected_pi_model_source,
     selected_pi_provider,
 )
+
+
+def test_pi_defaults_prefer_deepseek_while_retaining_openai_protocols():
+    assert DEFAULT_PI_PROVIDER == "deepseek"
+    assert DEFAULT_PI_MODEL == "deepseek-v4-pro"
+    assert DEFAULT_PI_API == "openai-completions"
+    assert "openai-completions" in SUPPORTED_PI_APIS
+    assert "openai-responses" in SUPPORTED_PI_APIS
 
 
 def _configure_runtime(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:

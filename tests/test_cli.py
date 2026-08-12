@@ -1430,6 +1430,10 @@ def test_process_work_items_command_backoffs_native_codex_missing_auth_header(
     capsys,
 ):
     monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
+    monkeypatch.setenv("CEO_PI_MODEL", "gpt-5.5")
+    monkeypatch.setenv("CEO_PI_MODEL_SOURCE", "builtin")
+    monkeypatch.setenv("CEO_PI_API", "openai-responses")
+    monkeypatch.setenv("CEO_PI_BASE_URL", "")
 
     class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
@@ -1504,6 +1508,10 @@ def test_process_work_items_command_keeps_native_missing_header_pending_after_li
     capsys,
 ):
     monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
+    monkeypatch.setenv("CEO_PI_MODEL", "gpt-5.5")
+    monkeypatch.setenv("CEO_PI_MODEL_SOURCE", "builtin")
+    monkeypatch.setenv("CEO_PI_API", "openai-responses")
+    monkeypatch.setenv("CEO_PI_BASE_URL", "")
 
     class FakeTaskAgentPiRunner:
         last_session_id = "task-session-1"
