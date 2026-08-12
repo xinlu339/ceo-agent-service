@@ -421,6 +421,54 @@ def test_pi_agent_config_normalizes_openai_deepseek_responses_to_builtin_deepsee
     }
 
 
+def test_pi_agent_config_normalizes_yunwu_deepseek_to_custom_compat(
+    tmp_path: Path,
+    monkeypatch,
+):
+    env_path = tmp_path / ".env"
+    monkeypatch.setenv("CEO_ENV_FILE", str(env_path))
+    probes: list[dict[str, object]] = []
+
+    def fake_resolution(**kwargs):
+        probes.append(kwargs)
+        expected = (
+            kwargs["provider"] == "yunwu"
+            and kwargs["model"] == "deepseek-v4-pro"
+            and kwargs["model_source"] == "custom"
+            and kwargs["api"] == "openai-completions"
+            and kwargs["base_url"] == "https://api3.wlai.vip/v1"
+        )
+        return expected, "resolved" if expected else "unexpected selection"
+
+    monkeypatch.setattr(
+        "app.audit_web.probe_pi_model_resolution",
+        fake_resolution,
+    )
+
+    status, _, _ = handle_agent_config_post(
+        _agent_form(
+            tmp_path,
+            pi_provider="deepseek",
+            pi_model="deepseek-v4-pro",
+            pi_api="openai-responses",
+            pi_base_url="https://api3.wlai.vip",
+        )
+    )
+
+    assert status == 303
+    saved = read_env_file(env_path)
+    assert saved["CEO_PI_PROVIDER"] == "yunwu"
+    assert saved["CEO_PI_MODEL"] == "deepseek-v4-pro"
+    assert saved["CEO_PI_API"] == "openai-completions"
+    assert saved["CEO_PI_BASE_URL"] == "https://api3.wlai.vip/v1"
+    assert saved[PI_MODEL_SOURCE_ENV] == "custom"
+    assert [probe["model_source"] for probe in probes] == ["builtin", "custom"]
+    provider = json.loads(
+        (tmp_path / "pi-agent" / "models.json").read_text(encoding="utf-8")
+    )["providers"]["yunwu"]
+    assert provider["models"][0]["compat"]["supportsFinishReason"] is False
+
+
 def test_pi_agent_config_rejects_api_protocol_that_would_be_silently_ignored(
     tmp_path: Path,
     monkeypatch,

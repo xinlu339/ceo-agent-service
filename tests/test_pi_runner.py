@@ -243,6 +243,50 @@ def test_custom_deepseek_series_model_uses_completions_and_deepseek_compat():
     }
 
 
+def test_yunwu_deepseek_gateway_uses_custom_finish_reason_compat():
+    selection = normalize_pi_model_selection(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        model_source="custom",
+        api="openai-responses",
+        base_url="https://api3.wlai.vip",
+    )
+
+    assert selection.provider == "yunwu"
+    assert selection.model_source == "custom"
+    assert selection.api == "openai-completions"
+    assert selection.base_url == "https://api3.wlai.vip/v1"
+
+    provider = pi_models_config_for_values(
+        provider=selection.provider,
+        model=selection.model,
+        model_source=selection.model_source,
+        api=selection.api,
+        base_url=selection.base_url,
+    )["providers"]["yunwu"]
+    assert provider["api"] == "openai-completions"
+    assert provider["baseUrl"] == "https://api3.wlai.vip/v1"
+    assert provider["models"][0]["compat"] == {
+        "supportsStore": False,
+        "supportsDeveloperRole": False,
+        "requiresReasoningContentOnAssistantMessages": True,
+        "thinkingFormat": "deepseek",
+        "supportsFinishReason": False,
+    }
+
+
+def test_yunwu_full_chat_completions_url_normalizes_to_sdk_base_url():
+    selection = normalize_pi_model_selection(
+        provider="yunwu",
+        model="deepseek-v4-pro",
+        model_source="custom",
+        api="openai-completions",
+        base_url="https://yunwu.ai/v1/chat/completions",
+    )
+
+    assert selection.base_url == "https://yunwu.ai/v1"
+
+
 def test_pi_runtime_models_config_defines_genuinely_custom_model(
     tmp_path: Path, monkeypatch
 ):

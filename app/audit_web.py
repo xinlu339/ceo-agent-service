@@ -2801,8 +2801,9 @@ def _render_agent_config(*, saved: bool = False) -> str:
         "只有真正的自定义模型或协议才生成独立模型定义。"
         "页面可以跨 Provider 搜索并选择 Pi 内置模型；选择后自动填写 Provider、"
         "模型 ID、协议和官方 Base URL，同时保留自定义输入。"
-        "DeepSeek 系列统一使用 Pi 已验证的 deepseek Provider 与 "
-        "openai-completions 协议；自定义网关只需覆盖 Base URL。"
+        "DeepSeek 官方直连使用 Pi 已验证的 deepseek Provider 与 "
+        "openai-completions 协议；已知自定义网关会保存为独立 Provider，"
+        "并应用经过限定的流式兼容配置。"
         "未填写 Base URL 时，API protocol 必须与 Pi 内置模型的真实协议一致；"
         "不一致的配置会在保存前拒绝，避免页面配置与实际请求协议不同。"
         "保存后新启动的 Agent 调用立即使用新配置。</p>"
@@ -2839,6 +2840,7 @@ _PI_PROVIDER_LABELS = {
     "together": "Together AI",
     "xai": "xAI",
     "zai": "Z.AI",
+    "yunwu": "云雾",
 }
 
 
@@ -2951,8 +2953,18 @@ def _pi_model_picker_script() -> str:
     const modelId = modelInput.value.trim().toLocaleLowerCase();
     const leafModelId = modelId.split("/").pop() || "";
     if (!leafModelId.startsWith("deepseek")) return;
+    let gatewayHost = "";
+    try { gatewayHost = new URL(baseUrlInput.value.trim()).hostname.toLocaleLowerCase(); }
+    catch (_) { gatewayHost = ""; }
+    if (["api3.wlai.vip", "yunwu.ai"].includes(gatewayHost)) {
+      providerInput.value = "yunwu";
+      apiSelect.value = "openai-completions";
+      return;
+    }
     const provider = providerInput.value.trim().toLocaleLowerCase();
-    if (!provider || provider === "openai") providerInput.value = "deepseek";
+    if (!provider || provider === "openai" || provider === "yunwu") {
+      providerInput.value = "deepseek";
+    }
     if (providerInput.value.trim().toLocaleLowerCase() === "deepseek") {
       apiSelect.value = "openai-completions";
     }
@@ -3017,6 +3029,10 @@ def _pi_model_picker_script() -> str:
     syncModelPreset();
   });
   modelInput.addEventListener("input", () => {
+    normalizeDeepSeekSelection();
+    syncModelPreset();
+  });
+  baseUrlInput.addEventListener("input", () => {
     normalizeDeepSeekSelection();
     syncModelPreset();
   });
@@ -7029,6 +7045,7 @@ def handle_agent_config_post(body: bytes) -> tuple[int, dict[str, str], str]:
         provider = normalized_selection.provider
         model = normalized_selection.model
         api = normalized_selection.api
+        base_url = normalized_selection.base_url
         exa_mcp_url = parsed.get("pi_exa_mcp_url", [""])[0].strip().rstrip("/")
         from app.pi_exa_bridge import PiExaBridgeError
         from app.pi_exa_bridge import exa_mcp_url as validate_exa_mcp_url

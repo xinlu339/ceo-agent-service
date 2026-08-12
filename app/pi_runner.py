@@ -99,6 +99,8 @@ _DEEPSEEK_BUILTIN_MODELS = frozenset(
         "deepseek-v4-pro",
     }
 )
+_YUNWU_PROVIDER = "yunwu"
+_YUNWU_GATEWAY_HOSTS = frozenset({"api3.wlai.vip", "yunwu.ai"})
 
 
 @dataclass(frozen=True)
@@ -433,6 +435,25 @@ def validate_pi_base_url(raw_value: str) -> str:
     return value
 
 
+def _is_yunwu_gateway(base_url: str) -> bool:
+    if not base_url:
+        return False
+    hostname = urlparse(base_url).hostname or ""
+    return hostname.casefold().rstrip(".") in _YUNWU_GATEWAY_HOSTS
+
+
+def _normalize_yunwu_base_url(base_url: str) -> str:
+    """Return the SDK base URL for Yunwu's OpenAI-compatible endpoint."""
+
+    if not _is_yunwu_gateway(base_url):
+        return base_url
+    parsed = urlparse(base_url)
+    path = parsed.path.rstrip("/")
+    if path in {"", "/v1/chat/completions"}:
+        return parsed._replace(path="/v1").geturl()
+    return base_url
+
+
 def normalize_pi_model_selection(
     *,
     provider: str,
@@ -447,6 +468,7 @@ def normalize_pi_model_selection(
     model = validate_pi_model(model)
     api = validate_pi_api(api)
     base_url = validate_pi_base_url(base_url)
+    base_url = _normalize_yunwu_base_url(base_url)
     source = (
         validate_pi_model_source(model_source)
         if model_source.strip()
@@ -458,7 +480,13 @@ def normalize_pi_model_selection(
     model_key = model.casefold()
     unqualified_model_key = model_key.rsplit("/", 1)[-1]
     deepseek_model = unqualified_model_key.startswith("deepseek")
-    if deepseek_model and provider.casefold() == "openai":
+    yunwu_gateway = _is_yunwu_gateway(base_url)
+    yunwu_provider = provider.casefold() == _YUNWU_PROVIDER
+    if deepseek_model and (yunwu_gateway or yunwu_provider):
+        provider = _YUNWU_PROVIDER
+        api = "openai-completions"
+        source = "custom"
+    elif deepseek_model and provider.casefold() == "openai":
         provider = "deepseek"
     if provider.casefold() == "deepseek":
         api = "openai-completions"
@@ -524,16 +552,25 @@ def pi_models_config_for_values(
             "name": model,
         }
         if provider.casefold() == "deepseek" or "deepseek" in model.casefold():
+            compat: dict[str, object] = {
+                "supportsStore": False,
+                "supportsDeveloperRole": False,
+                "requiresReasoningContentOnAssistantMessages": True,
+                "thinkingFormat": "deepseek",
+            }
+            if (
+                api == "openai-completions"
+                and (
+                    provider.casefold() == _YUNWU_PROVIDER
+                    or _is_yunwu_gateway(base_url)
+                )
+            ):
+                compat["supportsFinishReason"] = False
             model_config.update(
                 {
                     "reasoning": True,
                     "input": ["text"],
-                    "compat": {
-                        "supportsStore": False,
-                        "supportsDeveloperRole": False,
-                        "requiresReasoningContentOnAssistantMessages": True,
-                        "thinkingFormat": "deepseek",
-                    },
+                    "compat": compat,
                 }
             )
         provider_config.update(

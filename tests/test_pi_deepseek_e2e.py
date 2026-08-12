@@ -8,7 +8,14 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app.pi_events import summarize_pi_stream
-from app.pi_runner import PiRunner, pi_cli_path, pi_process_failure_reason
+from app.pi_runner import (
+    PiRunner,
+    normalize_pi_model_selection,
+    pi_cli_path,
+    pi_models_config_for_values,
+    pi_node_binary,
+    pi_process_failure_reason,
+)
 
 
 def _free_port() -> int:
@@ -144,3 +151,84 @@ def test_legacy_deepseek_responses_config_runs_real_pi_over_chat_completions(
         for key, value in requests[0]["headers"].items()
     }
     assert headers["authorization"] == "Bearer fake-deepseek-secret"
+
+
+def test_yunwu_compat_accepts_complete_stream_without_finish_reason():
+    assert pi_cli_path().is_file(), "sibling Pi CLI build is required for this test"
+    selection = normalize_pi_model_selection(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        model_source="custom",
+        api="openai-responses",
+        base_url="https://api3.wlai.vip",
+    )
+    provider = pi_models_config_for_values(
+        provider=selection.provider,
+        model=selection.model,
+        model_source=selection.model_source,
+        api=selection.api,
+        base_url=selection.base_url,
+    )["providers"]["yunwu"]
+    model = {
+        **provider["models"][0],
+        "api": provider["api"],
+        "provider": selection.provider,
+        "baseUrl": provider["baseUrl"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": 1_000_000,
+        "maxTokens": 384_000,
+    }
+    ai_module = (
+        pi_cli_path().parents[2]
+        / "ai"
+        / "dist"
+        / "api"
+        / "openai-completions.js"
+    )
+    script = r"""
+const [moduleUrl, modelJson] = process.argv.slice(1);
+const { streamSimple } = await import(moduleUrl);
+const model = JSON.parse(modelJson);
+const body = [
+  'data: {"id":"chatcmpl-yunwu-1","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
+  '',
+  'data: [DONE]',
+  '',
+].join('\n');
+const response = await streamSimple(
+  model,
+  { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] },
+  {
+    apiKey: "test",
+    maxRetries: 0,
+    fetch: async () => new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }),
+  },
+).result();
+process.stdout.write(JSON.stringify({
+  stopReason: response.stopReason,
+  content: response.content,
+}));
+"""
+    completed = subprocess.run(
+        [
+            pi_node_binary(),
+            "--input-type=module",
+            "--eval",
+            script,
+            ai_module.as_uri(),
+            json.dumps(model, separators=(",", ":")),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "stopReason": "stop",
+        "content": [{"type": "text", "text": "ok"}],
+    }
