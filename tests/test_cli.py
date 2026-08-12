@@ -2861,7 +2861,14 @@ def test_build_work_profile_command_can_skip_live_sources(tmp_path, monkeypatch)
     assert calls == []
 
 
-def test_settings_defaults_point_to_memory_home():
+def test_settings_defaults_point_to_memory_home(monkeypatch):
+    for key in (
+        "CEO_PI_TIMEOUT_SECONDS",
+        "CEO_PI_IDLE_TIMEOUT_SECONDS",
+        "CEO_TASK_PI_TIMEOUT_SECONDS",
+        "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(key, raising=False)
     parser = build_parser()
     args = parser.parse_args(["run-once"])
 
@@ -3272,6 +3279,8 @@ def test_live_send_allows_guarded_override(monkeypatch, tmp_path):
 @pytest.mark.parametrize("command", ["process-follow-ups", "daily-task-maintenance"])
 def test_main_guards_follow_up_send_commands(monkeypatch, tmp_path, command):
     monkeypatch.delenv("CEO_LIVE_SEND_BLOCKERS_ACCEPTED", raising=False)
+    monkeypatch.setenv("CEO_DRY_RUN", "0")
+    monkeypatch.setenv("CEO_NOT_SEND_MESSAGE", "0")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -3440,11 +3449,15 @@ def test_create_worker_wires_store_dws_pi_agent_and_dry_run(monkeypatch, tmp_pat
             dry_run,
             style_profile="",
             style_records=None,
+            pi_timeout_seconds=None,
+            pi_idle_timeout_seconds=None,
         ):
             constructed["worker"] = self
             constructed["worker_args"] = (store, dws, agent, dry_run)
             constructed["style_profile"] = style_profile
             constructed["style_records"] = style_records
+            constructed["worker_pi_timeout_seconds"] = pi_timeout_seconds
+            constructed["worker_pi_idle_timeout_seconds"] = pi_idle_timeout_seconds
 
     monkeypatch.setattr(cli, "AutoReplyStore", FakeStore)
     monkeypatch.setattr(cli, "DwsClient", FakeDws)
@@ -3499,6 +3512,8 @@ def test_create_worker_wires_store_dws_pi_agent_and_dry_run(monkeypatch, tmp_pat
     assert constructed["agent_workspace"] == settings.workspace
     assert constructed["pi_timeout_seconds"] == 480
     assert constructed["pi_idle_timeout_seconds"] == 180
+    assert constructed["worker_pi_timeout_seconds"] == 480
+    assert constructed["worker_pi_idle_timeout_seconds"] == 180
     assert constructed["worker_args"][3] is True
     assert "先结论" in constructed["style_profile"]
     assert len(constructed["style_records"]) == 1

@@ -835,6 +835,8 @@ def create_worker(settings: WorkerSettings) -> DingTalkAutoReplyWorker:
         dry_run=settings.dry_run,
         style_profile=style_profile,
         style_records=style_records,
+        pi_timeout_seconds=settings.pi_timeout_seconds,
+        pi_idle_timeout_seconds=settings.pi_idle_timeout_seconds,
     )
     okr_source_kind = _okr_source_kind()
     if okr_source_kind == "agoal":

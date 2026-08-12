@@ -17,6 +17,7 @@ from app.agent_result import (
     SideEffectState,
     parse_agent_result,
 )
+from app.config import env_int
 from app.history import safe_observability_error
 from app.pi_tool_metadata import (
     reviewed_pi_command,
@@ -37,6 +38,9 @@ SHARED_AGENT_RULES_PATH = Path.home() / ".agents" / "AGENT.md"
 TOTAL_TIMEOUT_SECONDS = 1200
 IDLE_TIMEOUT_SECONDS = 900
 LEASE_SECONDS = TOTAL_TIMEOUT_SECONDS + IDLE_TIMEOUT_SECONDS + 300
+PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT = (
+    "pi_finalization_failed_after_confirmed_effect"
+)
 DIRECT_AGENT_DEVELOPER_INSTRUCTIONS = """You are the Direct Agent for one queued task.
 
 - The Agent owns evidence reads, business judgment, direct execution and verification.
@@ -205,6 +209,8 @@ class DirectAgentRunner:
         executor: ProcessExecutor | None = None,
         owner: str | None = None,
         session_exists: Callable[[str], bool] | None = None,
+        total_timeout_seconds: int | None = None,
+        idle_timeout_seconds: int | None = None,
     ) -> None:
         self.store = store
         self.pi = PiRunner(
@@ -213,6 +219,21 @@ class DirectAgentRunner:
         )
         self.executor = executor or run_process_with_idle_timeout
         self.owner = owner or f"direct-agent-{uuid4().hex}"
+        self.total_timeout_seconds = (
+            total_timeout_seconds
+            if total_timeout_seconds is not None
+            else env_int("CEO_PI_TIMEOUT_SECONDS", TOTAL_TIMEOUT_SECONDS)
+        )
+        self.idle_timeout_seconds = (
+            idle_timeout_seconds
+            if idle_timeout_seconds is not None
+            else env_int("CEO_PI_IDLE_TIMEOUT_SECONDS", IDLE_TIMEOUT_SECONDS)
+        )
+        if self.total_timeout_seconds <= 0 or self.idle_timeout_seconds <= 0:
+            raise ValueError("Pi timeouts must be positive")
+        self.lease_seconds = (
+            self.total_timeout_seconds + self.idle_timeout_seconds + 300
+        )
         self.session_exists = session_exists or (
             lambda session_id: find_pi_session_path(session_id) is not None
         )
@@ -264,7 +285,7 @@ class DirectAgentRunner:
             task.id,
             task.execution_generation,
             owner=self.owner,
-            lease_seconds=LEASE_SECONDS,
+            lease_seconds=self.lease_seconds,
             now=now,
         )
         if not claim.claimed:
@@ -323,7 +344,7 @@ class DirectAgentRunner:
             self.store.renew_agent_run_lease(
                 run.id,
                 owner=self.owner,
-                lease_seconds=LEASE_SECONDS,
+                lease_seconds=self.lease_seconds,
                 now=now,
             )
             session_id = _session_id(payload)
@@ -365,8 +386,8 @@ class DirectAgentRunner:
                 command,
                 prompt=prompt,
                 env=self.pi.build_env(preserve_local_cli_auth=True),
-                total_timeout_seconds=TOTAL_TIMEOUT_SECONDS,
-                idle_timeout_seconds=IDLE_TIMEOUT_SECONDS,
+                total_timeout_seconds=self.total_timeout_seconds,
+                idle_timeout_seconds=self.idle_timeout_seconds,
                 on_stdout_line=persist_line,
             )
         except AgentReadOnlyViolationError as exc:
@@ -452,7 +473,10 @@ class DirectAgentRunner:
         persisted = self.store.get_agent_run(run.id)
         if persisted is None:
             raise RuntimeError("agent run was not persisted")
-        if persisted.side_effect_state == SideEffectState.UNKNOWN.value:
+        if persisted.side_effect_state not in {
+            SideEffectState.NONE.value,
+            SideEffectState.CONFIRMED.value,
+        }:
             self.store.mark_agent_run_unknown(
                 run.id,
                 {"code": "pi_unreviewed_tool_effect", "retryable": False},
@@ -465,14 +489,19 @@ class DirectAgentRunner:
             result.outcome is AgentOutcome.FAILED
             and persisted.side_effect_state == SideEffectState.CONFIRMED.value
         ):
-            self.store.mark_agent_run_unknown(
+            self.store.fail_agent_run(
                 run.id,
-                {"code": "pi_result_failed_after_effect", "retryable": False},
+                {
+                    "code": PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT,
+                    "retryable": False,
+                    "original_code": "pi_result_failed_after_effect",
+                },
                 owner=self.owner,
+                side_effect_state=SideEffectState.CONFIRMED.value,
                 transcript_end_line=transcript_end_line,
                 now=now,
             )
-            raise AgentRunUnknownError("pi_result_failed_after_effect", run.id)
+            raise RuntimeError(PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT)
         if result.outcome is AgentOutcome.FAILED:
             self.store.fail_agent_run(
                 run.id,
@@ -549,7 +578,7 @@ class DirectAgentRunner:
         claim = self.store.claim_unknown_agent_run(
             existing_run.id,
             owner=self.owner,
-            lease_seconds=LEASE_SECONDS,
+            lease_seconds=self.lease_seconds,
             now=now,
         )
         if not claim.claimed:
@@ -617,8 +646,8 @@ class DirectAgentRunner:
                 command,
                 prompt=prompt,
                 env=self.pi.build_env(preserve_local_cli_auth=True),
-                total_timeout_seconds=TOTAL_TIMEOUT_SECONDS,
-                idle_timeout_seconds=IDLE_TIMEOUT_SECONDS,
+                total_timeout_seconds=self.total_timeout_seconds,
+                idle_timeout_seconds=self.idle_timeout_seconds,
                 on_stdout_line=persist_line,
             )
         except (AgentReadOnlyViolationError, AgentRunLeaseLostError):
@@ -663,12 +692,35 @@ class DirectAgentRunner:
         error: dict[str, object] = {"code": code, "retryable": True}
         if detail:
             error["detail"] = safe_observability_error(detail)
-        if persisted.side_effect_state != SideEffectState.NONE.value:
+        if persisted.side_effect_state not in {
+            SideEffectState.NONE.value,
+            SideEffectState.CONFIRMED.value,
+        }:
             self.store.mark_agent_run_unknown(
                 run_id,
                 error,
                 owner=self.owner,
                 transcript_end_line=persisted.transcript_end_line,
+                now=now,
+            )
+        elif persisted.side_effect_state == SideEffectState.CONFIRMED.value:
+            # Every effectful operation has a durable, safe-to-confirm receipt.
+            # The agent may still terminate before emitting its final JSON, but
+            # the external write must not be treated as an unknown effect or
+            # retried as if nothing happened.
+            error = {
+                "code": PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT,
+                "retryable": False,
+                "original_code": code,
+            }
+            if detail:
+                error["detail"] = safe_observability_error(detail)
+            self.store.fail_agent_run(
+                run_id,
+                error,
+                owner=self.owner,
+                transcript_end_line=persisted.transcript_end_line,
+                side_effect_state=SideEffectState.CONFIRMED.value,
                 now=now,
             )
         else:
@@ -1160,7 +1212,8 @@ def _pi_tool_effect_metadata(
         "execute_reviewed_lark_read",
         "execute_reviewed_lark_write",
     }:
-        native_command = reviewed_pi_command(tool_name, arguments)
+        normalized_arguments = _pi_nested_tool_arguments(arguments)
+        native_command = reviewed_pi_command(tool_name, normalized_arguments)
         if native_command is not None:
             return {
                 "effect": native_command.effect.value,
@@ -1170,7 +1223,7 @@ def _pi_tool_effect_metadata(
                 "target_identifiers": native_command.target_identifiers,
                 "reviewed_execution_digest": native_command.operation_digest,
             }
-        return _unreviewed_pi_tool_metadata(tool_name, arguments)
+        return _unreviewed_pi_tool_metadata(tool_name, normalized_arguments)
 
     effect = (
         EffectKind.READ_ONLY
@@ -1196,9 +1249,14 @@ def _pi_tool_effect_metadata(
 
 
 def _pi_nested_tool_arguments(arguments: object) -> object:
-    if isinstance(arguments, dict) and set(arguments) == {"arguments"}:
+    if isinstance(arguments, dict) and isinstance(
+        arguments.get("arguments"), dict
+    ):
         nested = arguments.get("arguments")
-        if isinstance(nested, dict):
+        assert isinstance(nested, dict)
+        # Pi extensions may include bookkeeping keys beside the actual tool
+        # arguments.  The reviewed wrapper's argv remains authoritative.
+        if "argv" in nested or set(arguments) == {"arguments"}:
             return nested
     return arguments
 

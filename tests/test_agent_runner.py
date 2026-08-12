@@ -15,6 +15,7 @@ from app.agent_runner import (
     AgentRunUnavailableError,
     DirectAgentRunner,
     ReconciliationProof,
+    _pi_tool_effect_metadata,
     direct_agent_developer_instructions,
 )
 from app.process_runner import ProcessRunResult
@@ -673,6 +674,37 @@ class RecordingExecutor:
         )
 
 
+def test_reviewed_pi_wrapper_accepts_nested_arguments():
+    metadata = _pi_tool_effect_metadata(
+        "execute_reviewed_write",
+        {
+            "arguments": {
+                "argv": [
+                    "dws",
+                    "chat",
+                    "message",
+                    "reply",
+                    "--conversation",
+                    "cid",
+                    "--message-id",
+                    "mid",
+                    "--text",
+                    "已处理",
+                ]
+            },
+            "callMetadata": {"source": "pi"},
+        },
+    )
+
+    assert metadata["effect"] == "effectful"
+    assert metadata["native_cli"] == "dws"
+    assert metadata["operation"] == "chat message reply"
+    assert metadata["target_identifiers"] == {
+        "conversation": "cid",
+        "message-id": "mid",
+    }
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> AutoReplyStore:
     return AutoReplyStore(tmp_path / "reply.sqlite3")
@@ -711,6 +743,55 @@ def test_direct_runner_uses_isolated_pi_configuration(
     assert result.result.outcome is AgentOutcome.COMPLETED
     assert result.events == ()
     assert result.receipts == ()
+
+
+def test_direct_runner_uses_configured_pi_timeouts(
+    tmp_path: Path,
+    store: AutoReplyStore,
+    monkeypatch,
+):
+    monkeypatch.setenv("CEO_PI_TIMEOUT_SECONDS", "37")
+    monkeypatch.setenv("CEO_PI_IDLE_TIMEOUT_SECONDS", "11")
+    task = _task(store)
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(
+        store=store,
+        workspace=tmp_path,
+        executor=executor,
+    ).run(task, _context(task.id))
+
+    assert executor.kwargs[0]["total_timeout_seconds"] == 37
+    assert executor.kwargs[0]["idle_timeout_seconds"] == 11
+
+
+def test_confirmed_effect_does_not_become_unknown_when_pi_finalization_fails(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    executor = RecordingExecutor(
+        _pi_tool_event_jsonl(command="dws chat message send --conversation cid"),
+        returncode=1,
+    )
+
+    with pytest.raises(RuntimeError, match="pi_process_failed"):
+        DirectAgentRunner(
+            store=store,
+            workspace=tmp_path,
+            executor=executor,
+        ).run(task, _context(task.id))
+
+    run = store.get_agent_run_for_task_generation(
+        task.id,
+        task.execution_generation,
+    )
+    assert run is not None
+    assert run.status == "failed"
+    assert run.side_effect_state == "confirmed"
+    error = json.loads(run.structured_error_json)
+    assert error["code"] == "pi_finalization_failed_after_confirmed_effect"
+    assert error["retryable"] is False
 
 
 def test_direct_runner_persists_confirmed_pi_dws_write_and_receipt(

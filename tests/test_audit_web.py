@@ -2958,6 +2958,11 @@ def test_render_config_page_shows_system_config_tab_with_descriptions():
     assert "CEO_PRODUCER_INTERVAL_SECONDS" in html
     assert "主服务内 producer loop 的运行间隔" in html
     assert "CEO_CONSUMER_POLL_INTERVAL_SECONDS" in html
+    assert "CEO_PI_TIMEOUT_SECONDS" in html
+    assert "CEO_PI_IDLE_TIMEOUT_SECONDS" in html
+    assert "普通钉钉回复 Agent 连续没有输出时的超时" in html
+    assert "CEO_TASK_PI_TIMEOUT_SECONDS" in html
+    assert "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS" in html
     assert "CEO_MEETING_PRODUCER_INTERVAL_SECONDS" in html
     assert "meeting producer 扫描 dws minutes 的间隔秒数" in html
     assert "CEO_MEETING_CONSUMER_POLL_INTERVAL_SECONDS" in html
@@ -3199,6 +3204,14 @@ def test_handle_system_config_post_saves_runtime_params_to_env_file(
         "&system_value=60"
         "&system_key=CEO_CONSUMER_POLL_INTERVAL_SECONDS"
         "&system_value=10"
+        "&system_key=CEO_PI_TIMEOUT_SECONDS"
+        "&system_value=600"
+        "&system_key=CEO_PI_IDLE_TIMEOUT_SECONDS"
+        "&system_value=180"
+        "&system_key=CEO_TASK_PI_TIMEOUT_SECONDS"
+        "&system_value=600"
+        "&system_key=CEO_TASK_PI_IDLE_TIMEOUT_SECONDS"
+        "&system_value=180"
         "&system_key=CEO_MEETING_PRODUCER_INTERVAL_SECONDS"
         "&system_value=60"
         "&system_key=CEO_MEETING_CONSUMER_POLL_INTERVAL_SECONDS"
@@ -3230,6 +3243,10 @@ def test_handle_system_config_post_saves_runtime_params_to_env_file(
     assert "CEO_WORKSPACE=/tmp/new-memory" in env_text
     assert "CEO_PRODUCER_INTERVAL_SECONDS=60" in env_text
     assert "CEO_CONSUMER_POLL_INTERVAL_SECONDS=10" in env_text
+    assert "CEO_PI_TIMEOUT_SECONDS=600" in env_text
+    assert "CEO_PI_IDLE_TIMEOUT_SECONDS=180" in env_text
+    assert "CEO_TASK_PI_TIMEOUT_SECONDS=600" in env_text
+    assert "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS=180" in env_text
     assert "CEO_MEETING_PRODUCER_INTERVAL_SECONDS=60" in env_text
     assert "CEO_MEETING_CONSUMER_POLL_INTERVAL_SECONDS=10" in env_text
     assert "CEO_MEETING_SETTLE_SECONDS=600" in env_text
@@ -4102,6 +4119,32 @@ def test_render_attempt_list_uses_failed_action_pill_color(tmp_path: Path):
     html = render_attempt_list(store)
 
     assert 'class="pill status-action action-state-failed">💬 Failed</span>' in html
+
+
+def test_render_attempt_list_distinguishes_confirmed_effect_finalization_failure(
+    tmp_path: Path,
+):
+    store = AutoReplyStore(tmp_path / "worker.sqlite3")
+    attempt_id = store.record_reply_attempt(
+        conversation_id="cid-1",
+        conversation_title="Mina",
+        trigger_message_id="msg-1",
+        trigger_sender="Mina",
+        trigger_text="@Alex Chen 请发送通知",
+        action="agent_run",
+        sensitivity_kind="general",
+        codex_reason="external action receipt confirmed",
+        send_status="failed",
+    )
+    store.update_reply_attempt(
+        attempt_id,
+        send_error="pi_finalization_failed_after_confirmed_effect",
+    )
+
+    html = render_attempt_list(store)
+
+    assert "⚠️ Action completed · finalization failed" in html
+    assert ">💬 Failed</span>" not in html
 
 
 def test_render_attempt_list_labels_explained_blocked_as_blocked(

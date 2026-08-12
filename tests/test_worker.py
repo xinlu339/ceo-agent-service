@@ -195,6 +195,31 @@ class FailingDirectAgentRunner:
         raise RuntimeError(self.error)
 
 
+class ConfirmedFinalizationFailureRunner:
+    def __init__(self, store: AutoReplyStore) -> None:
+        self.store = store
+        self.owner = "confirmed-finalization-failure"
+
+    def run(self, task, _context, **_kwargs):
+        claim = self.store.claim_agent_run(
+            task.id,
+            task.execution_generation,
+            owner=self.owner,
+        )
+        assert claim.claimed
+        self.store.fail_agent_run(
+            claim.run.id,
+            {
+                "code": "pi_finalization_failed_after_confirmed_effect",
+                "retryable": False,
+                "original_code": "pi_process_failed",
+            },
+            owner=self.owner,
+            side_effect_state="confirmed",
+        )
+        raise RuntimeError("pi_process_failed")
+
+
 def explicit_agent_result(
     outcome: AgentOutcome,
     summary: str,
@@ -2316,6 +2341,27 @@ def test_dws_at_me_message_bypasses_local_alias_filter(
     tasks = worker.store.list_reply_tasks(statuses=("pending",), limit=10)
     assert len(tasks) == 1
     assert tasks[0].trigger_message_id == "dws-at-me-message"
+
+
+def test_producer_filters_self_echo_without_sender_id_and_marks_seen(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("CEO_PRINCIPAL_NAME", "陈凯")
+    monkeypatch.setenv("USER_ALIAS", "陈凯")
+    monkeypatch.setenv("CEO_MENTION_ALIASES", "@CEO")
+    echo = message(
+        "@陈凯(陈凯) 图片已收到，正在处理。",
+        message_id="self-echo-without-id",
+        sender_user_id=None,
+    )
+    echo.sender_name = "陈凯"
+    dws = FakeDws([conversation()], {"cid-1": [echo]})
+    dws.mentioned_messages = {"cid-1": [echo]}
+    worker = make_worker(tmp_path, dws, FakeCodex([]), monkeypatch)
+
+    assert worker.produce_once() == 0
+    assert worker.store.count_reply_tasks() == 0
+    assert worker.store.has_seen(echo.open_message_id)
 
 
 def test_produce_once_does_not_send_processing_ack_for_new_reply_task(
@@ -5189,6 +5235,27 @@ def test_consume_once_authorization_failure_waits_without_final_failure(
     assert task.available_at == ""
     assert worker.store.count_reply_attempts() == 0
     assert gates["dingtalk"].calls == 2
+
+
+def test_confirmed_external_effect_finalization_failure_is_not_retried(
+    tmp_path: Path, monkeypatch
+):
+    trigger = message("@Alex Chen(明哥) 发送后完成状态回写")
+    dws = FakeDws([conversation()], {"cid-1": [trigger]})
+    worker = make_worker(tmp_path, dws, FakeCodex([]), monkeypatch)
+    worker.direct_agent_runner = ConfirmedFinalizationFailureRunner(worker.store)
+    worker.produce_once()
+
+    assert worker.consume_once(max_tasks=1) == 0
+
+    task = worker.store.get_reply_task_for_message("cid-1", "msg-1")
+    assert task is not None
+    assert task.status == "failed"
+    assert worker.store.count_reply_tasks(status="pending") == 0
+    attempt = worker.store.get_latest_reply_attempt_for_trigger("cid-1", "msg-1")
+    assert attempt is not None
+    assert attempt.send_status == "failed"
+    assert attempt.send_error == "pi_finalization_failed_after_confirmed_effect"
 
 
 def test_consume_once_codex_provider_auth_failure_waits_for_authorization(

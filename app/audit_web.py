@@ -32,6 +32,7 @@ from app.codex_history import (
     render_local_codex_session,
 )
 from app.agent_decision import audit_summary_explains_no_documents
+from app.agent_runner import PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT
 from app.config import (
     agent_names,
     assistant_signature,
@@ -2630,6 +2631,26 @@ def _system_config_rows() -> list[tuple[str, str, str]]:
             "consumer 检查 pending reply task 的间隔秒数。",
         ),
         (
+            "CEO_PI_TIMEOUT_SECONDS",
+            env_values.get("CEO_PI_TIMEOUT_SECONDS", "1200"),
+            "普通钉钉回复单次 Agent 调用的总超时；超时后任务会按失败/重试规则处理。",
+        ),
+        (
+            "CEO_PI_IDLE_TIMEOUT_SECONDS",
+            env_values.get("CEO_PI_IDLE_TIMEOUT_SECONDS", "900"),
+            "普通钉钉回复 Agent 连续没有输出时的超时；这是最容易造成长时间无反馈的等待项。",
+        ),
+        (
+            "CEO_TASK_PI_TIMEOUT_SECONDS",
+            env_values.get("CEO_TASK_PI_TIMEOUT_SECONDS", "1200"),
+            "task-maintenance Agent 单次调用的总超时。",
+        ),
+        (
+            "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS",
+            env_values.get("CEO_TASK_PI_IDLE_TIMEOUT_SECONDS", "900"),
+            "task-maintenance Agent 连续没有输出时的超时。",
+        ),
+        (
             "CEO_MEETING_PRODUCER_INTERVAL_SECONDS",
             str(meeting_producer_interval_seconds()),
             "meeting producer 扫描 dws minutes 的间隔秒数。",
@@ -3244,7 +3265,8 @@ def _render_system_config(*, db_path: Path | None = None) -> str:
         "<h2>系统运行参数</h2>"
         "<p class=\"muted\">这些值来自环境变量或代码常量，用于服务运行；"
         "不写入 Prompt，也不会保存到 Developer Prompt 的 &lt;vars&gt;。"
-        f"保存位置：<code>{escape(str(env_file_path()))}</code></p>"
+        f"保存位置：<code>{escape(str(env_file_path()))}</code>。"
+        "修改轮询或 Agent 超时后，需要重启服务才会影响新任务。</p>"
         f"{dingtalk_reply_control}"
         "<form method=\"post\" action=\"/config/system\">"
         "<table class=\"system-config-table\">"
@@ -3345,6 +3367,10 @@ def _editable_system_config_keys() -> set[str]:
         "CEO_FORBIDDEN_PATH_PREFIXES",
         "CEO_PRODUCER_INTERVAL_SECONDS",
         "CEO_CONSUMER_POLL_INTERVAL_SECONDS",
+        "CEO_PI_TIMEOUT_SECONDS",
+        "CEO_PI_IDLE_TIMEOUT_SECONDS",
+        "CEO_TASK_PI_TIMEOUT_SECONDS",
+        "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS",
         "CEO_MEETING_PRODUCER_INTERVAL_SECONDS",
         "CEO_MEETING_CONSUMER_POLL_INTERVAL_SECONDS",
         "CEO_MEETING_SETTLE_SECONDS",
@@ -3627,6 +3653,11 @@ def _parse_utc_timestamp(value: str) -> datetime | None:
 
 
 def _history_event_label(attempt: ReplyAttempt) -> str:
+    if (
+        attempt.send_error.strip()
+        == PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT
+    ):
+        return "⚠️ Action completed · finalization failed"
     calendar_status = attempt.calendar_response_status.strip().lower()
     if calendar_status == "accepted":
         return "📆 Accepted"
@@ -9042,6 +9073,11 @@ def _display_action_state(value: str) -> str:
 
 def _send_status_action(attempt: ReplyAttempt) -> tuple[str, str]:
     send_status = attempt.send_status
+    if (
+        attempt.send_error.strip()
+        == PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT
+    ):
+        return "⚠️ Action completed · finalization failed", send_status
     if send_status.strip().lower() == "reacted":
         return "🙂 Reacted", send_status
     return f"💬 {_display_action_state(send_status)}", send_status

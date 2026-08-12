@@ -32,6 +32,7 @@ from app.agent_runner import (
     ReconciliationResult,
     DirectAgentRunResult,
     DirectAgentRunner,
+    PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT,
     unknown_effect_reference,
 )
 from app.channel_gate import (
@@ -44,14 +45,18 @@ from app.channel_gate import (
 )
 from app.config import (
     agent_mention_aliases,
+    agent_names,
     assistant_signature,
     broadcast_mention_aliases,
     env_duration,
     fast_path_unread_backoff_duration,
     handoff_ack,
+    mention_aliases,
     message_recovery_interval,
+    principal_name,
     single_chat_read_recovery_limit,
     single_chat_read_recovery_window,
+    user_alias,
 )
 from app.corpus import MEDIA_OR_LINK_PATTERN, count_information_units
 from app.dws_client import (
@@ -434,6 +439,8 @@ class DingTalkAutoReplyWorker:
         channel_gates: dict[str, ChannelGate] | None = None,
         login_coordinator: LoginCoordinator | None = None,
         direct_agent_runner: DirectAgentRunner | None = None,
+        pi_timeout_seconds: int | None = None,
+        pi_idle_timeout_seconds: int | None = None,
     ):
         self.store = store
         self.dws = dws
@@ -459,6 +466,8 @@ class DingTalkAutoReplyWorker:
         )
         self._pass_channel_results: dict[str, ChannelGateResult] = {}
         self.direct_agent_runner = direct_agent_runner
+        self.pi_timeout_seconds = pi_timeout_seconds
+        self.pi_idle_timeout_seconds = pi_idle_timeout_seconds
 
     def _direct_agent_runner(self) -> DirectAgentRunner:
         if self.direct_agent_runner is not None:
@@ -471,6 +480,8 @@ class DingTalkAutoReplyWorker:
             store=self.store,
             workspace=Path(workspace),
             node_binary=str(getattr(runner, "node_binary", "node")),
+            total_timeout_seconds=self.pi_timeout_seconds,
+            idle_timeout_seconds=self.pi_idle_timeout_seconds,
         )
         return self.direct_agent_runner
 
@@ -873,6 +884,16 @@ class DingTalkAutoReplyWorker:
             )
             candidate_source_messages = self._discard_service_handoff_notifications(
                 candidate_source_messages
+            )
+            # A reply emitted by this service can be returned by DingTalk's
+            # unread/recent/at-me readers.  Mark those echoes seen before
+            # candidate selection so they cannot be reprocessed on every pass.
+            self._mark_seen(
+                [
+                    message
+                    for message in candidate_source_messages
+                    if self._is_current_user_message_for_candidate_filter(message)
+                ]
             )
             candidates = self._candidate_messages(
                 conversation,
@@ -1519,6 +1540,21 @@ class DingTalkAutoReplyWorker:
                 continue
             except Exception as exc:
                 error = str(exc)
+                persisted_run = self.store.get_agent_run_for_task_generation(
+                    task.id,
+                    task.execution_generation,
+                )
+                if persisted_run is not None and persisted_run.status == "failed":
+                    try:
+                        persisted_error = json.loads(
+                            persisted_run.structured_error_json or "{}"
+                        )
+                    except json.JSONDecodeError:
+                        persisted_error = {}
+                    if isinstance(persisted_error, dict) and persisted_error.get(
+                        "code"
+                    ):
+                        error = str(persisted_error["code"])
                 authorization_wait_error = _normalize_agent_stop_error_reason(error)
                 if self._is_authorization_error(
                     exc
@@ -1576,10 +1612,11 @@ class DingTalkAutoReplyWorker:
                             task.id,
                             task.execution_generation,
                         )
+                    retryable = error != PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT
                     task_status = self._record_agent_runtime_failure_attempt(
                         task,
                         error,
-                        retryable=True,
+                        retryable=retryable,
                         retry_beyond_limit=(
                             error in RECOVERABLE_AGENT_RUNTIME_ERRORS
                             and task.attempts == self.max_task_attempts
@@ -4257,6 +4294,14 @@ class DingTalkAutoReplyWorker:
     ) -> bool:
         if self._is_robot_direct_trigger(message):
             return False
+        # These markers are produced by the service itself.  Treat them as
+        # self-messages even when DWS omits sender identifiers in the echo.
+        if (
+            self._is_split_person_auto_reply_message(message)
+            or self._is_processing_ack_message(message)
+            or self._is_service_handoff_notification(message)
+        ):
+            return True
         current_user_id = self.store.get_current_user_id()
         if current_user_id and message.sender_user_id:
             return message.sender_user_id == current_user_id
@@ -4264,8 +4309,47 @@ class DingTalkAutoReplyWorker:
             profile = self.store.find_org_user_by_open_dingtalk_id(
                 message.sender_open_dingtalk_id
             )
-            return profile is not None and profile.user_id == current_user_id
-        return False
+            if profile is not None:
+                return profile.user_id == current_user_id
+        # Some DWS message sources return only the display name for a message
+        # echo.  Fall back to configured principal/agent identities only when
+        # no authoritative sender ID was available in a group.  Single chats
+        # can legitimately contain a counterparty with the same display name,
+        # so name-only fallback is intentionally disabled there.
+        if message.single_chat:
+            return False
+        sender_name = self._normalized_identity_name(message.sender_name)
+        if not sender_name:
+            return False
+        configured_names = (
+            principal_name(),
+            user_alias(),
+            *mention_aliases(),
+            *agent_names(),
+        )
+        return any(
+            sender_name in self._identity_name_variants(name)
+            for name in configured_names
+        )
+
+    @staticmethod
+    def _normalized_identity_name(value: str) -> str:
+        return re.sub(r"\s+", "", value.strip().lstrip("@")).casefold()
+
+    @classmethod
+    def _identity_name_variants(cls, value: str) -> set[str]:
+        normalized = cls._normalized_identity_name(value)
+        if not normalized:
+            return set()
+        variants = {normalized}
+        for delimiter in ("(", "（"):
+            if delimiter in normalized:
+                variants.add(normalized.split(delimiter, 1)[0])
+        return {
+            item
+            for item in variants
+            if item not in {"theprincipal", "principal"}
+        }
 
     @staticmethod
     def _is_split_person_auto_reply_message(message: DingTalkMessage) -> bool:
