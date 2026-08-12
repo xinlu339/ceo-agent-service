@@ -2289,6 +2289,35 @@ def test_produce_once_enqueues_candidate_without_calling_codex(
     assert worker.store.count_reply_tasks(status="pending") == 1
 
 
+def test_dws_at_me_message_bypasses_local_alias_filter(
+    tmp_path: Path, monkeypatch
+):
+    """A DWS list-mentions result is authoritative even if its display name
+    is absent from the local CEO_MENTION_ALIASES setting.
+    """
+
+    monkeypatch.setenv("CEO_MENTION_ALIASES", "@CEO")
+    trigger = message(
+        "@陈凯(陈凯) 看看这篇文档讲了什么",
+        message_id="dws-at-me-message",
+    )
+    dws = FakeDws([conversation()], {"cid-1": [trigger]})
+    # FakeDws normally derives this list by local aliases.  Model the DWS
+    # `chat +at-me` response explicitly to reproduce the production failure.
+    dws.mentioned_messages = {"cid-1": [trigger]}
+    codex = FakeCodex(
+        AgentDecision(action=AgentAction.SEND_REPLY, reply_text="不应该调用")
+    )
+    worker = make_worker(tmp_path, dws, codex, monkeypatch)
+
+    queued = worker.produce_once()
+
+    assert queued == 1
+    tasks = worker.store.list_reply_tasks(statuses=("pending",), limit=10)
+    assert len(tasks) == 1
+    assert tasks[0].trigger_message_id == "dws-at-me-message"
+
+
 def test_produce_once_does_not_send_processing_ack_for_new_reply_task(
     tmp_path: Path, monkeypatch
 ):

@@ -877,6 +877,13 @@ class DingTalkAutoReplyWorker:
             candidates = self._candidate_messages(
                 conversation,
                 candidate_source_messages,
+                trusted_message_ids={
+                    message.open_message_id
+                    for message in mentioned_messages.get(
+                        conversation.open_conversation_id,
+                        [],
+                    )
+                },
             )
             new_messages = [
                 message
@@ -4074,12 +4081,15 @@ class DingTalkAutoReplyWorker:
         self,
         conversation: DingTalkConversation,
         messages: list[DingTalkMessage],
+        *,
+        trusted_message_ids: set[str] | None = None,
     ) -> list[DingTalkMessage]:
         if conversation.single_chat:
             eligible_messages = messages
             latest_current_user_message_time = None
             ignore_current_user_cutoff = True
         else:
+            trusted_message_ids = trusted_message_ids or set()
             current_user_message_times = [
                 message.create_time
                 for message in messages
@@ -4094,7 +4104,8 @@ class DingTalkAutoReplyWorker:
             eligible_messages = [
                 message
                 for message in messages
-                if message.addresses_principal()
+                if message.open_message_id in trusted_message_ids
+                or message.addresses_principal()
             ]
             ignore_current_user_cutoff = False
         candidates = [
