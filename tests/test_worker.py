@@ -4000,6 +4000,39 @@ def test_repeated_produce_once_does_not_duplicate_pending_task(
     assert codex.calls == []
 
 
+def test_produce_once_skips_mention_with_existing_reply_task(
+    tmp_path: Path, monkeypatch
+):
+    trigger = message("@Alex Chen(明哥) 这条已经处理过了？")
+    dws = FakeDws([conversation()], {"cid-1": [trigger]})
+    dws.mentioned_messages = {"cid-1": [trigger]}
+    worker = make_worker(tmp_path, dws, FakeCodex([]), monkeypatch)
+
+    assert worker.store.enqueue_reply_task(
+        conversation_id="cid-1",
+        conversation_title="Friday",
+        single_chat=False,
+        trigger_message_id=trigger.open_message_id,
+        trigger_create_time=trigger.create_time,
+        trigger_sender=trigger.sender_name,
+        trigger_text=trigger.content,
+        trigger_message_json=trigger.model_dump_json(),
+    )
+    task = worker.store.get_reply_task_for_message("cid-1", trigger.open_message_id)
+    assert task is not None
+    claimed = worker.store.claim_reply_task(task.id)
+    assert claimed is not None
+    worker.store.complete_reply_task(
+        task.id,
+        expected_execution_generation=claimed.execution_generation,
+    )
+
+    assert worker.produce_once() == 0
+    assert worker.store.count_reply_tasks() == 1
+    assert worker.store.count_reply_tasks(status="pending") == 0
+    assert worker.store.has_seen(trigger.open_message_id)
+
+
 def test_produce_once_treats_configured_agent_name_mention_like_principal_mention(
     tmp_path: Path, monkeypatch
 ):

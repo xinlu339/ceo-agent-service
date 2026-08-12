@@ -906,11 +906,28 @@ class DingTalkAutoReplyWorker:
                     )
                 },
             )
-            new_messages = [
-                message
-                for message in candidates
-                if not self.store.has_seen(message.open_message_id)
-            ]
+            new_messages = []
+            for message in candidates:
+                if self.store.has_seen(message.open_message_id):
+                    continue
+                if self.store.has_reply_task_for_trigger(
+                    conversation.open_conversation_id,
+                    message.open_message_id,
+                    channel="dingtalk",
+                ):
+                    # list-mentions is a lookback query, not an unread cursor.
+                    # Once a trigger has a task record, discard the repeat
+                    # and persist the local seen marker in live mode so future
+                    # passes do not keep reconsidering the same historical mention.
+                    self._log_producer_skip(
+                        conversation,
+                        message,
+                        reason="trigger_already_processed",
+                        audit_summary="该艾特消息已有任务记录，不再重复处理。",
+                    )
+                    self._mark_seen([message])
+                    continue
+                new_messages.append(message)
             if not new_messages:
                 continue
             new_messages = self._skip_messages_outside_recent_window(

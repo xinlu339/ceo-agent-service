@@ -6815,6 +6815,37 @@ class AutoReplyStore:
             ).fetchone()
             return row is not None
 
+    def has_reply_task_for_trigger(
+        self,
+        conversation_id: str,
+        trigger_message_id: str,
+        *,
+        channel: str = "dingtalk",
+    ) -> bool:
+        """Return whether automatic scanning already created a task for a trigger.
+
+        DWS's mention endpoint is a lookback query, so a trigger can be returned
+        on every poll.  The reply-task row is the producer's idempotency record.
+        Older ``reply_attempts`` and ``sent_replies`` rows are deliberately not
+        consulted here: downstream rerun and safety workflows use those rows as
+        prior execution receipts and may need to re-evaluate the same trigger.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                """
+                select 1
+                from reply_tasks
+                where channel=? and conversation_id=? and trigger_message_id=?
+                limit 1
+                """,
+                (
+                    channel,
+                    conversation_id,
+                    trigger_message_id,
+                ),
+            ).fetchone()
+            return row is not None
+
     def sent_reply_exists(
         self,
         conversation_id: str,
