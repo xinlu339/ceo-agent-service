@@ -26,7 +26,12 @@ from app.pi_tool_metadata import (
 from app.process_runner import ProcessRunResult, run_process_with_idle_timeout
 from app.pi_events import assistant_text_candidates, pi_session_id_from_payload
 from app.pi_history import count_pi_session_lines, find_pi_session_path
-from app.pi_runner import PiRunner, pi_process_failure_reason
+from app.pi_runner import (
+    PI_REPLY_AT_OPEN_DINGTALK_ID_ENV,
+    PI_REPLY_SINGLE_CHAT_ENV,
+    PiRunner,
+    pi_process_failure_reason,
+)
 from app.store import AgentRun, AgentRunLeaseLostError, AutoReplyStore, ReplyTask
 
 
@@ -46,6 +51,9 @@ DIRECT_AGENT_DEVELOPER_INSTRUCTIONS = """You are the Direct Agent for one queued
 - The Agent owns evidence reads, business judgment, direct execution and verification.
 - Use raw identifiers, references, exact read commands, and live tool results. Do not rely on service-side target assumptions.
 - Complete authorized work only through the installed reviewed Pi tools. Use workspace_read/workspace_search/workspace_list for local evidence, graphify_read for the installed read-only Graphify query/explain/path operations, download_dingtalk_image for DingTalk robot image download codes, execute_reviewed_read/execute_reviewed_write for reviewed DWS operations, execute_reviewed_lark_read/execute_reviewed_lark_write for reviewed Lark operations, the explicitly registered Memory tools for Friday Memory, Exa for public web reads, and Xiaoqing tools for reviewed interview operations when configured. Arbitrary bash, edit, write, authentication, package installation, destructive commands, and unregistered MCP capabilities are unavailable. Do not produce plans, action arrays, or requests for service execution.
+- DingTalk TODO intent has priority over Memory. Phrases such as “记一个待办”, “创建待办”, “TODO”, “截止日期”, “周五前完成”, or “帮我记一下任务” mean that the requested side effect is a DingTalk Todo. Read the installed dingtalk-todo skill when needed, then use execute_reviewed_write with the exact reviewed DWS command `dws todo task create` (including the resolved title, executor, due time, and priority). Do not call memory_write or document_upload for a Todo request. If the due time or executor cannot be resolved reliably, return needs_human and ask one focused clarification instead of writing Memory.
+- Ordinary DingTalk reply tasks must not write Friday Memory or upload documents to it. The Direct Agent does not expose memory_write/document_upload for these tasks; use Memory read tools only when historical evidence is actually needed. A Memory write is never a fallback for a failed or ambiguous business-tool action.
+- For a DingTalk group reply to the original trigger, use `dws chat message reply` with `--at-open-dingtalk-ids <sender_open_dingtalk_id>` on the reply. A native reference (`--ref-msg-id`/`--ref-sender`) alone does not render a visible @. Do not add this mention in a single chat, and use the exact ID from Original trigger rather than guessing from a name.
 - Return only one JSON result with outcome, summary, and error. The outcome is completed, no_action, needs_human, or failed; summary is a nonempty factual description; error is always an object with code, retryable, and authorization_required, using an empty code and false flags when there is no error.
 - Never run authentication login, reset, or logout commands. Authentication readiness belongs to the service gate.
 - Never expose credentials, tokens, cookies, authorization codes, signed URLs, or local credential paths.
@@ -238,6 +246,24 @@ class DirectAgentRunner:
             lambda session_id: find_pi_session_path(session_id) is not None
         )
 
+    def _build_agent_environment(
+        self,
+        context: AgentTaskContext,
+        *,
+        allow_group_reply_mention: bool,
+    ) -> dict[str, str]:
+        env = self.pi.build_env(preserve_local_cli_auth=True)
+        if (
+            allow_group_reply_mention
+            and not context.single_chat
+            and context.trigger_sender_open_dingtalk_id.strip()
+        ):
+            env[PI_REPLY_AT_OPEN_DINGTALK_ID_ENV] = (
+                context.trigger_sender_open_dingtalk_id.strip()
+            )
+            env[PI_REPLY_SINGLE_CHAT_ENV] = "0"
+        return env
+
     def run(
         self,
         task: ReplyTask,
@@ -322,6 +348,7 @@ class DirectAgentRunner:
             developer_instructions=developer_instructions,
             use_approval_bypass=not read_only,
             ignore_user_config=True,
+            allow_memory_writes=False,
         )
         saw_json = False
         stream_line_count = 0
@@ -385,7 +412,10 @@ class DirectAgentRunner:
             process = self.executor(
                 command,
                 prompt=prompt,
-                env=self.pi.build_env(preserve_local_cli_auth=True),
+                env=self._build_agent_environment(
+                    context,
+                    allow_group_reply_mention=not read_only,
+                ),
                 total_timeout_seconds=self.total_timeout_seconds,
                 idle_timeout_seconds=self.idle_timeout_seconds,
                 on_stdout_line=persist_line,
@@ -607,6 +637,7 @@ class DirectAgentRunner:
             developer_instructions=developer_instructions,
             use_approval_bypass=False,
             ignore_user_config=True,
+            allow_memory_writes=False,
         )
         active_metadata: dict[str, dict[str, object]] = {}
         events: list[dict[str, object]] = []
@@ -645,7 +676,10 @@ class DirectAgentRunner:
             process = self.executor(
                 command,
                 prompt=prompt,
-                env=self.pi.build_env(preserve_local_cli_auth=True),
+                env=self._build_agent_environment(
+                    context,
+                    allow_group_reply_mention=False,
+                ),
                 total_timeout_seconds=self.total_timeout_seconds,
                 idle_timeout_seconds=self.idle_timeout_seconds,
                 on_stdout_line=persist_line,

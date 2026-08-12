@@ -165,6 +165,26 @@ def test_pi_runner_effectful_command_exposes_only_reviewed_extension_tools(
     assert "write" not in command[command.index("--tools") + 1].split(",")
 
 
+def test_pi_runner_can_hide_memory_writes_for_ordinary_reply_tasks(
+    tmp_path: Path, monkeypatch
+):
+    _configure_runtime(monkeypatch, tmp_path)
+    runner = PiRunner(workspace=tmp_path, pi_cli_path_value="pi.js")
+
+    command = runner.build_command(
+        prompt="创建一个钉钉待办",
+        session_id=None,
+        approval_policy="untrusted",
+        allow_memory_writes=False,
+    )
+
+    tools = command[command.index("--tools") + 1].split(",")
+    assert "execute_reviewed_write" in tools
+    assert "memory_write" not in tools
+    assert "document_upload" not in tools
+    assert "upload_interview_result" in tools
+
+
 def test_pi_runner_profile_distillation_exposes_only_workspace_and_profile_write(
     tmp_path: Path,
     monkeypatch,

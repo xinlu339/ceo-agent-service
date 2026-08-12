@@ -279,6 +279,36 @@ function commandDigest(argv: string[]): string {
 	return createHash("sha256").update(JSON.stringify(argv)).digest("hex");
 }
 
+function withAutomaticReplyMention(argv: string[]): string[] {
+	// Native DingTalk replies quote a message but do not visibly @ its sender.
+	// Direct Agent invocations provide the exact trigger sender open ID through
+	// a per-process environment variable.  Keep this normalization in the
+	// reviewed adapter so a model omission cannot silently regress delivery.
+	const senderOpenDingTalkId = (process.env.CEO_PI_REPLY_AT_OPEN_DINGTALK_ID ?? "").trim();
+	if (
+		!senderOpenDingTalkId ||
+		process.env.CEO_PI_REPLY_SINGLE_CHAT === "1" ||
+		argv.slice(1, 4).join(" ") !== "chat message reply"
+	) return argv;
+	const rewritten = [...argv];
+	const mentionFlagIndex = rewritten.findIndex((value) => value === "--at-open-dingtalk-ids");
+	if (mentionFlagIndex >= 0) {
+		const valueIndex = mentionFlagIndex + 1;
+		if (valueIndex >= rewritten.length || rewritten[valueIndex].startsWith("-")) {
+			rewritten.splice(valueIndex, 0, senderOpenDingTalkId);
+		} else {
+			const ids = rewritten[valueIndex].split(",").map((value) => value.trim()).filter(Boolean);
+			if (!ids.includes(senderOpenDingTalkId)) ids.unshift(senderOpenDingTalkId);
+			rewritten[valueIndex] = ids.join(",");
+		}
+		return rewritten;
+	}
+	const textFlagIndex = rewritten.findIndex((value) => value === "--text");
+	const insertAt = textFlagIndex >= 0 ? textFlagIndex : rewritten.length;
+	rewritten.splice(insertAt, 0, "--at-open-dingtalk-ids", senderOpenDingTalkId);
+	return rewritten;
+}
+
 function reviewedImageMimeType(data: Buffer): string | undefined {
 	if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
 		return "image/png";
@@ -904,7 +934,10 @@ async function executeReviewedDws(argv: string[], effect: "read" | "write", sign
 	const imageDownload = effect === "read" && metadata.cli_path === "chat message download-media";
 	let imageTempDir: string | undefined;
 	let imagePath: string | undefined;
-	let executionArgv = originalArgv;
+	let executionArgv =
+		effect === "write" && metadata.cli_path === "chat message reply"
+			? withAutomaticReplyMention(originalArgv)
+			: originalArgv;
 	if (imageDownload) {
 		imageTempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ceo-agent-pi-image-"));
 		imagePath = path.join(imageTempDir, "downloaded-image");

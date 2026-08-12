@@ -43,6 +43,7 @@ from app.audit_web import (
     render_workers_page,
     render_user_feedback_list,
     run_audit_web,
+    _reply_task_error_text,
 )
 from app.developer_prompt import read_developer_prompt_template
 from app.config import load_env_file
@@ -63,6 +64,13 @@ def loopback_test_client(app) -> TestClient:
         client=("127.0.0.1", 50000),
         headers={"Host": "127.0.0.1:8765"},
     )
+
+
+def test_reply_task_error_text_explains_unreviewed_agent_write():
+    message = _reply_task_error_text("agent_run_unknown")
+
+    assert "未通过审计确认" in message
+    assert "核对钉钉实际状态" in message
 
 
 def seed_attempt(store: AutoReplyStore) -> int:

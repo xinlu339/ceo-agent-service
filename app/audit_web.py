@@ -6372,9 +6372,10 @@ def _user_feedback_resolve_action(item: UserFeedbackItem, status: str) -> str:
 
 
 def _reply_task_item(task: ReplyTask) -> str:
+    display_error = _reply_task_error_text(task.error)
     error_html = (
-        f"<div class=\"attempt-foot\"><span class=\"attempt-warning\">{escape(task.error)}</span></div>"
-        if task.error and task.error != FAST_PATH_UNREAD_BACKOFF_TASK_ERROR
+        f"<div class=\"attempt-foot\"><span class=\"attempt-warning\">{escape(display_error)}</span></div>"
+        if display_error and task.error != FAST_PATH_UNREAD_BACKOFF_TASK_ERROR
         else ""
     )
     return (
@@ -6428,8 +6429,20 @@ def _reply_task_progress_text(task: ReplyTask) -> str:
     if task.status == "processing":
         return "分身正在处理"
     if task.error:
-        return task.error
+        return _reply_task_error_text(task.error)
     return "任务尚未完成"
+
+
+def _reply_task_error_text(error: str) -> str:
+    """Turn low-level Agent safety codes into an operator-readable status."""
+
+    normalized = (error or "").strip()
+    if normalized in {"agent_run_unknown", "pi_unreviewed_tool_effect"}:
+        return (
+            "分身调用了未通过审计确认的外部写入工具，服务已阻止本次任务；"
+            "请先核对钉钉实际状态，再重试。"
+        )
+    return normalized
 
 
 def render_attempt_detail(store: AutoReplyStore, attempt_id: int) -> tuple[int, str]:

@@ -545,6 +545,100 @@ def test_reviewed_extension_uses_argv_without_shell_and_strips_provider_secrets(
     assert records == [{"argv": argv, "secrets": {}}]
 
 
+def test_reviewed_dingtalk_reply_auto_mentions_original_group_trigger_sender(
+    tmp_path: Path,
+):
+    argv = [
+        "dws",
+        "chat",
+        "message",
+        "reply",
+        "--conversation-id",
+        "cid-1",
+        "--ref-msg-id",
+        "msg-1",
+        "--ref-sender",
+        "open-lily",
+        "--text",
+        "收到，我来处理。",
+        "--format",
+        "json",
+        "--yes",
+    ]
+    result, log_path = _run_tool(
+        tmp_path,
+        tool_name="execute_reviewed_write",
+        params={"argv": argv},
+        tools=[_metadata("chat message reply", "write")],
+        stdout=json.dumps({"messageId": "reply-1"}),
+        extra_env={"CEO_PI_REPLY_AT_OPEN_DINGTALK_ID": "open-lily"},
+    )
+
+    assert result["ok"] is True
+    records = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[0]["argv"] == [
+        "dws",
+        "chat",
+        "message",
+        "reply",
+        "--conversation-id",
+        "cid-1",
+        "--ref-msg-id",
+        "msg-1",
+        "--ref-sender",
+        "open-lily",
+        "--at-open-dingtalk-ids",
+        "open-lily",
+        "--text",
+        "收到，我来处理。",
+        "--format",
+        "json",
+        "--yes",
+    ]
+    # The receipt remains bound to the model-supplied argv; the adapter's
+    # policy normalization is not a second, ambiguous operation.
+    assert result["result"]["details"]["operationDigest"]
+
+
+def test_reviewed_dingtalk_reply_does_not_mention_single_chat_sender(
+    tmp_path: Path,
+):
+    argv = [
+        "dws",
+        "chat",
+        "message",
+        "reply",
+        "--conversation-id",
+        "cid-1",
+        "--ref-msg-id",
+        "msg-1",
+        "--ref-sender",
+        "open-lily",
+        "--text",
+        "收到。",
+        "--format",
+        "json",
+        "--yes",
+    ]
+    result, log_path = _run_tool(
+        tmp_path,
+        tool_name="execute_reviewed_write",
+        params={"argv": argv},
+        tools=[_metadata("chat message reply", "write")],
+        extra_env={
+            "CEO_PI_REPLY_AT_OPEN_DINGTALK_ID": "open-lily",
+            "CEO_PI_REPLY_SINGLE_CHAT": "1",
+        },
+    )
+
+    assert result["ok"] is True
+    record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert "--at-open-dingtalk-ids" not in record["argv"]
+
+
 def test_reviewed_dws_image_download_returns_pixels_and_deletes_temp_file(
     tmp_path: Path,
 ):

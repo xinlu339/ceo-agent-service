@@ -765,6 +765,28 @@ def test_direct_runner_uses_configured_pi_timeouts(
     assert executor.kwargs[0]["idle_timeout_seconds"] == 11
 
 
+def test_direct_runner_passes_group_trigger_sender_to_pi_reply_adapter(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    executor = RecordingExecutor(_jsonl())
+    context = replace(
+        _context(task.id),
+        trigger_sender_open_dingtalk_id="open-et",
+    )
+
+    DirectAgentRunner(
+        store=store,
+        workspace=tmp_path,
+        executor=executor,
+    ).run(task, context)
+
+    env = executor.kwargs[0]["env"]
+    assert env["CEO_PI_REPLY_AT_OPEN_DINGTALK_ID"] == "open-et"
+    assert env["CEO_PI_REPLY_SINGLE_CHAT"] == "0"
+
+
 def test_confirmed_effect_does_not_become_unknown_when_pi_finalization_fails(
     tmp_path: Path,
     store: AutoReplyStore,
@@ -1140,6 +1162,34 @@ def test_direct_agent_requires_oa_applicant_notification_after_confirmed_action(
     assert "download_dingtalk_image" in instructions
     assert "Xiaoqing exposes five reads" in instructions
     assert "official lark-cli risk metadata" in instructions
+
+
+def test_direct_agent_routes_todo_intent_away_from_memory_writes():
+    instructions = direct_agent_developer_instructions()
+
+    assert "DingTalk TODO intent has priority over Memory" in instructions
+    assert "dws todo task create" in instructions
+    assert "Do not call memory_write or document_upload for a Todo request" in instructions
+    assert "Ordinary DingTalk reply tasks must not write Friday Memory" in instructions
+
+
+def test_direct_runner_hides_memory_write_tools_for_reply_tasks(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(
+        store=store,
+        workspace=tmp_path,
+        executor=executor,
+    ).run(task, _context(task.id))
+
+    tools = executor.commands[0][executor.commands[0].index("--tools") + 1].split(",")
+    assert "execute_reviewed_write" in tools
+    assert "memory_write" not in tools
+    assert "document_upload" not in tools
 
 
 def test_pi_reconciliation_uses_only_reviewed_read_and_binds_live_proof(

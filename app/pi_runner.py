@@ -36,6 +36,8 @@ PI_XIAOQING_ACCESS_TOKEN_ENV = "CEO_PI_XIAOQING_ACCESS_TOKEN"
 PI_XIAOQING_BRIDGE_PATH_ENV = "CEO_PI_XIAOQING_BRIDGE_PATH"
 PI_DINGTALK_IMAGE_BRIDGE_PATH_ENV = "CEO_PI_DINGTALK_IMAGE_BRIDGE_PATH"
 PI_WORK_PROFILE_PATH_ENV = "CEO_PI_WORK_PROFILE_PATH"
+PI_REPLY_AT_OPEN_DINGTALK_ID_ENV = "CEO_PI_REPLY_AT_OPEN_DINGTALK_ID"
+PI_REPLY_SINGLE_CHAT_ENV = "CEO_PI_REPLY_SINGLE_CHAT"
 GRAPHIFY_BINARY_ENV = "CEO_GRAPHIFY_BINARY"
 
 DEFAULT_PI_PROVIDER = "deepseek"
@@ -83,6 +85,10 @@ EFFECTFUL_PI_TOOLS = (
     "memory_write",
     "document_upload",
     "upload_interview_result",
+)
+MEMORY_WRITE_PI_TOOLS = (
+    "memory_write",
+    "document_upload",
 )
 PROFILE_DISTILLATION_PI_TOOLS = (
     "workspace_read",
@@ -806,6 +812,11 @@ class PiRunner:
         }:
             env.pop(key, None)
         env.pop("MEMORY_CONNECTOR_USER_ID", None)
+        # These are set per Direct Agent invocation, never inherited from the
+        # launchd/service environment.  The reviewed DWS extension uses them
+        # only to enforce the original trigger @ on a group native reply.
+        env.pop(PI_REPLY_AT_OPEN_DINGTALK_ID_ENV, None)
+        env.pop(PI_REPLY_SINGLE_CHAT_ENV, None)
         env.update(pi_memory_connector_env())
         env["PI_CODING_AGENT_DIR"] = str(pi_agent_dir())
         env["PI_CODING_AGENT_SESSION_DIR"] = str(pi_session_dir())
@@ -852,6 +863,7 @@ class PiRunner:
         use_approval_bypass: bool = True,
         preserve_native_model_config: bool = False,
         profile_distillation: bool = False,
+        allow_memory_writes: bool = True,
     ) -> list[str]:
         del prompt
         del output_schema_path
@@ -897,6 +909,12 @@ class PiRunner:
             allowed_tools = READ_ONLY_PI_TOOLS
             if approval_policy == "untrusted":
                 allowed_tools += EFFECTFUL_PI_TOOLS
+                if not allow_memory_writes:
+                    allowed_tools = tuple(
+                        tool
+                        for tool in allowed_tools
+                        if tool not in MEMORY_WRITE_PI_TOOLS
+                    )
         command.extend(["--tools", ",".join(allowed_tools)])
         if session_id:
             command.extend(["--session-id", session_id])

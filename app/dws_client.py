@@ -590,10 +590,16 @@ class DwsClient:
         at_open_dingtalk_ids: list[str] | None = None,
         at_open_dingtalk_names: list[str] | None = None,
     ) -> list[str]:
-        del at_users, at_open_dingtalk_ids, at_open_dingtalk_names
+        # ``dws chat message reply`` uses the reference flags to quote a
+        # message, but quoting alone does not create a visible @ mention.  The
+        # CLI's structured mention flag is the authoritative way to mention a
+        # member in a native reply.  ``at_users`` and names are retained for
+        # API compatibility with older callers; only openDingTalkIds can be
+        # sent losslessly to the current DWS CLI.
+        del at_users, at_open_dingtalk_names
         if not conversation_id or not ref_message_id or not ref_sender_open_dingtalk_id:
             raise ValueError("conversation id, ref message id, and ref sender are required")
-        return [
+        command = [
             self.dws_bin,
             "chat",
             "message",
@@ -604,12 +610,27 @@ class DwsClient:
             ref_message_id,
             "--ref-sender",
             ref_sender_open_dingtalk_id,
-            "--text",
-            self._literal_cli_value(text),
-            "--format",
-            "json",
-            "--yes",
         ]
+        if at_open_dingtalk_ids:
+            command.extend(
+                ["--at-open-dingtalk-ids", ",".join(at_open_dingtalk_ids)]
+            )
+        reply_text = text
+        if at_open_dingtalk_ids:
+            reply_text = self._with_open_dingtalk_at_placeholders(
+                text,
+                at_open_dingtalk_ids,
+            )
+        command.extend(
+            [
+                "--text",
+                self._literal_cli_value(reply_text),
+                "--format",
+                "json",
+                "--yes",
+            ]
+        )
+        return command
 
     def build_mail_reply_command(
         self,
@@ -2792,6 +2813,18 @@ class DwsClient:
     ) -> dict[str, Any]:
         if not trigger.sender_open_dingtalk_id:
             raise DwsError("missing trigger senderOpenDingTalkId for native reply")
+        # A native reply references the original message, but DingTalk does
+        # not render that reference as an @.  For the ordinary group-reply
+        # path, default to mentioning the person who triggered the task.  An
+        # explicit mention list remains authoritative for callers that need a
+        # different target (for example a handoff to another colleague).
+        if (
+            not conversation.single_chat
+            and at_open_dingtalk_ids is None
+            and at_open_dingtalk_names is None
+            and at_users is None
+        ):
+            at_open_dingtalk_ids = [trigger.sender_open_dingtalk_id]
         return self.reply_message(
             conversation.open_conversation_id,
             trigger.open_message_id,

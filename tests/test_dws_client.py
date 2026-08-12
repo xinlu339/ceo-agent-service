@@ -2067,6 +2067,47 @@ def test_reply_message_command_shape():
     ]
 
 
+def test_reply_message_command_emits_structured_open_dingtalk_mention():
+    client = DwsClient(dws_bin="dws")
+
+    command = client.build_reply_message_command(
+        conversation_id="cid-1",
+        ref_message_id="msg-1",
+        ref_sender_open_dingtalk_id="open-1",
+        text="收到，我来处理。",
+        at_open_dingtalk_ids=["open-1"],
+    )
+
+    assert command[command.index("--at-open-dingtalk-ids") + 1] == "open-1"
+    assert command[command.index("--text") + 1] == "<@open-1> 收到，我来处理。"
+
+
+def test_send_reply_to_trigger_defaults_to_mentioning_group_trigger_sender():
+    client = RecordingDwsClient({"success": True})
+    conversation = DingTalkConversation(
+        open_conversation_id="cid-1",
+        title="CEO-2 管理群",
+        single_chat=False,
+        unread_point=1,
+    )
+    trigger = DingTalkMessage(
+        open_conversation_id="cid-1",
+        open_message_id="msg-1",
+        conversation_title="CEO-2 管理群",
+        single_chat=False,
+        sender_name="Lily",
+        sender_open_dingtalk_id="open-lily",
+        create_time="2026-06-09 09:00:00",
+        content="请看一下",
+    )
+
+    client.send_reply_to_trigger(conversation, trigger, "收到，我来处理。")
+
+    command = client.commands[0]
+    assert command[command.index("--at-open-dingtalk-ids") + 1] == "open-lily"
+    assert command[command.index("--text") + 1] == "<@open-lily> 收到，我来处理。"
+
+
 def test_send_reply_to_trigger_prefers_native_reply_over_group_at_send():
     client = RecordingDwsClient({"success": True})
     conversation = DingTalkConversation(
@@ -2106,8 +2147,10 @@ def test_send_reply_to_trigger_prefers_native_reply_over_group_at_send():
             "msg-1",
             "--ref-sender",
             "open-lily",
+            "--at-open-dingtalk-ids",
+            "open-et",
             "--text",
-            " @ET(张毅倜) 先出方案。",
+            "<@open-et> @ET(张毅倜) 先出方案。",
             "--format",
             "json",
             "--yes",
