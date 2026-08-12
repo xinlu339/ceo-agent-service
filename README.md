@@ -208,6 +208,7 @@ cp .env.example .env
 | `CEO_WORKSPACE` | 本地知识 workspace，供 agent 检索 |
 | `CEO_WORKER_DB` | SQLite 状态库路径；默认位于 `~/Library/Application Support/ceo-agent-service/auto-reply.sqlite3`，每天生成一次一致性备份并保留最近 3 天及约 7、14 天恢复点 |
 | `CEO_NOT_SEND_MESSAGE` | `1` 表示只记录不发送，`0` 表示允许发送 |
+| `CEO_SERVICE_MODE` | 常驻 launchd 服务模式；`dry-run` 只分析不发送，`live` 允许真实回复。运行中的服务也可在 `Config → System Config → 钉钉全局自动回复` 通过按钮切换，页面会同步 `.env`、launchd 并重启服务 |
 | `CEO_LIVE_SEND_BLOCKERS_ACCEPTED` | live send 的显式确认开关 |
 | `CEO_CORPUS_DIR` | 本地风格语料目录 |
 | `CEO_MEETING_PRODUCER_INTERVAL_SECONDS` | 会议信息发现周期，默认 60 秒 |
@@ -215,7 +216,7 @@ cp .env.example .env
 | `CEO_MEETING_SETTLE_SECONDS` | 明确会议结束后的静默等待时间，默认 600 秒 |
 | `CEO_PI_NODE_BINARY` | 可选的 Node 22.19+ 绝对路径；留空时自动发现 PATH 和 `~/.nvm/versions/node` 中的兼容版本 |
 | `CEO_PI_CLI_PATH` | Pi CLI 路径，默认 `../pi/packages/coding-agent/dist/cli.js` |
-| `CEO_PI_PROVIDER` / `CEO_PI_MODEL` | Provider 和模型；默认 `deepseek` / `deepseek-v4-pro`；OpenAI 等其他 Provider 仍可在配置页选择 |
+| `CEO_PI_PROVIDER` / `CEO_PI_MODEL` | Provider 和模型；默认 `deepseek` / `deepseek-v4-pro`；配置页同时提供 OpenAI、通义千问、智谱 GLM、Kimi 等 Pi 内置模型。手工配置也可使用 `qwen`、`glm`、`kimi` 简写，它们分别映射到 Pi 的 `qwen-token-plan-cn`、`zai-coding-cn`、`moonshotai-cn` |
 | `CEO_PI_MODEL_SOURCE` | 配置页自动保存为 `builtin` 或 `custom`；匹配 Pi 内置模型时保留 reasoning、图片、上下文窗口和最大输出等原生能力 |
 | `CEO_PI_API` | API protocol：`openai-responses`、`openai-completions`、`anthropic-messages` 或 `google-generative-ai` |
 | `CEO_PI_BASE_URL` | 可选自定义 Base URL；必须是无用户名、密码、query、fragment 的绝对 HTTP(S) URL |

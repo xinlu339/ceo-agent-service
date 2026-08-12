@@ -1,6 +1,7 @@
 import json
 import asyncio
 import ipaddress
+import plistlib
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from collections import deque
@@ -9,7 +10,9 @@ from html import escape
 from itertools import count, zip_longest
 import os
 from pathlib import Path
+import tempfile
 import subprocess
+import threading
 from typing import TypedDict
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
@@ -176,6 +179,11 @@ AUDIT_WEB_SQLITE_BUSY_TIMEOUT_SECONDS = 2
 USER_FEEDBACK_SYNC_BATCH_LIMIT = 5
 USER_FEEDBACK_SYNC_TIMEOUT_SECONDS = 0.5
 USER_FEEDBACK_SYNC_LIMIT_PER_TOKEN = 5
+DINGTALK_SERVICE_LABEL = "com.ceo-agent-service.main"
+DINGTALK_SERVICE_MODE_ENV = "CEO_SERVICE_MODE"
+DINGTALK_DRY_RUN_ENV = "CEO_DRY_RUN"
+DINGTALK_NOT_SEND_ENV = "CEO_NOT_SEND_MESSAGE"
+DINGTALK_LIVE_GUARD_ENV = "CEO_LIVE_SEND_BLOCKERS_ACCEPTED"
 
 
 CSS = """
@@ -734,6 +742,133 @@ def _configured_worker_db_path() -> Path:
     if not configured_db_path:
         return Path("data/auto-reply.sqlite3")
     return _expand_configured_path(configured_db_path)
+
+
+def _dingtalk_launchd_plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{DINGTALK_SERVICE_LABEL}.plist"
+
+
+def _dingtalk_auto_reply_mode() -> tuple[str, str]:
+    """Return the configured DingTalk send mode and a human-readable source.
+
+    The installed LaunchAgent is authoritative for the long-running service. The
+    environment-file fallback keeps the page useful before launchd has been
+    installed or while a local one-shot command is being configured.
+    """
+    plist_path = _dingtalk_launchd_plist_path()
+    try:
+        with plist_path.open("rb") as file:
+            plist = plistlib.load(file)
+        environment = plist.get("EnvironmentVariables", {})
+        if isinstance(environment, dict):
+            mode = str(environment.get(DINGTALK_SERVICE_MODE_ENV) or "").strip()
+            if mode in {"dry-run", "live"}:
+                return mode, "launchd"
+    except (OSError, plistlib.InvalidFileException, ValueError, TypeError):
+        pass
+
+    mode = str(os.environ.get(DINGTALK_SERVICE_MODE_ENV) or "").strip()
+    if mode in {"dry-run", "live"}:
+        return mode, "environment"
+    dry_run = str(
+        os.environ.get(DINGTALK_DRY_RUN_ENV)
+        or read_env_file().get(DINGTALK_DRY_RUN_ENV)
+        or "1"
+    ).strip().casefold()
+    return ("live" if dry_run in {"0", "false", "no", "off"} else "dry-run"), ".env"
+
+
+def _write_launchd_service_mode(mode: str) -> None:
+    if mode not in {"dry-run", "live"}:
+        raise ValueError("unsupported DingTalk service mode")
+    plist_path = _dingtalk_launchd_plist_path()
+    if not plist_path.exists():
+        raise RuntimeError(
+            f"LaunchAgent not installed: {plist_path}. "
+            "先安装 ceo-agent-service，再从页面切换自动回复。"
+        )
+    try:
+        with plist_path.open("rb") as file:
+            plist = plistlib.load(file)
+    except (OSError, plistlib.InvalidFileException, ValueError, TypeError) as exc:
+        raise RuntimeError(f"无法读取 launchd 配置: {exc}") from exc
+    if not isinstance(plist, dict):
+        raise RuntimeError("launchd 配置格式无效")
+    environment = plist.setdefault("EnvironmentVariables", {})
+    if not isinstance(environment, dict):
+        raise RuntimeError("launchd EnvironmentVariables 配置格式无效")
+    environment[DINGTALK_SERVICE_MODE_ENV] = mode
+    environment[DINGTALK_LIVE_GUARD_ENV] = "1" if mode == "live" else ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{DINGTALK_SERVICE_LABEL}.",
+            suffix=".tmp",
+            dir=str(plist_path.parent),
+            delete=False,
+        ) as file:
+            temporary_path = Path(file.name)
+            plistlib.dump(plist, file, fmt=plistlib.FMT_XML, sort_keys=False)
+        os.replace(temporary_path, plist_path)
+    except OSError as exc:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except (OSError, UnboundLocalError):
+            pass
+        raise RuntimeError(f"无法保存 launchd 配置: {exc}") from exc
+
+
+def _restart_dingtalk_launchd_service() -> None:
+    """Reload the installed LaunchAgent after the HTTP response is returned."""
+    domain = f"gui/{os.getuid()}"
+    label = f"{domain}/{DINGTALK_SERVICE_LABEL}"
+    plist_path = _dingtalk_launchd_plist_path()
+    # launchd keeps a loaded job in memory; changing the plist on disk and only
+    # calling kickstart would restart the old environment. Reload the job so the
+    # new CEO_SERVICE_MODE is actually passed to the next service process.
+    subprocess.run(
+        ["/bin/launchctl", "bootout", label],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["/bin/launchctl", "bootstrap", domain, str(plist_path)],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["/bin/launchctl", "kickstart", "-k", label],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _schedule_dingtalk_launchd_restart() -> None:
+    # The audit web server is one of the launchd service's threads. A short
+    # timer lets the form response finish before launchd replaces the process.
+    restart = threading.Timer(0.25, _restart_dingtalk_launchd_service)
+    restart.daemon = True
+    restart.start()
+
+
+def _set_dingtalk_auto_reply_mode(mode: str) -> None:
+    if mode not in {"dry-run", "live"}:
+        raise ValueError("unsupported DingTalk auto-reply mode")
+    # Validate the installed service before changing .env so a missing or
+    # corrupt LaunchAgent cannot leave the UI claiming a mode that is not live.
+    _write_launchd_service_mode(mode)
+    write_env_values(
+        {
+            DINGTALK_SERVICE_MODE_ENV: mode,
+            DINGTALK_DRY_RUN_ENV: "1" if mode == "dry-run" else "0",
+            DINGTALK_NOT_SEND_ENV: "1" if mode == "dry-run" else "0",
+            DINGTALK_LIVE_GUARD_ENV: "" if mode == "dry-run" else "1",
+        }
+    )
+    _schedule_dingtalk_launchd_restart()
 
 
 def render_tutorial_page(*, store: AutoReplyStore | None = None) -> str:
@@ -2834,12 +2969,16 @@ _PI_PROVIDER_LABELS = {
     "groq": "Groq",
     "minimax": "MiniMax",
     "moonshotai": "Moonshot AI",
+    "moonshotai-cn": "Kimi",
     "nvidia": "NVIDIA",
     "openai": "OpenAI",
     "openrouter": "OpenRouter",
+    "qwen-token-plan": "通义千问",
+    "qwen-token-plan-cn": "通义千问",
     "together": "Together AI",
     "xai": "xAI",
     "zai": "Z.AI",
+    "zai-coding-cn": "智谱 GLM",
     "yunwu": "云雾",
 }
 
@@ -2850,7 +2989,15 @@ def _pi_global_model_picker(
     catalog: Mapping[str, list[dict[str, object]]],
 ) -> str:
     options = ['<option value="">选择内置模型…</option>']
-    priority = {"deepseek": 0, "openai": 1, "anthropic": 2, "google": 3}
+    priority = {
+        "deepseek": 0,
+        "qwen-token-plan-cn": 1,
+        "zai-coding-cn": 2,
+        "moonshotai-cn": 3,
+        "openai": 4,
+        "anthropic": 5,
+        "google": 6,
+    }
     option_index = 0
     for provider_id in sorted(
         catalog,
@@ -3080,6 +3227,7 @@ def _developer_prompt_variable_map() -> dict[str, str]:
 
 def _render_system_config(*, db_path: Path | None = None) -> str:
     editable_keys = _editable_system_config_keys()
+    dingtalk_reply_control = _render_dingtalk_auto_reply_control()
     rows = [
         "<tr><th>Key</th><th>Current value</th><th>说明</th></tr>",
         *[
@@ -3097,6 +3245,7 @@ def _render_system_config(*, db_path: Path | None = None) -> str:
         "<p class=\"muted\">这些值来自环境变量或代码常量，用于服务运行；"
         "不写入 Prompt，也不会保存到 Developer Prompt 的 &lt;vars&gt;。"
         f"保存位置：<code>{escape(str(env_file_path()))}</code></p>"
+        f"{dingtalk_reply_control}"
         "<form method=\"post\" action=\"/config/system\">"
         "<table class=\"system-config-table\">"
         + "".join(rows)
@@ -3104,6 +3253,44 @@ def _render_system_config(*, db_path: Path | None = None) -> str:
         "<p><button type=\"submit\">Save system config</button></p>"
         "</form>"
         f"{_runtime_identity_cache_html(db_path)}"
+        "</section>"
+    )
+
+
+def _render_dingtalk_auto_reply_control() -> str:
+    mode, source = _dingtalk_auto_reply_mode()
+    live = mode == "live"
+    status_label = "已开启：允许真实发送" if live else "已关闭：仅分析，不发送"
+    status_class = "done" if live else "needs_action"
+    live_button = ""
+    dry_run_button = ""
+    if live:
+        dry_run_button = (
+            '<form method="post" action="/config/dingtalk-auto-reply">'
+            '<input type="hidden" name="mode" value="dry-run">'
+            '<button class="danger" type="submit">关闭自动回复</button>'
+            "</form>"
+        )
+    else:
+        live_button = (
+            '<form method="post" action="/config/dingtalk-auto-reply" '
+            'onsubmit="return confirm(\'确认开启钉钉真实自动回复吗？开启后 Agent 可能向外部发送消息。\');">'
+            '<input type="hidden" name="mode" value="live">'
+            '<input type="hidden" name="confirm_live" value="1">'
+            '<button type="submit">开启自动回复</button>'
+            "</form>"
+        )
+    return (
+        '<section class="card config-runtime-control">'
+        "<h3>钉钉全局自动回复</h3>"
+        f'<p><span class="setup-step-status setup-status-{status_class}">'
+        f"{escape(status_label)}</span></p>"
+        f"<p class=\"muted\">当前服务模式：<code>{escape(mode)}</code>；"
+        f"状态来源：{escape(source)}。切换后会更新 .env 和 launchd，并重启服务使新模式生效。</p>"
+        '<div class="tutorial-links">'
+        f"{live_button}{dry_run_button}"
+        "</div>"
+        '<p class="muted">开启真实发送仍受现有 live-send 安全闸门约束；关闭后会回到 dry-run，消息只进入审计记录。</p>'
         "</section>"
     )
 
@@ -7029,6 +7216,35 @@ def handle_system_config_post(body: bytes) -> tuple[int, dict[str, str], str]:
     return 303, {"Location": "/config?tab=system&saved=1"}, ""
 
 
+def handle_dingtalk_auto_reply_toggle_post(
+    body: bytes,
+) -> tuple[int, dict[str, str], str]:
+    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    mode = parsed.get("mode", [""])[0].strip().casefold()
+    if mode not in {"dry-run", "live"}:
+        return 400, {}, render_page(
+            "Invalid auto-reply mode",
+            "<section class=\"card\"><p class=\"attempt-warning\">无效的钉钉自动回复模式。</p></section>",
+            active_nav="config",
+        )
+    if mode == "live" and parsed.get("confirm_live", [""])[0] != "1":
+        return 409, {}, render_page(
+            "Live send confirmation required",
+            "<section class=\"card\"><p class=\"attempt-warning\">开启真实自动回复前需要明确确认。</p></section>",
+            active_nav="config",
+        )
+    try:
+        _set_dingtalk_auto_reply_mode(mode)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return 409, {}, render_page(
+            "Auto-reply switch unavailable",
+            "<section class=\"card\"><p class=\"attempt-warning\">"
+            f"{escape(str(exc))}</p><p><a href=\"/config?tab=system\">返回系统参数</a></p></section>",
+            active_nav="config",
+        )
+    return 303, {"Location": "/config?tab=system&saved=1"}, ""
+
+
 def handle_agent_config_post(body: bytes) -> tuple[int, dict[str, str], str]:
     parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
     try:
@@ -8077,6 +8293,14 @@ def create_audit_app(
     async def config_system_save(request: Request):
         _require_trusted_form_mutation(request)
         status, headers, html = handle_system_config_post(await request.body())
+        return _fastapi_post_response(status, headers, html)
+
+    @app.post("/config/dingtalk-auto-reply")
+    async def config_dingtalk_auto_reply_save(request: Request):
+        _require_trusted_form_mutation(request)
+        status, headers, html = handle_dingtalk_auto_reply_toggle_post(
+            await request.body()
+        )
         return _fastapi_post_response(status, headers, html)
 
     @app.post("/config/agent")

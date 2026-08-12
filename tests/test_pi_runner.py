@@ -7,6 +7,7 @@ from app.pi_runner import (
     DEFAULT_PI_API,
     DEFAULT_PI_MODEL,
     DEFAULT_PI_PROVIDER,
+    PI_DOMESTIC_PROVIDER_ALIASES,
     PI_API_KEY_ENV,
     PI_MODEL_SOURCE_ENV,
     PiRunner,
@@ -31,6 +32,34 @@ def test_pi_defaults_prefer_deepseek_while_retaining_openai_protocols():
     assert DEFAULT_PI_API == "openai-completions"
     assert "openai-completions" in SUPPORTED_PI_APIS
     assert "openai-responses" in SUPPORTED_PI_APIS
+
+
+@pytest.mark.parametrize(
+    ("alias", "canonical", "model"),
+    (
+        ("qwen", "qwen-token-plan-cn", "qwen3.7-plus"),
+        ("glm", "zai-coding-cn", "glm-5.2"),
+        ("kimi", "moonshotai-cn", "kimi-k2.6"),
+    ),
+)
+def test_domestic_provider_aliases_resolve_to_pi_builtin_providers(
+    alias: str,
+    canonical: str,
+    model: str,
+):
+    assert PI_DOMESTIC_PROVIDER_ALIASES[alias] == canonical
+    selection = normalize_pi_model_selection(
+        provider=alias,
+        model=model,
+        model_source="builtin",
+        api="openai-responses",
+        base_url="",
+    )
+
+    assert selection.provider == canonical
+    assert selection.model == model
+    assert selection.model_source == "builtin"
+    assert selection.api == "openai-completions"
 
 
 def _configure_runtime(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
@@ -297,6 +326,78 @@ def test_yunwu_full_chat_completions_url_normalizes_to_sdk_base_url():
     )
 
     assert selection.base_url == "https://yunwu.ai/v1"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "expected"),
+    (
+        (
+            "qwen-token-plan-cn",
+            "qwen-custom-preview",
+            {
+                "supportsStore": False,
+                "supportsDeveloperRole": False,
+                "supportsReasoningEffort": False,
+                "thinkingFormat": "qwen",
+            },
+        ),
+        (
+            "zai-coding-cn",
+            "glm-custom-preview",
+            {
+                "supportsStore": False,
+                "supportsDeveloperRole": False,
+                "supportsReasoningEffort": False,
+                "maxTokensField": "max_tokens",
+                "thinkingFormat": "zai",
+                "zaiToolStream": True,
+            },
+        ),
+        (
+            "moonshotai-cn",
+            "kimi-custom-preview",
+            {
+                "supportsStore": False,
+                "supportsDeveloperRole": False,
+                "supportsReasoningEffort": False,
+                "maxTokensField": "max_tokens",
+                "supportsStrictMode": False,
+                "thinkingFormat": "deepseek",
+            },
+        ),
+    ),
+)
+def test_domestic_custom_models_get_provider_compatibility_defaults(
+    provider: str,
+    model: str,
+    expected: dict[str, object],
+):
+    config = pi_models_config_for_values(
+        provider=provider,
+        model=model,
+        model_source="custom",
+        api="openai-completions",
+        base_url="https://gateway.example/v1",
+    )
+
+    model_config = config["providers"][provider]["models"][0]
+    assert model_config["compat"] == expected
+    assert model_config["reasoning"] is True
+    assert model_config["input"] == ["text"]
+
+
+def test_arbitrary_provider_with_deepseek_named_model_does_not_get_deepseek_compat():
+    config = pi_models_config_for_values(
+        provider="custom-provider",
+        model="deepseek-compatible-preview",
+        model_source="custom",
+        api="openai-completions",
+        base_url="https://gateway.example/v1",
+    )
+
+    assert config["providers"]["custom-provider"]["models"] == [
+        {"id": "deepseek-compatible-preview", "name": "deepseek-compatible-preview"}
+    ]
 
 
 def test_pi_runtime_models_config_defines_genuinely_custom_model(

@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.audit_web import (
     create_audit_app,
     create_default_audit_app,
     handle_developer_prompt_post,
+    handle_dingtalk_auto_reply_toggle_post,
     handle_prompt_variables_post,
     handle_system_config_post,
     handle_user_prompt_post,
@@ -2946,6 +2948,9 @@ def test_render_config_page_shows_system_config_tab_with_descriptions():
     assert "不从 .env 手填" in html
     assert "只展示本人身份真值" in html
     assert 'method="post" action="/config/system"' in html
+    assert "钉钉全局自动回复" in html
+    assert 'action="/config/dingtalk-auto-reply"' in html
+    assert "开启自动回复" in html or "关闭自动回复" in html
     assert 'name="system_key"' in html
     assert 'name="system_value"' in html
     assert 'class="prompt-tab active"' in html
@@ -3009,6 +3014,105 @@ def test_system_config_hides_and_rejects_unknown_env_keys(tmp_path, monkeypatch)
     assert "PRIVATE_SERVICE_TOKEN=do-not-render" in env_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_dingtalk_auto_reply_toggle_updates_env_and_launchd_mode(
+    tmp_path: Path,
+    monkeypatch,
+):
+    env_path = tmp_path / ".env"
+    env_path.write_text("CEO_DRY_RUN=1\n", encoding="utf-8")
+    plist_path = tmp_path / "com.ceo-agent-service.main.plist"
+    plistlib.dump(
+        {
+            "Label": "com.ceo-agent-service.main",
+            "EnvironmentVariables": {"CEO_SERVICE_MODE": "dry-run"},
+        },
+        plist_path.open("wb"),
+        fmt=plistlib.FMT_XML,
+    )
+    monkeypatch.setenv("CEO_ENV_FILE", str(env_path))
+    monkeypatch.setattr(
+        audit_web_module,
+        "_dingtalk_launchd_plist_path",
+        lambda: plist_path,
+    )
+    monkeypatch.setattr(
+        audit_web_module,
+        "_schedule_dingtalk_launchd_restart",
+        lambda: None,
+    )
+
+    status, headers, html = handle_dingtalk_auto_reply_toggle_post(
+        b"mode=live&confirm_live=1"
+    )
+
+    assert status == 303
+    assert headers["Location"] == "/config?tab=system&saved=1"
+    assert html == ""
+    env = audit_web_module.read_env_file(env_path)
+    assert env["CEO_SERVICE_MODE"] == "live"
+    assert env["CEO_DRY_RUN"] == "0"
+    assert env["CEO_NOT_SEND_MESSAGE"] == "0"
+    assert env["CEO_LIVE_SEND_BLOCKERS_ACCEPTED"] == "1"
+    with plist_path.open("rb") as file:
+        installed = plistlib.load(file)
+    assert installed["EnvironmentVariables"]["CEO_SERVICE_MODE"] == "live"
+    assert installed["EnvironmentVariables"]["CEO_LIVE_SEND_BLOCKERS_ACCEPTED"] == "1"
+
+    status, headers, html = handle_dingtalk_auto_reply_toggle_post(
+        b"mode=dry-run"
+    )
+
+    assert status == 303
+    assert headers["Location"] == "/config?tab=system&saved=1"
+    assert html == ""
+    env = audit_web_module.read_env_file(env_path)
+    assert env["CEO_SERVICE_MODE"] == "dry-run"
+    assert env["CEO_DRY_RUN"] == "1"
+    assert env["CEO_NOT_SEND_MESSAGE"] == "1"
+    assert env["CEO_LIVE_SEND_BLOCKERS_ACCEPTED"] == ""
+
+
+def test_dingtalk_auto_reply_toggle_requires_live_confirmation():
+    status, _, html = handle_dingtalk_auto_reply_toggle_post(b"mode=live")
+
+    assert status == 409
+    assert "需要明确确认" in html
+
+
+def test_dingtalk_launchd_restart_reloads_plist_before_kickstart(
+    tmp_path: Path,
+    monkeypatch,
+):
+    plist_path = tmp_path / "com.ceo-agent-service.main.plist"
+    plist_path.write_bytes(b"plist")
+    monkeypatch.setattr(
+        audit_web_module,
+        "_dingtalk_launchd_plist_path",
+        lambda: plist_path,
+    )
+    monkeypatch.setattr(audit_web_module.os, "getuid", lambda: 501)
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(audit_web_module.subprocess, "run", fake_run)
+
+    audit_web_module._restart_dingtalk_launchd_service()
+
+    assert commands == [
+        ["/bin/launchctl", "bootout", "gui/501/com.ceo-agent-service.main"],
+        ["/bin/launchctl", "bootstrap", "gui/501", str(plist_path)],
+        [
+            "/bin/launchctl",
+            "kickstart",
+            "-k",
+            "gui/501/com.ceo-agent-service.main",
+        ],
+    ]
 
 
 def test_render_config_page_shows_channel_doctor(tmp_path, monkeypatch):

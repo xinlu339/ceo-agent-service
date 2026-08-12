@@ -180,6 +180,53 @@ def test_pi_model_picker_prioritizes_deepseek_but_keeps_openai_available():
     assert 'data-provider="openai" data-model-id="gpt-5.5"' in html
 
 
+def test_pi_model_picker_labels_domestic_providers_and_keeps_openai():
+    html = _pi_global_model_picker(
+        "qwen-token-plan-cn",
+        "qwen3.7-plus",
+        {
+            "openai": [
+                {
+                    "id": "gpt-5.5",
+                    "name": "GPT-5.5",
+                    "api": "openai-responses",
+                    "baseUrl": "https://api.openai.com/v1",
+                }
+            ],
+            "qwen-token-plan-cn": [
+                {
+                    "id": "qwen3.7-plus",
+                    "name": "Qwen 3.7 Plus",
+                    "api": "openai-completions",
+                    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                }
+            ],
+            "zai-coding-cn": [
+                {
+                    "id": "glm-5.2",
+                    "name": "GLM-5.2",
+                    "api": "openai-completions",
+                    "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+                }
+            ],
+            "moonshotai-cn": [
+                {
+                    "id": "kimi-k2.6",
+                    "name": "Kimi K2.6",
+                    "api": "openai-completions",
+                    "baseUrl": "https://api.moonshot.cn/v1",
+                }
+            ],
+        },
+    )
+
+    assert "通义千问 · Qwen 3.7 Plus" in html
+    assert "智谱 GLM · GLM-5.2" in html
+    assert "Kimi · Kimi K2.6" in html
+    assert "DeepSeek" not in html
+    assert html.index("通义千问 · Qwen 3.7 Plus") < html.index("OpenAI · GPT-5.5")
+
+
 def test_pi_agent_config_preserves_blank_api_key_and_writes_reference_only(
     tmp_path: Path,
     monkeypatch,

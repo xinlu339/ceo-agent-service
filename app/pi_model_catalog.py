@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 
 from app.pi_runner import (
@@ -12,6 +13,15 @@ from app.pi_runner import (
 
 _MAX_CATALOG_FILE_BYTES = 2 * 1024 * 1024
 _MAX_CATALOG_MODELS = 5_000
+_MODEL_METADATA_KEYS = (
+    "reasoning",
+    "input",
+    "contextWindow",
+    "maxTokens",
+    "compat",
+    "thinkingLevelMap",
+    "cost",
+)
 
 
 def pi_builtin_model_catalog(cli_path: Path) -> dict[str, list[dict[str, object]]]:
@@ -58,6 +68,69 @@ def pi_builtin_model_catalog(cli_path: Path) -> dict[str, list[dict[str, object]
         )
         for provider, models in sorted(catalog.items())
     }
+
+
+@lru_cache(maxsize=512)
+def pi_builtin_model_metadata(
+    cli_path: Path,
+    provider: str,
+    model: str,
+) -> dict[str, object] | None:
+    """Return Pi's complete safe model override metadata for one built-in model.
+
+    The model picker intentionally exposes a small, UI-friendly projection of the
+    Pi catalog.  Runtime custom endpoints, however, still need the built-in
+    model's compatibility flags (for example Qwen's thinking format or Z.AI's
+    ``max_tokens`` field).  Keep this lookup separate so the UI contract remains
+    stable while custom gateways can reuse Pi's authoritative metadata.
+    """
+
+    data_dir = _pi_model_data_dir(cli_path)
+    if data_dir is None:
+        return None
+    requested_provider = provider.casefold()
+    requested_model = model.strip()
+    for path in sorted(data_dir.glob("*.json")):
+        if path.name.startswith("."):
+            continue
+        try:
+            if path.stat().st_size > _MAX_CATALOG_FILE_BYTES:
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for api, models in payload.items():
+            if api not in SUPPORTED_PI_APIS or not isinstance(models, dict):
+                continue
+            for raw_model in models.values():
+                if not isinstance(raw_model, dict):
+                    continue
+                raw_provider = str(raw_model.get("provider") or path.stem).strip()
+                raw_model_id = str(raw_model.get("id") or "").strip()
+                if (
+                    raw_provider.casefold() != requested_provider
+                    or raw_model_id != requested_model
+                ):
+                    continue
+                try:
+                    model_id = validate_pi_model(raw_model_id)
+                    model_provider = validate_pi_provider(raw_provider)
+                except ValueError:
+                    return None
+                name = str(raw_model.get("name") or model_id).strip()[:200] or model_id
+                metadata: dict[str, object] = {
+                    "id": model_id,
+                    "name": name,
+                    "api": api,
+                    "provider": model_provider,
+                }
+                for key in _MODEL_METADATA_KEYS:
+                    if key in raw_model:
+                        metadata[key] = raw_model[key]
+                return metadata
+    return None
 
 
 def _pi_model_data_dir(cli_path: Path) -> Path | None:

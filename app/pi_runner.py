@@ -102,6 +102,88 @@ _DEEPSEEK_BUILTIN_MODELS = frozenset(
 _YUNWU_PROVIDER = "yunwu"
 _YUNWU_GATEWAY_HOSTS = frozenset({"api3.wlai.vip", "yunwu.ai"})
 
+# Friendly aliases accepted in environment variables and the configuration
+# form.  The canonical IDs are Pi's own provider IDs, so built-in model
+# resolution continues to use Pi's maintained provider catalog.
+PI_DOMESTIC_PROVIDER_ALIASES = {
+    "qwen": "qwen-token-plan-cn",
+    "glm": "zai-coding-cn",
+    "kimi": "moonshotai-cn",
+}
+
+# Stable examples used by the configuration UI/documentation.  The picker still
+# reads the sibling Pi catalog, so newly released models appear automatically.
+PI_DOMESTIC_MODEL_PRESETS = (
+    {
+        "label": "通义千问",
+        "provider": "qwen-token-plan-cn",
+        "model": "qwen3.7-plus",
+        "api": "openai-completions",
+    },
+    {
+        "label": "智谱 GLM",
+        "provider": "zai-coding-cn",
+        "model": "glm-5.2",
+        "api": "openai-completions",
+    },
+    {
+        "label": "Kimi",
+        "provider": "moonshotai-cn",
+        "model": "kimi-k2.6",
+        "api": "openai-completions",
+    },
+)
+
+# Fallback compatibility for a manually configured custom endpoint.  For a
+# Pi-built-in model we copy the complete metadata from Pi's catalog below; these
+# profiles cover a custom model ID where that catalog has no entry yet.
+_DOMESTIC_COMPAT_PROFILES: dict[str, dict[str, object]] = {
+    "qwen-token-plan": {
+        "supportsStore": False,
+        "supportsDeveloperRole": False,
+        "supportsReasoningEffort": False,
+        "thinkingFormat": "qwen",
+    },
+    "qwen-token-plan-cn": {
+        "supportsStore": False,
+        "supportsDeveloperRole": False,
+        "supportsReasoningEffort": False,
+        "thinkingFormat": "qwen",
+    },
+    "zai": {
+        "supportsStore": False,
+        "supportsDeveloperRole": False,
+        "supportsReasoningEffort": False,
+        "maxTokensField": "max_tokens",
+        "thinkingFormat": "zai",
+        "zaiToolStream": True,
+    },
+    "zai-coding-cn": {
+        "supportsStore": False,
+        "supportsDeveloperRole": False,
+        "supportsReasoningEffort": False,
+        "maxTokensField": "max_tokens",
+        "thinkingFormat": "zai",
+        "zaiToolStream": True,
+    },
+    "moonshotai": {
+        "supportsStore": False,
+        "supportsDeveloperRole": False,
+        "supportsReasoningEffort": False,
+        "maxTokensField": "max_tokens",
+        "supportsStrictMode": False,
+        "thinkingFormat": "deepseek",
+    },
+    "moonshotai-cn": {
+        "supportsStore": False,
+        "supportsDeveloperRole": False,
+        "supportsReasoningEffort": False,
+        "maxTokensField": "max_tokens",
+        "supportsStrictMode": False,
+        "thinkingFormat": "deepseek",
+    },
+}
+
 
 @dataclass(frozen=True)
 class PiModelSelection:
@@ -454,6 +536,34 @@ def _normalize_yunwu_base_url(base_url: str) -> str:
     return base_url
 
 
+def _canonical_pi_provider(provider: str) -> str:
+    return PI_DOMESTIC_PROVIDER_ALIASES.get(provider.casefold(), provider)
+
+
+def _builtin_model_metadata(provider: str, model: str) -> dict[str, object] | None:
+    """Load Pi's model metadata lazily to avoid a module import cycle."""
+
+    candidates = [provider]
+    # DeepSeek is intentionally represented as ``yunwu`` when it is reached
+    # through the Yunwu proxy, but its model metadata lives under Pi's built-in
+    # DeepSeek provider.
+    if (
+        provider.casefold() == _YUNWU_PROVIDER
+        and model.casefold().rsplit("/", 1)[-1].startswith("deepseek")
+    ):
+        candidates.append("deepseek")
+    try:
+        from app.pi_model_catalog import pi_builtin_model_metadata
+
+        for candidate in candidates:
+            metadata = pi_builtin_model_metadata(pi_cli_path(), candidate, model)
+            if metadata is not None:
+                return metadata
+    except (ImportError, OSError, ValueError):
+        return None
+    return None
+
+
 def normalize_pi_model_selection(
     *,
     provider: str,
@@ -464,7 +574,7 @@ def normalize_pi_model_selection(
 ) -> PiModelSelection:
     """Normalize legacy DeepSeek settings to Pi's supported wire protocol."""
 
-    provider = validate_pi_provider(provider)
+    provider = _canonical_pi_provider(validate_pi_provider(provider))
     model = validate_pi_model(model)
     api = validate_pi_api(api)
     base_url = validate_pi_base_url(base_url)
@@ -495,6 +605,12 @@ def normalize_pi_model_selection(
             if model_key in _DEEPSEEK_BUILTIN_MODELS
             else "custom"
         )
+    elif provider.casefold() in _DOMESTIC_COMPAT_PROFILES:
+        # Pi's Qwen, GLM and Kimi provider catalogs all use the OpenAI
+        # Chat-Completions wire protocol.  Normalize legacy/mistyped API values
+        # so a domestic model cannot accidentally be launched through the
+        # Responses adapter.
+        api = "openai-completions"
 
     return PiModelSelection(
         provider=provider,
@@ -534,7 +650,7 @@ def pi_models_config_for_values(
     api: str,
     base_url: str,
 ) -> dict[str, object]:
-    provider = validate_pi_provider(provider)
+    provider = _canonical_pi_provider(validate_pi_provider(provider))
     model = validate_pi_model(model)
     model_source = validate_pi_model_source(model_source)
     api = validate_pi_api(api)
@@ -551,28 +667,63 @@ def pi_models_config_for_values(
             "id": model,
             "name": model,
         }
-        if provider.casefold() == "deepseek" or "deepseek" in model.casefold():
-            compat: dict[str, object] = {
-                "supportsStore": False,
-                "supportsDeveloperRole": False,
-                "requiresReasoningContentOnAssistantMessages": True,
-                "thinkingFormat": "deepseek",
-            }
+        metadata = _builtin_model_metadata(provider, model)
+        if metadata is not None:
+            # Only copy fields accepted by Pi's custom model definition.  The
+            # provider/base URL remain controlled by the values supplied here.
+            if metadata.get("name"):
+                model_config["name"] = str(metadata["name"])
+            for key in (
+                "reasoning",
+                "input",
+                "contextWindow",
+                "maxTokens",
+                "compat",
+                "thinkingLevelMap",
+                "cost",
+            ):
+                if key in metadata:
+                    model_config[key] = metadata[key]
+
+        provider_key = provider.casefold()
+        compat: dict[str, object] = {}
+        profile = _DOMESTIC_COMPAT_PROFILES.get(provider_key)
+        if profile:
+            compat.update(profile)
+        metadata_compat = model_config.get("compat")
+        if isinstance(metadata_compat, dict):
+            compat.update(metadata_compat)
+        deepseek_custom = provider_key == "deepseek" or (
+            provider_key == _YUNWU_PROVIDER
+            and model.casefold().rsplit("/", 1)[-1].startswith("deepseek")
+        )
+        if deepseek_custom:
+            compat.update(
+                {
+                    "supportsStore": False,
+                    "supportsDeveloperRole": False,
+                    "requiresReasoningContentOnAssistantMessages": True,
+                    "thinkingFormat": "deepseek",
+                }
+            )
             if (
                 api == "openai-completions"
                 and (
-                    provider.casefold() == _YUNWU_PROVIDER
+                    provider_key == _YUNWU_PROVIDER
                     or _is_yunwu_gateway(base_url)
                 )
             ):
                 compat["supportsFinishReason"] = False
-            model_config.update(
-                {
-                    "reasoning": True,
-                    "input": ["text"],
-                    "compat": compat,
-                }
-            )
+            model_config.setdefault("reasoning", True)
+            model_config.setdefault("input", ["text"])
+        elif profile:
+            # Known domestic reasoning providers use text reasoning by default
+            # when a custom model ID has no Pi catalog entry.  Built-in model
+            # metadata above can override this with its exact capabilities.
+            model_config.setdefault("reasoning", True)
+            model_config.setdefault("input", ["text"])
+        if compat:
+            model_config["compat"] = compat
         provider_config.update(
             {
                 "api": api,
