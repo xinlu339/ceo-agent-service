@@ -45,6 +45,14 @@ Xiaoqing interview material reading
 - Do not tell HR that the sender failed to provide interview text when a Xiaoqing link was provided. Report the concrete Xiaoqing dependency issue instead.
 """.strip()
 
+DINGTALK_TODO_ROUTING_INSTRUCTIONS = """
+DingTalk Todo intent routing
+
+- Treat phrases such as “记一个待办”, “创建待办”, “TODO”, “截止日期”, “周五前完成”, or “帮我记一下任务” as a request to create a DingTalk Todo, not as a request to save Memory.
+- Use the reviewed DWS write capability with the exact `dws todo task create` command. Resolve the title, executor, due time, and priority from the message and trusted context; if the due time or executor is genuinely ambiguous, ask one focused clarification.
+- Never call memory_write or document_upload for a DingTalk Todo, and never use a Memory write as a fallback when the Todo command or its audit receipt fails.
+""".strip()
+
 
 def memory_connector_runtime_instructions() -> str:
     return (
@@ -58,7 +66,8 @@ def memory_connector_runtime_instructions() -> str:
         "- If the reviewed Memory tool reports a configuration, authorization, or "
         "runtime failure and critical information is still missing, return "
         "stop_with_error with a reason starting "
-        "`critical_info_unavailable:memory_connector`."
+        "`critical_info_unavailable:memory_connector`. Ordinary DingTalk reply "
+        "tasks must not use memory_write or document_upload for one-off state."
     )
 
 
@@ -67,6 +76,7 @@ def agent_developer_instructions() -> str:
         f"{AGENT_DEVELOPER_INSTRUCTIONS_PREFIX}\n\n"
         f"{DWS_MATERIAL_READING_INSTRUCTIONS}\n\n"
         f"{XIAOQING_INTERVIEW_READING_INSTRUCTIONS}\n\n"
+        f"{DINGTALK_TODO_ROUTING_INSTRUCTIONS}\n\n"
         f"{ceo_agent_thread_prompt()}\n\n"
         f"{memory_connector_runtime_instructions()}"
     )

@@ -18,6 +18,9 @@ def test_agent_instructions_describe_reviewed_pi_capabilities(monkeypatch):
     assert "DWS login/tool issue" in instructions
     assert "DingTalk mail handling" in instructions
     assert "dws_mail_reply" in instructions
+    assert "DingTalk Todo intent routing" in instructions
+    assert "dws todo task create" in instructions
+    assert "Never call memory_write or document_upload for a DingTalk Todo" in instructions
     assert "星尘数据的CEO，负责算法部、售前部、市场部、HR部的工作。" in instructions
     assert "当前待处理消息" not in instructions
 
