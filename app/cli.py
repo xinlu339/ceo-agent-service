@@ -2069,12 +2069,19 @@ def _macos_interface_has_default_reachable_network(
         if line.startswith("interface:"):
             route_interface = line.split(":", 1)[1].strip()
             break
-    if route_interface != device:
+    if not route_interface:
         return False
+    # A VPN commonly owns the macOS default route through an ``utun``
+    # interface even though its physical transport is Wi-Fi.  Requiring the
+    # Wi-Fi device itself to be the default route pauses every network worker
+    # while the machine is actually online.  The default route reported by
+    # scutil is the connectivity signal that matters here; ``device`` remains
+    # part of this compatibility helper's signature for existing callers.
+    del device
     in_interface_block = False
     for raw_line in network.stdout.splitlines():
         line = raw_line.strip()
-        if line.startswith(f"{device} :"):
+        if line.startswith(f"{route_interface} :"):
             in_interface_block = True
             if "Reachable" in line:
                 return True

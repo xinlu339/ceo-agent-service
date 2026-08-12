@@ -4204,6 +4204,39 @@ def test_macos_wifi_connected_accepts_reachable_wifi_default_route(monkeypatch):
     assert cli._macos_wifi_connected(run=run) is True
 
 
+def test_macos_wifi_connected_accepts_reachable_vpn_default_route(monkeypatch):
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+
+    def run(command, **kwargs):
+        if command == ["/usr/sbin/networksetup", "-listallhardwareports"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: aa\n",
+                stderr="",
+            )
+        if command == ["/sbin/route", "-n", "get", "default"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="route to: default\ninterface: utun4\n",
+                stderr="",
+            )
+        if command == ["/usr/sbin/scutil", "--nwi"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "Network information\n"
+                    "   utun4 : flags : 0x7 (IPv4,IPv6,DNS)\n"
+                    "           reach : 0x00000003 (Reachable,Transient Connection)\n"
+                    "     en0 : flags : 0x5 (IPv4,DNS)\n"
+                    "           reach : 0x00000002 (Reachable)\n"
+                ),
+                stderr="",
+            )
+        raise AssertionError(command)
+
+    assert cli._macos_wifi_connected(run=run) is True
+
+
 def test_network_dependency_gate_only_checks_connectivity():
     times = iter([1.0, 10.0, 40.0])
     wifi_results = iter([True, False])
