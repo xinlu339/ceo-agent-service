@@ -23,6 +23,7 @@ PI_API_ENV = "CEO_PI_API"
 PI_BASE_URL_ENV = "CEO_PI_BASE_URL"
 PI_API_KEY_ENV = "CEO_PI_API_KEY"
 PI_THINKING_LEVEL_ENV = "CEO_PI_THINKING_LEVEL"
+PI_ROUTINE_THINKING_LEVEL_ENV = "CEO_PI_ROUTINE_THINKING_LEVEL"
 PI_AGENT_DIR_ENV = "CEO_PI_AGENT_DIR"
 PI_SESSION_DIR_ENV = "CEO_PI_SESSION_DIR"
 PI_EXTENSION_PATH_ENV = "CEO_PI_EXTENSION_PATH"
@@ -45,6 +46,7 @@ DEFAULT_PI_MODEL = "deepseek-v4-pro"
 DEFAULT_PI_MODEL_SOURCE = "builtin"
 DEFAULT_PI_API = "openai-completions"
 DEFAULT_PI_THINKING_LEVEL = "medium"
+DEFAULT_PI_ROUTINE_THINKING_LEVEL = "off"
 DEFAULT_PI_EXA_MCP_URL = "https://mcp.exa.ai/mcp"
 DEFAULT_PI_XIAOQING_MCP_URL = "https://interview.hr.startask.net/mcp"
 SUPPORTED_PI_APIS = frozenset(
@@ -494,6 +496,24 @@ def selected_pi_thinking_level() -> str:
     )
 
 
+def selected_pi_routine_thinking_level() -> str:
+    """Return the cheaper thinking level used for short, self-contained tasks.
+
+    The main thinking level remains the operator's quality/safety setting.  A
+    short ordinary reply does not need a full reasoning pass, so it uses a
+    separate opt-in setting whose safe default is ``off``.  This is especially
+    important for gateways/models that silently clamp ``medium`` to a higher
+    supported reasoning level.
+    """
+
+    return validate_pi_thinking_level(
+        os.environ.get(
+            PI_ROUTINE_THINKING_LEVEL_ENV,
+            DEFAULT_PI_ROUTINE_THINKING_LEVEL,
+        )
+    )
+
+
 def validate_pi_thinking_level(raw_value: str) -> str:
     value = raw_value.strip() or DEFAULT_PI_THINKING_LEVEL
     if value not in SUPPORTED_PI_THINKING_LEVELS:
@@ -864,6 +884,8 @@ class PiRunner:
         preserve_native_model_config: bool = False,
         profile_distillation: bool = False,
         allow_memory_writes: bool = True,
+        thinking_level: str | None = None,
+        tool_names: tuple[str, ...] | None = None,
     ) -> list[str]:
         del prompt
         del output_schema_path
@@ -891,7 +913,9 @@ class PiRunner:
             "--model",
             model_selection.model,
             "--thinking",
-            selected_pi_thinking_level(),
+            validate_pi_thinking_level(thinking_level)
+            if thinking_level is not None
+            else selected_pi_thinking_level(),
             "--approve",
             "--no-context-files",
             "--no-builtin-tools",
@@ -901,7 +925,13 @@ class PiRunner:
         ]
         if developer_instructions:
             command.extend(["--system-prompt", developer_instructions])
-        if profile_distillation:
+        if tool_names is not None and profile_distillation:
+            raise ValueError("tool_names cannot be combined with profile distillation")
+        if tool_names is not None:
+            if any(not isinstance(tool, str) or not tool.strip() for tool in tool_names):
+                raise ValueError("tool_names must contain non-empty strings")
+            allowed_tools = tuple(tool.strip() for tool in tool_names)
+        elif profile_distillation:
             if approval_policy != "never":
                 raise ValueError("profile distillation requires never approval policy")
             allowed_tools = PROFILE_DISTILLATION_PI_TOOLS
@@ -915,7 +945,10 @@ class PiRunner:
                         for tool in allowed_tools
                         if tool not in MEMORY_WRITE_PI_TOOLS
                     )
-        command.extend(["--tools", ",".join(allowed_tools)])
+        if allowed_tools:
+            command.extend(["--tools", ",".join(allowed_tools)])
+        else:
+            command.append("--no-tools")
         if session_id:
             command.extend(["--session-id", session_id])
         for image_path in image_paths or []:

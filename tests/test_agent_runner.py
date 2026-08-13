@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.agent_context import AgentTaskContext
+from app.agent_context import AgentContextMessage, AgentTaskContext, MaterialReference
 from app.agent_result import AgentOutcome
 from app.agent_runner import (
     AGENT_RESULT_SCHEMA_PATH,
@@ -675,6 +675,23 @@ class RecordingExecutor:
         )
 
 
+class SequenceExecutor:
+    def __init__(self, outputs: list[str]) -> None:
+        self.outputs = outputs
+        self.commands: list[list[str]] = []
+        self.prompts: list[str] = []
+        self.kwargs: list[dict[str, object]] = []
+
+    def __call__(self, command, *, prompt, on_stdout_line, **kwargs):
+        self.commands.append(command)
+        self.prompts.append(prompt)
+        self.kwargs.append(kwargs)
+        output = self.outputs[min(len(self.commands) - 1, len(self.outputs) - 1)]
+        for line in output.splitlines():
+            on_stdout_line(line)
+        return ProcessRunResult(returncode=0, stdout=output, stderr="")
+
+
 def test_reviewed_pi_wrapper_accepts_nested_arguments():
     metadata = _pi_tool_effect_metadata(
         "execute_reviewed_write",
@@ -744,6 +761,89 @@ def test_direct_runner_uses_isolated_pi_configuration(
     assert result.result.outcome is AgentOutcome.COMPLETED
     assert result.events == ()
     assert result.receipts == ()
+
+
+def test_direct_runner_uses_off_thinking_for_short_routine_replies(
+    tmp_path: Path,
+    store: AutoReplyStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("CEO_PI_THINKING_LEVEL", "medium")
+    monkeypatch.setenv("CEO_PI_ROUTINE_THINKING_LEVEL", "off")
+    task = _task(store)
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        _context(task.id),
+    )
+
+    assert executor.commands[0][executor.commands[0].index("--thinking") + 1] == "off"
+
+
+def test_direct_runner_keeps_main_thinking_for_contextual_tasks(
+    tmp_path: Path,
+    store: AutoReplyStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("CEO_PI_THINKING_LEVEL", "medium")
+    monkeypatch.setenv("CEO_PI_ROUTINE_THINKING_LEVEL", "off")
+    task = _task(store)
+    context = replace(
+        _context(task.id),
+        messages=(
+            AgentContextMessage(
+                message_id="prior",
+                sender="ET",
+                text="请结合上面的材料核对结果",
+                create_time="2026-07-28 11:59:00",
+            ),
+        ),
+        materials=(
+            MaterialReference(
+                kind="document",
+                reference="doc-1",
+                source_message_id="prior",
+                read_commands=("dws doc get --id doc-1",),
+            ),
+        ),
+    )
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+    )
+
+    assert executor.commands[0][executor.commands[0].index("--thinking") + 1] == "medium"
+
+
+def test_direct_runner_repairs_invalid_result_in_same_session_without_tools(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    executor = SequenceExecutor(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "session-1"}),
+            _jsonl(session_id="session-1"),
+        ]
+    )
+
+    result = DirectAgentRunner(
+        store=store,
+        workspace=tmp_path,
+        executor=executor,
+    ).run(task, _context(task.id))
+
+    assert result.result.outcome is AgentOutcome.COMPLETED
+    assert len(executor.commands) == 2
+    assert executor.commands[1][executor.commands[1].index("--session-id") + 1] == (
+        "session-1"
+    )
+    assert executor.commands[1][executor.commands[1].index("--thinking") + 1] == "off"
+    assert "--no-tools" in executor.commands[1]
+    assert "not valid AgentResult JSON" in executor.prompts[1]
 
 
 def test_direct_runner_uses_configured_pi_timeouts(

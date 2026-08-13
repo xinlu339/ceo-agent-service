@@ -254,6 +254,21 @@ def consumer_poll_interval_seconds() -> int:
     return env_int("CEO_CONSUMER_POLL_INTERVAL_SECONDS", 10)
 
 
+def consumer_worker_count() -> int:
+    """Number of independent reply consumers sharing the SQLite queue.
+
+    Two workers remove head-of-line blocking between unrelated conversations;
+    the per-conversation Pi session lock still serializes messages that must
+    share one session.  Keep the upper bound deliberately small because each
+    worker may hold a live provider connection for several minutes.
+    """
+
+    value = env_int("CEO_CONSUMER_WORKERS", 1)
+    if value < 1 or value > 4:
+        raise ValueError("CEO_CONSUMER_WORKERS must be between 1 and 4")
+    return value
+
+
 def meeting_producer_interval_seconds() -> int:
     return env_int("CEO_MEETING_PRODUCER_INTERVAL_SECONDS", 60)
 

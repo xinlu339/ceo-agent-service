@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 import re
 import shlex
 import shutil
@@ -2184,16 +2185,26 @@ class DingTalkAutoReplyWorker:
     def _process_queued_task(
         self, conversation: DingTalkConversation, task: ReplyTask
     ) -> bool:
+        started_monotonic = time.monotonic()
         trigger = DingTalkMessage.model_validate_json(task.trigger_message_json)
         _context_messages, prompt_context_messages = (
             self._queued_task_prompt_context_messages(conversation, trigger)
         )
-        return self._process_agent_queued_task(
-            conversation,
-            task,
-            trigger,
-            prompt_context_messages,
-        )
+        try:
+            return self._process_agent_queued_task(
+                conversation,
+                task,
+                trigger,
+                prompt_context_messages,
+            )
+        finally:
+            logger.info(
+                "reply_task_finished task_id=%s conversation_id=%s "
+                "elapsed_seconds=%.3f",
+                task.id,
+                task.conversation_id,
+                time.monotonic() - started_monotonic,
+            )
 
     def _process_agent_queued_task(
         self,

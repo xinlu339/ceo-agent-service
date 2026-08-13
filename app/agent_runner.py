@@ -1,5 +1,7 @@
 import json
 import hashlib
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -31,8 +33,13 @@ from app.pi_runner import (
     PI_REPLY_SINGLE_CHAT_ENV,
     PiRunner,
     pi_process_failure_reason,
+    selected_pi_routine_thinking_level,
+    selected_pi_thinking_level,
 )
 from app.store import AgentRun, AgentRunLeaseLostError, AutoReplyStore, ReplyTask
+
+
+logger = logging.getLogger(__name__)
 
 
 AGENT_RESULT_SCHEMA_PATH = (
@@ -51,6 +58,13 @@ PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT = (
     "pi_finalization_failed_after_confirmed_effect"
 )
 PI_TOOL_BUDGET_EXCEEDED = "pi_tool_budget_exceeded"
+PI_JSON_FINALIZER_PROMPT = """The previous Direct Agent turn completed its work, but its final response was not valid AgentResult JSON.
+
+Return exactly one valid AgentResult JSON object now. Do not call tools, do not perform any external action, and do not invent a new result. Reconstruct the final outcome only from the work and tool results already present in this same Pi session. The object must contain:
+
+{"outcome":"completed|no_action|needs_human|failed","summary":"factual non-empty summary","error":{"code":"","retryable":false,"authorization_required":false}}
+
+If the prior work is incomplete or its outcome cannot be verified, use needs_human or failed and explain the concrete reason in summary/error. Output JSON only, with no Markdown or surrounding text."""
 DIRECT_AGENT_DEVELOPER_INSTRUCTIONS = """You are the Direct Agent for one queued task.
 
 - The Agent owns evidence reads, business judgment, direct execution and verification.
@@ -303,6 +317,32 @@ class DirectAgentRunner:
             env[PI_REPLY_SINGLE_CHAT_ENV] = "0"
         return env
 
+    @staticmethod
+    def _thinking_level_for_context(
+        context: AgentTaskContext,
+        *,
+        read_only: bool,
+    ) -> str:
+        """Choose the smallest safe Pi thinking pass for this task.
+
+        A short trigger with no supplied history/materials is a routine reply:
+        it should not pay the full reasoning cost on every turn.  Evidence
+        backed, retried, or multi-message tasks keep the configured main level.
+        Read-only diagnostics also retain the main level because they commonly
+        require comparing several live results.
+        """
+
+        if (
+            read_only
+            or context.manual_rerun is not None
+            or bool(context.materials)
+            or bool(context.prior_receipts)
+            or bool(context.messages)
+            or len(context.trigger_text.strip()) > 240
+        ):
+            return selected_pi_thinking_level()
+        return selected_pi_routine_thinking_level()
+
     def run(
         self,
         task: ReplyTask,
@@ -358,6 +398,7 @@ class DirectAgentRunner:
                 f"agent run is not available for task generation: {task.id}"
             )
         run = claim.run
+        run_started_monotonic = time.monotonic()
         session_id = (
             run.agent_session_id
             or self.store.get_agent_session_id(task.conversation_id)
@@ -378,6 +419,10 @@ class DirectAgentRunner:
                 "command. Query live state only.\n\n" + prompt
             )
             developer_instructions += "\n\n" + READ_ONLY_DEVELOPER_INSTRUCTION
+        thinking_level = self._thinking_level_for_context(
+            context,
+            read_only=read_only,
+        )
         command = self.pi.build_command(
             prompt=prompt,
             session_id=session_id,
@@ -388,6 +433,16 @@ class DirectAgentRunner:
             use_approval_bypass=not read_only,
             ignore_user_config=True,
             allow_memory_writes=False,
+            thinking_level=thinking_level,
+        )
+        logger.info(
+            "pi_agent_run_started task_id=%s run_id=%s thinking=%s read_only=%s "
+            "session_reused=%s",
+            task.id,
+            run.id,
+            thinking_level,
+            read_only,
+            bool(session_id),
         )
         saw_json = False
         stream_line_count = 0
@@ -476,6 +531,63 @@ class DirectAgentRunner:
                     now=now,
                 )
 
+        def run_json_finalizer() -> AgentResult | None:
+            """Repair only the final envelope, reusing the existing Pi session.
+
+            A malformed final envelope is not evidence that the business work
+            failed.  A no-tool, thinking-off turn lets Pi serialize the outcome
+            it already reached without repeating any reviewed operation.
+            """
+
+            persisted_run = self.store.get_agent_run(run.id)
+            finalizer_session_id = (
+                persisted_run.agent_session_id if persisted_run else None
+            ) or session_id
+            if not finalizer_session_id:
+                return None
+            finalizer_prompt = PI_JSON_FINALIZER_PROMPT
+            try:
+                finalizer_command = self.pi.build_command(
+                    prompt=finalizer_prompt,
+                    session_id=finalizer_session_id,
+                    approval_policy="never",
+                    developer_instructions=(
+                        "Return one strict AgentResult JSON object. "
+                        "This is a serialization repair only.\n\n"
+                        + finalizer_prompt
+                    ),
+                    use_approval_bypass=False,
+                    allow_memory_writes=False,
+                    thinking_level="off",
+                    tool_names=(),
+                )
+                finalizer_process = self.executor(
+                    finalizer_command,
+                    prompt=finalizer_prompt,
+                    env=self._build_agent_environment(
+                        context,
+                        allow_group_reply_mention=False,
+                    ),
+                    total_timeout_seconds=min(self.total_timeout_seconds, 120),
+                    idle_timeout_seconds=min(self.idle_timeout_seconds, 60),
+                    on_stdout_line=persist_line,
+                )
+            except (AgentStreamError, AgentRunLeaseLostError):
+                return None
+            except Exception:
+                return None
+            if finalizer_process.timed_out or finalizer_process.returncode != 0:
+                return None
+            if pi_process_failure_reason(
+                finalizer_process.stdout,
+                finalizer_process.stderr,
+            ):
+                return None
+            try:
+                return parse_agent_result(finalizer_process.stdout)
+            except (ResultParseError, ValueError):
+                return None
+
         try:
             process = self.executor(
                 command,
@@ -524,6 +636,17 @@ class DirectAgentRunner:
                 raise AgentRunUnknownError("pi_process_failed", run.id) from exc
             raise RuntimeError("pi_process_failed") from exc
 
+        logger.info(
+            "pi_agent_process_finished task_id=%s run_id=%s elapsed_seconds=%.3f "
+            "tool_calls=%s stream_lines=%s returncode=%s",
+            task.id,
+            run.id,
+            time.monotonic() - run_started_monotonic,
+            tool_call_count,
+            stream_line_count,
+            process.returncode,
+        )
+
         if process.timed_out:
             self._record_failure(
                 run.id,
@@ -561,16 +684,26 @@ class DirectAgentRunner:
         try:
             result = parse_agent_result(process.stdout)
         except (ResultParseError, ValueError) as exc:
-            self._record_failure(
+            result = run_json_finalizer()
+            logger.info(
+                "pi_agent_json_finalizer task_id=%s run_id=%s elapsed_seconds=%.3f "
+                "succeeded=%s",
+                task.id,
                 run.id,
-                "pi_result_invalid",
-                now=now,
+                time.monotonic() - run_started_monotonic,
+                result is not None,
             )
-            if self.store.get_agent_run(run.id).status == "unknown":
-                raise AgentRunUnknownError(
-                    "pi_result_invalid", run.id
-                ) from exc
-            raise RuntimeError("pi_result_invalid") from exc
+            if result is None:
+                self._record_failure(
+                    run.id,
+                    "pi_result_invalid",
+                    now=now,
+                )
+                if self.store.get_agent_run(run.id).status == "unknown":
+                    raise AgentRunUnknownError(
+                        "pi_result_invalid", run.id
+                    ) from exc
+                raise RuntimeError("pi_result_invalid") from exc
 
         persisted_session_id = self.store.get_agent_run(run.id).agent_session_id
         transcript_end_line = max(
@@ -632,6 +765,16 @@ class DirectAgentRunner:
         completed_run = self.store.get_agent_run(run.id)
         if completed_run is None:
             raise RuntimeError("agent run was not persisted")
+        logger.info(
+            "pi_agent_run_finished task_id=%s run_id=%s elapsed_seconds=%.3f "
+            "outcome=%s tool_calls=%s transcript_lines=%s",
+            task.id,
+            run.id,
+            time.monotonic() - run_started_monotonic,
+            result.outcome.value,
+            tool_call_count,
+            max(0, completed_run.transcript_end_line - transcript_start_line),
+        )
         return DirectAgentRunResult(
             run_id=run.id,
             result=result,

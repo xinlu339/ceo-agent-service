@@ -21,3 +21,16 @@ def test_worker_settings_database_default_is_outside_repository():
         / "ceo-agent-service"
         / "auto-reply.sqlite3"
     )
+
+
+def test_consumer_worker_count_is_bounded(monkeypatch):
+    monkeypatch.setenv("CEO_CONSUMER_WORKERS", "2")
+    assert config.consumer_worker_count() == 2
+
+    monkeypatch.setenv("CEO_CONSUMER_WORKERS", "5")
+    try:
+        config.consumer_worker_count()
+    except ValueError as exc:
+        assert "between 1 and 4" in str(exc)
+    else:
+        raise AssertionError("expected consumer worker bound")

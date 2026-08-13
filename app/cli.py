@@ -21,6 +21,7 @@ from app.database_backup import (
 )
 from app.config import (
     consumer_poll_interval_seconds,
+    consumer_worker_count,
     embedding_api_key,
     embedding_base_url,
     embedding_enabled,
@@ -2548,6 +2549,19 @@ def run_service(
         notify=True,
     )
     dependency_gate = NetworkDependencyGate()
+    configured_consumer_workers = consumer_worker_count()
+    consumer_components = tuple(
+        (
+            "consumer" if configured_consumer_workers == 1 else f"consumer-{index + 1}",
+            lambda: run_consumer_loop(
+                create_worker(settings),
+                consumer_poll_interval_seconds,
+                max_tasks=settings.max_batches,
+                network_ready=dependency_gate.ready,
+            ),
+        )
+        for index in range(configured_consumer_workers)
+    )
     components = (
         (
             "audit-web",
@@ -2566,15 +2580,7 @@ def run_service(
                 network_ready=dependency_gate.ready,
             ),
         ),
-        (
-            "consumer",
-            lambda: run_consumer_loop(
-                create_worker(settings),
-                consumer_poll_interval_seconds,
-                max_tasks=settings.max_batches,
-                network_ready=dependency_gate.ready,
-            ),
-        ),
+        *consumer_components,
         (
             "meeting-producer",
             lambda: run_meeting_producer_loop(
