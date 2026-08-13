@@ -36,6 +36,7 @@ from app.pi_runner import (
     PI_TODO_TRIGGER_SENDER_NAME_ENV,
     PI_TODO_TRIGGER_SENDER_USER_ID_ENV,
     PI_TODO_TRIGGER_TEXT_ENV,
+    PI_TODO_TRIGGER_CREATE_TIME_ENV,
     PiRunner,
     pi_process_failure_reason,
     selected_pi_routine_thinking_level,
@@ -378,6 +379,7 @@ class DirectAgentRunner:
         # and are never inherited by the reviewed DWS child process.
         env[PI_TODO_TRIGGER_SENDER_NAME_ENV] = context.trigger_sender.strip()
         env[PI_TODO_TRIGGER_TEXT_ENV] = context.trigger_text.strip()
+        env[PI_TODO_TRIGGER_CREATE_TIME_ENV] = context.trigger_create_time.strip()
         if context.trigger_sender_user_id.strip():
             env[PI_TODO_TRIGGER_SENDER_USER_ID_ENV] = (
                 context.trigger_sender_user_id.strip()
@@ -1442,6 +1444,7 @@ def _pi_tool_evidence_event(
                 metadata["reviewed_execution_digest"] = confirmation[
                     "operation_digest"
                 ]
+                metadata["target_identifiers"] = confirmation["target_identifiers"]
             metadata["reviewed_confirmation"] = confirmation
     return {
         "type": "item.failed" if is_error else "item.completed",

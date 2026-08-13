@@ -80,6 +80,7 @@ function safeChildEnvironment(): NodeJS.ProcessEnv {
 		"CEO_PI_TODO_TRIGGER_SENDER_NAME",
 		"CEO_PI_TODO_TRIGGER_SENDER_USER_ID",
 		"CEO_PI_TODO_TRIGGER_TEXT",
+		"CEO_PI_TODO_TRIGGER_CREATE_TIME",
 	]) {
 		const value = process.env[key];
 		if (value) env[key] = value;
@@ -231,7 +232,78 @@ function expandTodoExecutorNames(names: string[]): string[] {
 
 function todoTriggerRequiresDue(): boolean {
 	const text = (process.env.CEO_PI_TODO_TRIGGER_TEXT ?? "").trim();
-	return /(?:截止|到期|之前|前完成|完成于|明天|今天|后天|本周|周[一二三四五六日天]|下周|\d{1,2}[月\-/]\d{1,2}日?)/i.test(text);
+	return /(?:截止|到期|之前|前完成|完成于|明天|今天|后天|本周|周[一二三四五六日天]|下周|\d{1,2}月\d{1,2}日?|\d{1,2}[\-/]\d{1,2}|\d{4}[\-/]\d{1,2}[\-/]\d{1,2})/i.test(text);
+}
+
+function parseTriggerTime(): Date {
+	const raw = (process.env.CEO_PI_TODO_TRIGGER_CREATE_TIME ?? "").trim();
+	const parsed = new Date(raw.includes("T") ? raw : raw.replace(" ", "T") + "+08:00");
+	return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function isoAtBeijingHour(date: Date): string {
+	const parts = new Intl.DateTimeFormat("en-CA", {
+		timeZone: "Asia/Shanghai",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).formatToParts(date).reduce<Record<string, string>>((acc, item) => {
+		acc[item.type] = item.value;
+		return acc;
+	}, {});
+	return `${parts.year}-${parts.month}-${parts.day}T18:00:00+08:00`;
+}
+
+function isoForBeijingDate(year: number, month: number, day: number): string {
+	const candidate = new Date(Date.UTC(year, month - 1, day));
+	if (
+		candidate.getUTCFullYear() !== year ||
+		candidate.getUTCMonth() !== month - 1 ||
+		candidate.getUTCDate() !== day
+	) return "";
+	return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T18:00:00+08:00`;
+}
+
+function resolveRelativeDue(text: string): string {
+	const now = parseTriggerTime();
+	const normalized = text.replace(/\s+/g, "");
+	if (/今天/.test(normalized)) return isoAtBeijingHour(now);
+	if (/明天/.test(normalized)) return isoAtBeijingHour(new Date(now.getTime() + 86_400_000));
+	if (/后天/.test(normalized)) return isoAtBeijingHour(new Date(now.getTime() + 172_800_000));
+	const weekday = normalized.match(/(?:本周|这周|周)([一二三四五六日天])/);
+	if (weekday) {
+		const values: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 日: 0, 天: 0 };
+		const currentName = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Shanghai", weekday: "short" }).format(now);
+		const current = ({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 } as Record<string, number>)[currentName] ?? 0;
+		let delta = values[weekday[1]] - current;
+		if (delta < 0 || /下周/.test(normalized)) delta += 7;
+		return isoAtBeijingHour(new Date(now.getTime() + delta * 86_400_000));
+	}
+	const currentParts = new Intl.DateTimeFormat("en-CA", {
+		timeZone: "Asia/Shanghai",
+		year: "numeric",
+	}).formatToParts(now).reduce<Record<string, string>>((acc, item) => {
+		acc[item.type] = item.value;
+		return acc;
+	}, {});
+	const currentYear = Number(currentParts.year);
+	const chineseDate = normalized.match(/(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日?/);
+	if (chineseDate) {
+		return isoForBeijingDate(
+			Number(chineseDate[1] || currentYear),
+			Number(chineseDate[2]),
+			Number(chineseDate[3]),
+		);
+	}
+	const numericDate = normalized.match(/(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})/);
+	if (numericDate) {
+		return isoForBeijingDate(
+			Number(numericDate[1] || currentYear),
+			Number(numericDate[2]),
+			Number(numericDate[3]),
+		);
+	}
+	return "";
 }
 
 function todoTaskId(value: unknown): string {
@@ -251,7 +323,7 @@ async function createDingtalkTodo(
 	if (names.length === 0 || names.length > 20) throw new Error("dingtalk_todo_executors_invalid");
 	const priority = params.priority ?? 20;
 	if (![10, 20, 30, 40].includes(priority)) throw new Error("dingtalk_todo_priority_invalid");
-	const due = (params.due ?? "").trim();
+	const due = (params.due ?? "").trim() || resolveRelativeDue((process.env.CEO_PI_TODO_TRIGGER_TEXT ?? "").trim());
 	if (!due && todoTriggerRequiresDue()) throw new Error("dingtalk_todo_due_missing");
 	if (due && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/.test(due)) {
 		throw new Error("dingtalk_todo_due_must_be_iso8601");
@@ -259,7 +331,7 @@ async function createDingtalkTodo(
 	const executorIds: string[] = [];
 	for (const name of names) executorIds.push(await resolveTodoExecutor(name, signal));
 	const argv = ["dws", "todo", "task", "create", "--title", title, "--executors", [...new Set(executorIds)].join(","), "--priority", String(priority), "--format", "json", "--yes"];
-	if (due) argv.splice(argv.length - 2, 0, "--due", due);
+	if (due) argv.splice(argv.indexOf("--format"), 0, "--due", due);
 	const createResult = await runReviewedDwsJson(argv, signal, "write");
 	const createPayload = createResult.payload;
 	const taskId = todoTaskId(createPayload);
@@ -1401,7 +1473,7 @@ export default function ceoAgentTools(pi: ExtensionAPI) {
 			title: Type.String({ minLength: 1, maxLength: 500 }),
 				executor_names: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 20 }),
 				due: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
-			priority: Type.Optional(Type.Union([Type.Literal(10), Type.Literal(20), Type.Literal(30), Type.Literal(40)])),
+				priority: Type.Optional(Type.Union([Type.Literal(10), Type.Literal(20), Type.Literal(30), Type.Literal(40)])),
 		}),
 		async execute(_toolCallId, params, signal) {
 			return createDingtalkTodo(params, signal);

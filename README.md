@@ -440,7 +440,7 @@ Pi 的能力边界由 `pi_extensions/ceo_agent_tools.ts` 定义：
 
 - 本地只读：`workspace_read`、`workspace_search`、`workspace_list`，并限制在配置的 read roots，包含 symlink realpath 防逃逸和 1 MiB 上限。
 - Graphify：`graphify_read` 只允许 `query`、`explain`、`path`，参数通过 `execFile` 传递且 Provider secret 不进入子进程。
-- DWS：`execute_reviewed_read` 与 `execute_reviewed_write`，每次按安装版 `dws schema --all --compact --format json` 的 effect metadata 校验；认证、安装、破坏性和需要人工确认的命令拒绝。
+- DWS：`execute_reviewed_read` 与 `execute_reviewed_write`，每次按安装版 `dws schema --all --compact --format json` 的 effect metadata 校验；认证、安装、破坏性和需要人工确认的命令拒绝。明确的待办创建请求会进入专用 `create_dingtalk_todo` 能力：先解析执行人，再执行 `dws todo task create` 并按 `taskId` 回读验证；不会把一次性待办误写入 Friday Memory。
 - DingTalk Todo：普通 Direct Agent 遇到“记一个待办 / 创建待办 / TODO / 截止日期”等意图时，优先使用 reviewed `dws todo task create`；普通回复任务不会暴露 `memory_write` / `document_upload`，避免把一次性待办误写入 Friday Memory。
 - DingTalk 图片：普通 `mediaId` 下载会在隔离临时文件中完成并把图片像素直接返回 Pi；机器人 `downloadCode` 使用只读 bridge，签名 URL 不进入模型输出或审计摘要。
 - Friday Memory：配置可用时提供 reviewed read/write tools；Python bridge 使用官方 MCP client，认证 scope 由 API Key 身份 ACL 决定，Provider secret 不传给 bridge 子进程。

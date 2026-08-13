@@ -1395,10 +1395,32 @@ def test_direct_runner_dry_run_does_not_expose_todo_write(
     assert "create_dingtalk_todo" not in command
 
 
+def test_direct_runner_does_not_claim_todo_created_without_receipt(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(
+        _context(task.id),
+        trigger_text="请创建一个待办，明天完成",
+    )
+    result = DirectAgentRunner(
+        store=store,
+        workspace=tmp_path,
+        executor=RecordingExecutor(_jsonl()),
+    ).run(task, context)
+
+    assert result.result.outcome is AgentOutcome.NEEDS_HUMAN
+    assert result.result.error.code == "todo_creation_not_executed"
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
         ("记一个待办：周五发布", True),
+        ("记个待办：明天跟进", True),
+        ("记一个待办：解决登录问题", True),
+        ("创建个待办", True),
         ("咱俩有个测试任务，周五之前完成，你记一个待办", True),
         ("创建待办那个是不是还是不行，我再改改", False),
         ("查一下我的待办", False),

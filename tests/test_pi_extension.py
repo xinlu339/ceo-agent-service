@@ -662,18 +662,14 @@ def test_dingtalk_todo_tool_resolves_people_creates_and_reads_back(
 ):
     stdout_by_command = {
         "contact user get-self": json.dumps({"result": [{"orgEmployeeModel": {"userId": "self-1"}}]}),
-        "aisearch person": json.dumps({"result": [{"userId": "sender-1"}]}),
         "todo task create": json.dumps({"result": {"taskId": "todo-1"}}),
         "todo task get": json.dumps({"result": {"taskId": "todo-1", "title": "测试"}}),
     }
     env = {
         "CEO_PI_TODO_TRIGGER_SENDER_NAME": "陈凯",
         "CEO_PI_TODO_TRIGGER_SENDER_USER_ID": "sender-1",
-    }
-    stdout_by_command = {
-        "contact user get-self": json.dumps({"result": [{"orgEmployeeModel": {"userId": "self-1"}}]}),
-        "todo task create": json.dumps({"result": {"taskId": "todo-1"}}),
-        "todo task get": json.dumps({"result": {"taskId": "todo-1", "title": "测试"}}),
+        "CEO_PI_TODO_TRIGGER_TEXT": "咱俩有个测试任务，周五之前完成，你记一个待办",
+        "CEO_PI_TODO_TRIGGER_CREATE_TIME": "2026-08-13 10:00:00",
     }
     result, log_path = _run_tool(
         tmp_path,
@@ -698,6 +694,35 @@ def test_dingtalk_todo_tool_resolves_people_creates_and_reads_back(
         "todo task create",
         "todo task get",
     ]
+    create_argv = records[1]["argv"]
+    assert create_argv[create_argv.index("--due") + 1] == "2026-08-14T18:00:00+08:00"
+
+
+def test_dingtalk_todo_tool_resolves_absolute_chinese_due_date(tmp_path: Path):
+    stdout_by_command = {
+        "contact user get-self": json.dumps({"result": [{"userId": "self-1"}]}),
+        "todo task create": json.dumps({"result": {"taskId": "todo-2"}}),
+        "todo task get": json.dumps({"result": {"taskId": "todo-2"}}),
+    }
+    result, log_path = _run_tool(
+        tmp_path,
+        tool_name="create_dingtalk_todo",
+        params={"title": "测试", "executor_names": ["self"]},
+        extra_env={
+            "CEO_PI_TODO_TRIGGER_TEXT": "请记一个待办，8月15日完成",
+            "CEO_PI_TODO_TRIGGER_CREATE_TIME": "2026-08-13 10:00:00",
+        },
+        stdout_by_command=stdout_by_command,
+        tools=[
+            _metadata("contact user get-self", "read"),
+            _metadata("todo task create", "write"),
+            _metadata("todo task get", "read"),
+        ],
+    )
+    assert result["ok"] is True
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    create_argv = records[1]["argv"]
+    assert create_argv[create_argv.index("--due") + 1] == "2026-08-15T18:00:00+08:00"
 
 
 def test_reviewed_dws_image_download_returns_pixels_and_deletes_temp_file(

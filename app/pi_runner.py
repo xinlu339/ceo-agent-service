@@ -42,6 +42,7 @@ PI_REPLY_SINGLE_CHAT_ENV = "CEO_PI_REPLY_SINGLE_CHAT"
 PI_TODO_TRIGGER_SENDER_NAME_ENV = "CEO_PI_TODO_TRIGGER_SENDER_NAME"
 PI_TODO_TRIGGER_SENDER_USER_ID_ENV = "CEO_PI_TODO_TRIGGER_SENDER_USER_ID"
 PI_TODO_TRIGGER_TEXT_ENV = "CEO_PI_TODO_TRIGGER_TEXT"
+PI_TODO_TRIGGER_CREATE_TIME_ENV = "CEO_PI_TODO_TRIGGER_CREATE_TIME"
 GRAPHIFY_BINARY_ENV = "CEO_GRAPHIFY_BINARY"
 
 DEFAULT_PI_PROVIDER = "deepseek"
@@ -85,7 +86,6 @@ READ_ONLY_PI_TOOLS = (
     "list_candidate_interviews",
 )
 EFFECTFUL_PI_TOOLS = (
-    "create_dingtalk_todo",
     "execute_reviewed_write",
     "execute_reviewed_lark_write",
     "memory_write",
@@ -844,6 +844,7 @@ class PiRunner:
         env.pop(PI_TODO_TRIGGER_SENDER_NAME_ENV, None)
         env.pop(PI_TODO_TRIGGER_SENDER_USER_ID_ENV, None)
         env.pop(PI_TODO_TRIGGER_TEXT_ENV, None)
+        env.pop(PI_TODO_TRIGGER_CREATE_TIME_ENV, None)
         env.update(pi_memory_connector_env())
         env["PI_CODING_AGENT_DIR"] = str(pi_agent_dir())
         env["PI_CODING_AGENT_SESSION_DIR"] = str(pi_session_dir())
