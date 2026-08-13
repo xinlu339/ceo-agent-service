@@ -15,9 +15,12 @@ from app.agent_runner import (
     AgentRunUnavailableError,
     DirectAgentRunner,
     PI_TOOL_BUDGET_EXCEEDED,
+    PUBLIC_INFO_PI_TOOLS,
+    PUBLIC_INFO_READ_ONLY_PI_TOOLS,
     ReconciliationProof,
     _pi_tool_effect_metadata,
     direct_agent_developer_instructions,
+    is_public_live_info_context,
 )
 from app.process_runner import ProcessRunResult
 from app.store import AutoReplyStore
@@ -816,6 +819,65 @@ def test_direct_runner_keeps_main_thinking_for_contextual_tasks(
     )
 
     assert executor.commands[0][executor.commands[0].index("--thinking") + 1] == "medium"
+
+
+def test_public_live_question_uses_web_tools_and_keeps_dingtalk_delivery(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(_context(task.id), trigger_text="北京天气怎么样？")
+    executor = RecordingExecutor(_jsonl())
+
+    assert is_public_live_info_context(context) is True
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+    )
+
+    command = executor.commands[0]
+    tools = tuple(command[command.index("--tools") + 1].split(","))
+    assert tools == PUBLIC_INFO_PI_TOOLS
+    assert "workspace_search" not in tools
+    assert "execute_reviewed_write" in tools
+
+
+def test_public_live_question_read_only_hides_dingtalk_write(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(_context(task.id), trigger_text="北京天气怎么样？")
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+        read_only=True,
+    )
+
+    command = executor.commands[0]
+    tools = tuple(command[command.index("--tools") + 1].split(","))
+    assert tools == PUBLIC_INFO_READ_ONLY_PI_TOOLS
+    assert "workspace_search" not in tools
+    assert "execute_reviewed_write" not in tools
+
+
+@pytest.mark.parametrize(
+    "trigger_text",
+    [
+        "请根据项目文档说明北京天气对发布安排的影响",
+        "查一下仓库里记录的天气接口配置",
+    ],
+)
+def test_public_live_routing_keeps_local_context_tasks_on_full_tools(
+    trigger_text: str,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(_context(task.id), trigger_text=trigger_text)
+
+    assert is_public_live_info_context(context) is False
 
 
 def test_direct_runner_repairs_invalid_result_in_same_session_without_tools(

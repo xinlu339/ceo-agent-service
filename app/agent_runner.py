@@ -1,6 +1,7 @@
 import json
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +59,39 @@ PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT = (
     "pi_finalization_failed_after_confirmed_effect"
 )
 PI_TOOL_BUDGET_EXCEEDED = "pi_tool_budget_exceeded"
+
+# Public, time-sensitive questions should use the public web bridge directly.
+# They are deliberately kept out of the local-workspace retrieval path: the
+# latter is for repository/project evidence and is both slower and irrelevant
+# to questions such as "北京天气怎么样？".  This is a routing guard, not a
+# replacement for the model's judgment; explicit local-material markers or
+# supplied materials keep the normal full tool set.
+PUBLIC_LIVE_QUERY_PATTERN = re.compile(
+    r"(?:"
+    r"天气|气温|温度|降雨|下雨|降雪|空气质量|湿度|风力|"
+    r"新闻|热搜|头条|实时|最新消息|当前汇率|汇率|股价|股票|"
+    r"路况|交通状况|航班状态|列车状态|比赛比分|赛事结果|"
+    r"weather|forecast|news|latest|current\s+(?:price|rate|stock|weather)"
+    r")",
+    re.IGNORECASE,
+)
+PUBLIC_LOCAL_CONTEXT_PATTERN = re.compile(
+    r"(?:"
+    r"项目|仓库|代码|源码|服务|配置|部署|日志|测试|文档|附件|文件|"
+    r"上面|刚才|本地|工作区|知识库|历史记录|审批|待办|日程|会议|"
+    r"repository|workspace|local\s+file|project\s+file|attachment"
+    r")",
+    re.IGNORECASE,
+)
+PUBLIC_INFO_PI_TOOLS = (
+    "web_search_exa",
+    "web_fetch_exa",
+    "execute_reviewed_write",
+)
+PUBLIC_INFO_READ_ONLY_PI_TOOLS = (
+    "web_search_exa",
+    "web_fetch_exa",
+)
 PI_JSON_FINALIZER_PROMPT = """The previous Direct Agent turn completed its work, but its final response was not valid AgentResult JSON.
 
 Return exactly one valid AgentResult JSON object now. Do not call tools, do not perform any external action, and do not invent a new result. Reconstruct the final outcome only from the work and tool results already present in this same Pi session. The object must contain:
@@ -143,6 +177,24 @@ def direct_agent_developer_instructions() -> str:
         "Do not re-read agent rule files through shell or exec.\n\n"
         + shared_rules
     )
+
+
+def is_public_live_info_context(context: AgentTaskContext) -> bool:
+    """Return whether this task is a self-contained public-information query.
+
+    The check intentionally uses only the trigger and service-supplied
+    evidence.  A question with attached/materialized project evidence, a
+    manual rerun, or prior side-effect receipts must retain the full tool set.
+    """
+
+    if context.materials or context.prior_receipts or context.manual_rerun:
+        return False
+    text = context.trigger_text.strip()
+    if not text or not PUBLIC_LIVE_QUERY_PATTERN.search(text):
+        return False
+    return PUBLIC_LOCAL_CONTEXT_PATTERN.search(text) is None
+
+
 class AgentRunUnavailableError(RuntimeError):
     pass
 
@@ -423,6 +475,28 @@ class DirectAgentRunner:
             context,
             read_only=read_only,
         )
+        public_live_info = is_public_live_info_context(context)
+        tool_names = None
+        if public_live_info:
+            tool_names = (
+                PUBLIC_INFO_READ_ONLY_PI_TOOLS
+                if read_only
+                else PUBLIC_INFO_PI_TOOLS
+            )
+            delivery_instruction = (
+                "Do not send or perform any other write in this read-only run."
+                if read_only
+                else "After answering, use the reviewed DingTalk write tool only "
+                "to send the concise answer back to the original conversation."
+            )
+            developer_instructions += (
+                "\n\nThis is a self-contained public, time-sensitive information "
+                "question. Use web_search_exa/web_fetch_exa for current public "
+                "evidence. Do not use workspace_read, workspace_search, "
+                "workspace_list, Memory, Graphify, or DingTalk reads for this "
+                "question. "
+                + delivery_instruction
+            )
         command = self.pi.build_command(
             prompt=prompt,
             session_id=session_id,
@@ -434,15 +508,17 @@ class DirectAgentRunner:
             ignore_user_config=True,
             allow_memory_writes=False,
             thinking_level=thinking_level,
+            tool_names=tool_names,
         )
         logger.info(
             "pi_agent_run_started task_id=%s run_id=%s thinking=%s read_only=%s "
-            "session_reused=%s",
+            "session_reused=%s public_live_info=%s",
             task.id,
             run.id,
             thinking_level,
             read_only,
             bool(session_id),
+            public_live_info,
         )
         saw_json = False
         stream_line_count = 0
