@@ -1,6 +1,7 @@
 import argparse
 import errno
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -2536,6 +2537,10 @@ def run_service(
     wait: Callable[[], None] | None = None,
     exit_process: Callable[[int], None] = os._exit,
 ) -> None:
+    logging.basicConfig(
+        level=os.environ.get("CEO_LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     _initialize_meeting_discovery_on_service_start(settings)
     _recover_orphaned_reply_tasks_on_service_start(settings)
     _recover_processing_work_summary_inputs_on_service_start(settings)
