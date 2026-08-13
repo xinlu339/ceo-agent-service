@@ -902,12 +902,53 @@ def test_oa_review_uses_deterministic_tools_without_workspace_search(
     command = executor.commands[0]
     tools = tuple(command[command.index("--tools") + 1].split(","))
     assert tools == OA_PI_TOOLS
-    assert "workspace_read" in tools
+    assert "workspace_read" not in tools
     assert "workspace_search" not in tools
     assert "create_dingtalk_todo" not in tools
     system_prompt = command[command.index("--system-prompt") + 1]
-    assert "Read the configured approval rules exactly once" in system_prompt
-    assert "management/OA/钉钉审批审阅原则.md" in system_prompt
+    assert "rules are injected below" in system_prompt
+    assert "packaged:conservative-fallback" in system_prompt
+    assert "This fallback is not authority to approve" in system_prompt
+
+
+def test_oa_review_injects_existing_configured_rules(
+    tmp_path: Path,
+    store: AutoReplyStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    rules_path = tmp_path / "management" / "OA" / "approval.md"
+    rules_path.parent.mkdir(parents=True)
+    rules_path.write_text("提测单只有测试负责人确认后才允许通过。", encoding="utf-8")
+    monkeypatch.setenv(
+        "CEO_PROMPT_VAR_OA_APPROVAL_RULES",
+        "management/OA/approval.md",
+    )
+    task = _task(store)
+    context = replace(
+        _context(task.id),
+        materials=(
+            MaterialReference(
+                kind="dingtalk_oa",
+                reference="proc-1",
+                source_message_id="mid",
+                read_commands=(
+                    "dws oa approval detail --instance-id proc-1 --format json",
+                ),
+            ),
+        ),
+    )
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+    )
+
+    command = executor.commands[0]
+    system_prompt = command[command.index("--system-prompt") + 1]
+    assert "configured:management/OA/approval.md" in system_prompt
+    assert "提测单只有测试负责人确认后才允许通过。" in system_prompt
+    assert "packaged:conservative-fallback" not in system_prompt
 
 
 def test_oa_review_read_only_hides_all_writes(

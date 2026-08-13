@@ -1,6 +1,7 @@
 import json
 import hashlib
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -100,16 +101,18 @@ PUBLIC_INFO_READ_ONLY_PI_TOOLS = (
     "web_fetch_exa",
 )
 OA_PI_TOOLS = (
-    "workspace_read",
     "download_dingtalk_image",
     "execute_reviewed_read",
     "execute_reviewed_write",
 )
 OA_READ_ONLY_PI_TOOLS = (
-    "workspace_read",
     "download_dingtalk_image",
     "execute_reviewed_read",
 )
+DEFAULT_OA_APPROVAL_RULES_PATH = (
+    SERVICE_ROOT / "app" / "defaults" / "oa_approval_rules.md"
+)
+MAX_OA_APPROVAL_RULES_BYTES = 64 * 1024
 PI_JSON_FINALIZER_PROMPT = """The previous Direct Agent turn completed its work, but its final response was not valid AgentResult JSON.
 
 Return exactly one valid AgentResult JSON object now. Do not call tools, do not perform any external action, and do not invent a new result. Reconstruct the final outcome only from the work and tool results already present in this same Pi session. The object must contain:
@@ -220,6 +223,34 @@ def is_dingtalk_oa_context(context: AgentTaskContext) -> bool:
     )
 
 
+def load_oa_approval_rules(workspace: Path) -> tuple[str, str]:
+    """Load one configured OA rule file or the packaged safe fallback.
+
+    OA routing must not ask the model to discover this file: a missing or
+    renamed workspace rule was the reason Pi broadened into repeated searches.
+    The service resolves and injects the rules before starting Pi instead.
+    """
+
+    configured_value = prompt_template_variables()["oa_approval_rules"].strip()
+    configured_path = Path(os.path.expandvars(configured_value)).expanduser()
+    if not configured_path.is_absolute():
+        configured_path = workspace / configured_path
+    candidates = (
+        (configured_path, f"configured:{configured_value}"),
+        (DEFAULT_OA_APPROVAL_RULES_PATH, "packaged:conservative-fallback"),
+    )
+    for path, source in candidates:
+        try:
+            if not path.is_file() or path.stat().st_size > MAX_OA_APPROVAL_RULES_BYTES:
+                continue
+            rules = path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            continue
+        if rules:
+            return rules, source
+    raise RuntimeError("OA approval rules are unavailable")
+
+
 class AgentRunUnavailableError(RuntimeError):
     pass
 
@@ -328,6 +359,7 @@ class DirectAgentRunner:
         idle_timeout_seconds: int | None = None,
     ) -> None:
         self.store = store
+        self.workspace = workspace
         self.pi = PiRunner(
             workspace=workspace,
             node_binary=node_binary,
@@ -529,9 +561,9 @@ class DirectAgentRunner:
             # search/list and unrelated connectors only add latency and create
             # a failure mode without adding evidence.
             tool_names = OA_READ_ONLY_PI_TOOLS if read_only else OA_PI_TOOLS
-            approval_rules_path = prompt_template_variables()[
-                "oa_approval_rules"
-            ].strip()
+            approval_rules, approval_rules_source = load_oa_approval_rules(
+                self.workspace
+            )
             action_instruction = (
                 "Do not perform an approval, comment, notification, or other "
                 "write in this read-only run."
@@ -541,15 +573,19 @@ class DirectAgentRunner:
             )
             developer_instructions += (
                 "\n\nThis is a DingTalk OA review. The OA workflow and safety "
-                "rules are already supplied here; do not search for a skill or "
-                "scan/list the workspace. Read the configured approval rules "
-                f"exactly once with workspace_read at {approval_rules_path!r}. "
-                "Then execute the exact supplied OA detail read command and only "
+                "rules are injected below; do not search for a skill or read, "
+                "search, or list the workspace. Execute the exact supplied OA "
+                "detail read command and only "
                 "the DWS reads required by links or attachments in that live "
                 "detail. Do not repeat an equivalent read. If those deterministic "
                 "reads do not establish a safe decision, return needs_human with "
                 "the concrete missing fact instead of broadening retrieval. "
                 + action_instruction
+                + "\n\nInjected OA approval rules (source: "
+                + approval_rules_source
+                + "):\n<oa_approval_rules>\n"
+                + approval_rules
+                + "\n</oa_approval_rules>"
             )
         elif todo_create_intent and not read_only:
             # A Todo request is deliberately a capability-scoped invocation.
