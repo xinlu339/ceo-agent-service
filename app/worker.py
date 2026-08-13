@@ -1570,14 +1570,17 @@ class DingTalkAutoReplyWorker:
                     task.id,
                     task.execution_generation,
                 )
+                persisted_error: dict[str, object] = {}
                 if persisted_run is not None and persisted_run.status == "failed":
                     try:
-                        persisted_error = json.loads(
+                        parsed_persisted_error = json.loads(
                             persisted_run.structured_error_json or "{}"
                         )
                     except json.JSONDecodeError:
-                        persisted_error = {}
-                    if isinstance(persisted_error, dict) and persisted_error.get(
+                        parsed_persisted_error = {}
+                    if isinstance(parsed_persisted_error, dict):
+                        persisted_error = parsed_persisted_error
+                    if persisted_error.get(
                         "code"
                     ):
                         error = str(persisted_error["code"])
@@ -1639,6 +1642,15 @@ class DingTalkAutoReplyWorker:
                             task.execution_generation,
                         )
                     retryable = error != PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT
+                    if persisted_run is not None and persisted_run.status == "failed":
+                        # DirectAgentRunner has already classified this exact
+                        # run. Respect that terminal decision instead of
+                        # requeueing the same failed run and writing a second
+                        # identical attempt on the next consumer pass.
+                        retryable = (
+                            persisted_error.get("retryable") is True
+                            and persisted_run.side_effect_state == "none"
+                        )
                     task_status = self._record_agent_runtime_failure_attempt(
                         task,
                         error,

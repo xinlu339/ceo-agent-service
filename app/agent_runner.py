@@ -22,6 +22,7 @@ from app.agent_result import (
     parse_agent_result,
 )
 from app.config import env_int
+from app.developer_prompt import prompt_template_variables
 from app.history import safe_observability_error
 from app.pi_tool_metadata import (
     reviewed_pi_command,
@@ -97,6 +98,17 @@ PUBLIC_INFO_PI_TOOLS = (
 PUBLIC_INFO_READ_ONLY_PI_TOOLS = (
     "web_search_exa",
     "web_fetch_exa",
+)
+OA_PI_TOOLS = (
+    "workspace_read",
+    "download_dingtalk_image",
+    "execute_reviewed_read",
+    "execute_reviewed_write",
+)
+OA_READ_ONLY_PI_TOOLS = (
+    "workspace_read",
+    "download_dingtalk_image",
+    "execute_reviewed_read",
 )
 PI_JSON_FINALIZER_PROMPT = """The previous Direct Agent turn completed its work, but its final response was not valid AgentResult JSON.
 
@@ -200,6 +212,12 @@ def is_public_live_info_context(context: AgentTaskContext) -> bool:
     if not text or not PUBLIC_LIVE_QUERY_PATTERN.search(text):
         return False
     return PUBLIC_LOCAL_CONTEXT_PATTERN.search(text) is None
+
+
+def is_dingtalk_oa_context(context: AgentTaskContext) -> bool:
+    return context.channel == "dingtalk" and any(
+        material.kind == "dingtalk_oa" for material in context.materials
+    )
 
 
 class AgentRunUnavailableError(RuntimeError):
@@ -494,6 +512,7 @@ class DirectAgentRunner:
             context,
             read_only=read_only,
         )
+        oa_context = is_dingtalk_oa_context(context)
         public_live_info = is_public_live_info_context(context)
         todo_create_intent = (
             context.channel == "dingtalk"
@@ -503,7 +522,36 @@ class DirectAgentRunner:
             read_only=read_only,
             is_todo_intent=todo_create_intent,
         )
-        if todo_create_intent and not read_only:
+        if oa_context:
+            # OA review has a deterministic evidence path. The approval rules
+            # have one configured location and every business material read is
+            # available through the supplied DWS commands, so broad workspace
+            # search/list and unrelated connectors only add latency and create
+            # a failure mode without adding evidence.
+            tool_names = OA_READ_ONLY_PI_TOOLS if read_only else OA_PI_TOOLS
+            approval_rules_path = prompt_template_variables()[
+                "oa_approval_rules"
+            ].strip()
+            action_instruction = (
+                "Do not perform an approval, comment, notification, or other "
+                "write in this read-only run."
+                if read_only
+                else "Use execute_reviewed_write only for the authorized OA "
+                "action/comment and the required applicant notification."
+            )
+            developer_instructions += (
+                "\n\nThis is a DingTalk OA review. The OA workflow and safety "
+                "rules are already supplied here; do not search for a skill or "
+                "scan/list the workspace. Read the configured approval rules "
+                f"exactly once with workspace_read at {approval_rules_path!r}. "
+                "Then execute the exact supplied OA detail read command and only "
+                "the DWS reads required by links or attachments in that live "
+                "detail. Do not repeat an equivalent read. If those deterministic "
+                "reads do not establish a safe decision, return needs_human with "
+                "the concrete missing fact instead of broadening retrieval. "
+                + action_instruction
+            )
+        elif todo_create_intent and not read_only:
             # A Todo request is deliberately a capability-scoped invocation.
             # The model may fill in natural-language fields, but it cannot
             # choose Memory, workspace search, or an unrelated DWS write.
@@ -560,13 +608,14 @@ class DirectAgentRunner:
         )
         logger.info(
             "pi_agent_run_started task_id=%s run_id=%s thinking=%s read_only=%s "
-            "session_reused=%s public_live_info=%s",
+            "session_reused=%s public_live_info=%s oa_context=%s",
             task.id,
             run.id,
             thinking_level,
             read_only,
             bool(session_id),
             public_live_info,
+            oa_context,
         )
         saw_json = False
         stream_line_count = 0

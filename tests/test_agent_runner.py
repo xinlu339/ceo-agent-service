@@ -14,12 +14,15 @@ from app.agent_runner import (
     AgentRunUnknownError,
     AgentRunUnavailableError,
     DirectAgentRunner,
+    OA_PI_TOOLS,
+    OA_READ_ONLY_PI_TOOLS,
     PI_TOOL_BUDGET_EXCEEDED,
     PUBLIC_INFO_PI_TOOLS,
     PUBLIC_INFO_READ_ONLY_PI_TOOLS,
     ReconciliationProof,
     _pi_tool_effect_metadata,
     direct_agent_developer_instructions,
+    is_dingtalk_oa_context,
     is_public_live_info_context,
 )
 from app.process_runner import ProcessRunResult
@@ -862,6 +865,82 @@ def test_public_live_question_read_only_hides_dingtalk_write(
     assert tools == PUBLIC_INFO_READ_ONLY_PI_TOOLS
     assert "workspace_search" not in tools
     assert "execute_reviewed_write" not in tools
+
+
+def test_oa_review_uses_deterministic_tools_without_workspace_search(
+    tmp_path: Path,
+    store: AutoReplyStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv(
+        "CEO_PROMPT_VAR_OA_APPROVAL_RULES",
+        "management/OA/钉钉审批审阅原则.md",
+    )
+    task = _task(store)
+    context = replace(
+        _context(task.id),
+        trigger_text="孙旭提交的提测单，请审批并创建后续待办",
+        materials=(
+            MaterialReference(
+                kind="dingtalk_oa",
+                reference='{"process_instance_id":"proc-1","task_id":"task-1"}',
+                source_message_id="mid",
+                read_commands=(
+                    "dws oa approval detail --instance-id proc-1 --format json",
+                ),
+            ),
+        ),
+    )
+    executor = RecordingExecutor(_jsonl())
+
+    assert is_dingtalk_oa_context(context) is True
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+    )
+
+    command = executor.commands[0]
+    tools = tuple(command[command.index("--tools") + 1].split(","))
+    assert tools == OA_PI_TOOLS
+    assert "workspace_read" in tools
+    assert "workspace_search" not in tools
+    assert "create_dingtalk_todo" not in tools
+    system_prompt = command[command.index("--system-prompt") + 1]
+    assert "Read the configured approval rules exactly once" in system_prompt
+    assert "management/OA/钉钉审批审阅原则.md" in system_prompt
+
+
+def test_oa_review_read_only_hides_all_writes(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(
+        _context(task.id),
+        materials=(
+            MaterialReference(
+                kind="dingtalk_oa",
+                reference="proc-1",
+                source_message_id="mid",
+                read_commands=(
+                    "dws oa approval detail --instance-id proc-1 --format json",
+                ),
+            ),
+        ),
+    )
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+        read_only=True,
+    )
+
+    command = executor.commands[0]
+    tools = tuple(command[command.index("--tools") + 1].split(","))
+    assert tools == OA_READ_ONLY_PI_TOOLS
+    assert "execute_reviewed_write" not in tools
+    assert "workspace_search" not in tools
 
 
 @pytest.mark.parametrize(

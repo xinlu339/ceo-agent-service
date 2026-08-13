@@ -56,6 +56,8 @@ class OrgUserProfile(BaseModel):
 
 class ReplyAttempt(BaseModel):
     id: int
+    agent_run_id: int = 0
+    agent_run_attempt: int = 0
     conversation_id: str
     conversation_title: str
     trigger_message_id: str
@@ -319,6 +321,7 @@ class AgentRun(BaseModel):
     id: int
     reply_task_id: int
     execution_generation: str
+    execution_attempt: int = 1
     status: str
     codex_session_id: str = ""
     transcript_start_line: int = 0
@@ -796,6 +799,8 @@ class AutoReplyStore:
                 );
                 create table if not exists reply_attempts (
                     id integer primary key autoincrement,
+                    agent_run_id integer not null default 0,
+                    agent_run_attempt integer not null default 0,
                     conversation_id text not null,
                     conversation_title text not null,
                     trigger_message_id text not null,
@@ -897,6 +902,7 @@ class AutoReplyStore:
                     id integer primary key autoincrement,
                     reply_task_id integer not null,
                     execution_generation text not null,
+                    execution_attempt integer not null default 1,
                     status text not null default 'pending'
                         check(status in (
                             'pending', 'running', 'completed', 'failed', 'unknown'
@@ -1389,6 +1395,7 @@ class AutoReplyStore:
                 for row in db.execute("pragma table_info(agent_runs)").fetchall()
             }
             for column, definition in (
+                ("execution_attempt", "integer not null default 1"),
                 ("reconciliation_attempts", "integer not null default 0"),
                 ("reconciliation_next_attempt_at", "text not null default ''"),
                 ("reconciliation_suspended", "integer not null default 0"),
@@ -1506,6 +1513,8 @@ class AutoReplyStore:
                 for row in db.execute("pragma table_info(reply_attempts)").fetchall()
             }
             for column, definition in (
+                ("agent_run_id", "integer not null default 0"),
+                ("agent_run_attempt", "integer not null default 0"),
                 ("codex_session_id", "text not null default ''"),
                 ("direct_user_id", "text not null default ''"),
                 ("direct_open_dingtalk_id", "text not null default ''"),
@@ -1539,6 +1548,49 @@ class AutoReplyStore:
                     except sqlite3.OperationalError as exc:
                         if "duplicate column name" not in str(exc):
                             raise
+            db.execute(
+                """
+                create index if not exists idx_reply_attempts_agent_run
+                    on reply_attempts(agent_run_id, agent_run_attempt, id)
+                """
+            )
+            # Older Direct Agent attempts did not retain their stable run id.
+            # Exact trigger/session/transcript matching is sufficient to link
+            # those rows without deleting immutable audit history. If an old
+            # bug wrote the same run twice, both rows receive the same run id;
+            # read paths show the newest row while preserving the older row for
+            # forensic SQL inspection.
+            db.execute(
+                """
+                update reply_attempts
+                set agent_run_id=coalesce((
+                    select runs.id
+                    from agent_runs as runs
+                    join reply_tasks as tasks on tasks.id=runs.reply_task_id
+                    where tasks.conversation_id=reply_attempts.conversation_id
+                      and tasks.trigger_message_id=reply_attempts.trigger_message_id
+                      and runs.codex_session_id=reply_attempts.codex_session_id
+                      and runs.transcript_start_line=reply_attempts.codex_transcript_start_line
+                      and runs.transcript_end_line=reply_attempts.codex_transcript_end_line
+                    order by runs.id desc
+                    limit 1
+                ), 0)
+                where agent_run_id=0
+                  and action='agent_run'
+                  and codex_session_id<>''
+                """
+            )
+            db.execute(
+                """
+                update reply_attempts
+                set agent_run_attempt=coalesce((
+                    select runs.execution_attempt
+                    from agent_runs as runs
+                    where runs.id=reply_attempts.agent_run_id
+                ), 0)
+                where agent_run_id<>0 and agent_run_attempt=0
+                """
+            )
             db.execute(
                 """
                 update reply_attempts
@@ -2848,6 +2900,7 @@ class AutoReplyStore:
                         """
                         update agent_runs
                         set status='running', lease_owner=?, lease_expires_at=?,
+                            execution_attempt=execution_attempt+1,
                             transcript_start_line=transcript_end_line,
                             final_result_json='', structured_error_json='',
                             completed_at='', started_at=?, updated_at=?
@@ -7990,6 +8043,7 @@ class AutoReplyStore:
                 """
                 select agent_runs.status as run_status,
                        agent_runs.execution_generation as run_generation,
+                       agent_runs.execution_attempt as run_execution_attempt,
                        reply_tasks.execution_generation as task_generation
                 from agent_runs
                 join reply_tasks on reply_tasks.id=agent_runs.reply_task_id
@@ -8004,43 +8058,99 @@ class AutoReplyStore:
                 or row["run_status"] not in {"completed", "failed", "unknown"}
             ):
                 raise AgentRunLeaseLostError(f"agent run superseded: {run_id}")
-            cursor = db.execute(
+            existing_attempt = db.execute(
                 """
-                insert into reply_attempts (
-                    conversation_id, conversation_title, trigger_message_id,
-                    trigger_sender, trigger_text, action, sensitivity_kind,
-                    codex_reason, codex_session_id,
-                    codex_transcript_start_line, codex_transcript_end_line,
-                    audit_tool_events_json, audit_summary,
-                    oa_process_instance_id, oa_task_id, oa_url, oa_action,
-                    oa_remark, oa_action_result_json, send_status, send_error,
-                    channel
-                ) values (?, ?, ?, ?, ?, 'agent_run', 'general', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                select id
+                from reply_attempts
+                where agent_run_id=? and agent_run_attempt=?
+                order by id desc
+                limit 1
                 """,
-                (
-                    conversation_id,
-                    conversation_title,
-                    trigger_message_id,
-                    trigger_sender,
-                    trigger_text,
-                    codex_reason,
-                    codex_session_id,
-                    codex_transcript_start_line,
-                    codex_transcript_end_line,
-                    audit_tool_events_json,
-                    audit_summary,
-                    oa_process_instance_id,
-                    oa_task_id,
-                    oa_url,
-                    oa_action,
-                    oa_remark,
-                    oa_action_result_json,
-                    send_status,
-                    send_error,
-                    channel,
-                ),
-            )
-            attempt_id = int(cursor.lastrowid)
+                (run_id, row["run_execution_attempt"]),
+            ).fetchone()
+            if existing_attempt is None:
+                cursor = db.execute(
+                    """
+                    insert into reply_attempts (
+                        agent_run_id, agent_run_attempt,
+                        conversation_id, conversation_title, trigger_message_id,
+                        trigger_sender, trigger_text, action, sensitivity_kind,
+                        codex_reason, codex_session_id,
+                        codex_transcript_start_line, codex_transcript_end_line,
+                        audit_tool_events_json, audit_summary,
+                        oa_process_instance_id, oa_task_id, oa_url, oa_action,
+                        oa_remark, oa_action_result_json, send_status, send_error,
+                        channel
+                    ) values (?, ?, ?, ?, ?, ?, ?, 'agent_run', 'general', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        row["run_execution_attempt"],
+                        conversation_id,
+                        conversation_title,
+                        trigger_message_id,
+                        trigger_sender,
+                        trigger_text,
+                        codex_reason,
+                        codex_session_id,
+                        codex_transcript_start_line,
+                        codex_transcript_end_line,
+                        audit_tool_events_json,
+                        audit_summary,
+                        oa_process_instance_id,
+                        oa_task_id,
+                        oa_url,
+                        oa_action,
+                        oa_remark,
+                        oa_action_result_json,
+                        send_status,
+                        send_error,
+                        channel,
+                    ),
+                )
+                attempt_id = int(cursor.lastrowid)
+            else:
+                attempt_id = int(existing_attempt["id"])
+                db.execute(
+                    """
+                    update reply_attempts
+                    set conversation_id=?, conversation_title=?,
+                        trigger_message_id=?, trigger_sender=?, trigger_text=?,
+                        action='agent_run', sensitivity_kind='general',
+                        codex_reason=?, codex_session_id=?,
+                        codex_transcript_start_line=?,
+                        codex_transcript_end_line=?,
+                        audit_tool_events_json=?, audit_summary=?,
+                        oa_process_instance_id=?, oa_task_id=?, oa_url=?,
+                        oa_action=?, oa_remark=?, oa_action_result_json=?,
+                        send_status=?, send_error=?, channel=?,
+                        updated_at=current_timestamp
+                    where id=?
+                    """,
+                    (
+                        conversation_id,
+                        conversation_title,
+                        trigger_message_id,
+                        trigger_sender,
+                        trigger_text,
+                        codex_reason,
+                        codex_session_id,
+                        codex_transcript_start_line,
+                        codex_transcript_end_line,
+                        audit_tool_events_json,
+                        audit_summary,
+                        oa_process_instance_id,
+                        oa_task_id,
+                        oa_url,
+                        oa_action,
+                        oa_remark,
+                        oa_action_result_json,
+                        send_status,
+                        send_error,
+                        channel,
+                        attempt_id,
+                    ),
+                )
             self._record_memory_write_events_in_connection(
                 db,
                 attempt_id,
@@ -8602,13 +8712,25 @@ class AutoReplyStore:
     ) -> list[ReplyAttempt]:
         with self._connect() as db:
             query = """
-                select *
-                from reply_attempts
+                select attempts.*
+                from reply_attempts as attempts
             """
             filters, args = self._reply_attempt_filters(
                 send_status=send_status,
                 send_statuses=send_statuses,
                 query_text=query_text,
+            )
+            filters.insert(
+                0,
+                """(
+                    attempts.agent_run_id=0
+                    or attempts.id=(
+                        select max(run_attempts.id)
+                        from reply_attempts as run_attempts
+                        where run_attempts.agent_run_id=attempts.agent_run_id
+                          and run_attempts.agent_run_attempt=attempts.agent_run_attempt
+                    )
+                )""",
             )
             if filters:
                 query = f"{query} where {' and '.join(filters)}"
@@ -8774,7 +8896,16 @@ class AutoReplyStore:
                     send_error || ' ' || reviewer_feedback || ' ' || corrected_reply_text
                     , '') as search_text
                 from reply_attempts
-                where oa_process_instance_id = ''
+                where (
+                    agent_run_id=0
+                    or id=(
+                        select max(run_attempts.id)
+                        from reply_attempts as run_attempts
+                        where run_attempts.agent_run_id=reply_attempts.agent_run_id
+                          and run_attempts.agent_run_attempt=reply_attempts.agent_run_attempt
+                    )
+                )
+                  and (oa_process_instance_id = ''
                    or id = (
                         select process_attempts.id
                         from reply_attempts as process_attempts
@@ -8789,7 +8920,7 @@ class AutoReplyStore:
                             process_attempts.created_at desc,
                             process_attempts.id desc
                         limit 1
-                   )
+                   ))
                 union all
                 select
                     'meeting' as kind,
@@ -9306,6 +9437,18 @@ class AutoReplyStore:
                 send_status=send_status,
                 send_statuses=send_statuses,
                 query_text=query_text,
+            )
+            filters.insert(
+                0,
+                """(
+                    agent_run_id=0
+                    or id=(
+                        select max(run_attempts.id)
+                        from reply_attempts as run_attempts
+                        where run_attempts.agent_run_id=reply_attempts.agent_run_id
+                          and run_attempts.agent_run_attempt=reply_attempts.agent_run_attempt
+                    )
+                )""",
             )
             where_sql = f" where {' and '.join(filters)}" if filters else ""
             row = db.execute(

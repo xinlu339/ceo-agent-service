@@ -72,6 +72,98 @@ def test_existing_database_adds_agent_runs_without_rewriting_reply_tasks(
     assert "idx_agent_runs_status" in indexes
 
 
+def test_finalize_agent_reply_task_is_idempotent_per_agent_run(tmp_path: Path):
+    store = _store(tmp_path)
+    store.enqueue_reply_task(
+        channel="dingtalk",
+        conversation_id="oa-cid",
+        conversation_title="审批待办",
+        single_chat=True,
+        trigger_message_id="oa-pending:proc-1:revision-1",
+        trigger_create_time="2026-08-13 17:53:00",
+        trigger_sender="Derek OA",
+        trigger_text="孙旭提交的提测单",
+        execution_generation="generation-1",
+    )
+    task = store.list_reply_tasks(statuses=("pending",), limit=1)[0]
+    assert store.claim_reply_task(task.id, now="2026-08-13 17:53:01") is not None
+    claim = store.claim_agent_run(
+        task.id,
+        task.execution_generation,
+        owner="worker-1",
+        now="2026-08-13 17:53:02",
+    )
+    assert claim.claimed
+    failed_run = store.fail_agent_run(
+        claim.run.id,
+        {"code": "pi_tool_budget_exceeded", "retryable": False},
+        owner="worker-1",
+        now="2026-08-13 17:53:03",
+    )
+
+    def finalize(task_status: str) -> int:
+        return store.finalize_agent_reply_task(
+            task_id=task.id,
+            expected_execution_generation=task.execution_generation,
+            run_id=failed_run.id,
+            task_status=task_status,
+            task_error="pi_tool_budget_exceeded",
+            available_at="" if task_status == "failed" else "2026-08-13 17:54:00",
+            conversation_id=task.conversation_id,
+            conversation_title=task.conversation_title,
+            trigger_message_id=task.trigger_message_id,
+            trigger_sender=task.trigger_sender,
+            trigger_text=task.trigger_text,
+            codex_reason="pi_tool_budget_exceeded",
+            codex_session_id=failed_run.codex_session_id,
+            codex_transcript_start_line=failed_run.transcript_start_line,
+            codex_transcript_end_line=failed_run.transcript_end_line,
+            audit_tool_events_json="[]",
+            audit_summary="pi_tool_budget_exceeded",
+            send_status="failed",
+            send_error="pi_tool_budget_exceeded",
+            channel="dingtalk",
+        )
+
+    first_attempt_id = finalize("pending")
+    assert store.claim_reply_task(task.id, now="2026-08-13 17:54:01") is not None
+    second_attempt_id = finalize("failed")
+
+    assert second_attempt_id == first_attempt_id
+    assert store.count_reply_attempts() == 1
+    attempt = store.get_reply_attempt(first_attempt_id)
+    assert attempt is not None
+    assert attempt.agent_run_id == failed_run.id
+    assert attempt.send_error == "pi_tool_budget_exceeded"
+
+
+def test_reply_attempt_lists_collapse_legacy_duplicates_for_one_agent_run(
+    tmp_path: Path,
+):
+    store = _store(tmp_path)
+    with sqlite3.connect(tmp_path / "task.sqlite3") as db:
+        for error in ("first", "second"):
+            db.execute(
+                """
+                insert into reply_attempts (
+                    agent_run_id, agent_run_attempt,
+                    conversation_id, conversation_title,
+                    trigger_message_id, trigger_sender, trigger_text,
+                    action, sensitivity_kind, send_status, send_error
+                ) values (180, 1, 'oa-cid', '审批待办', 'oa-trigger', 'Derek OA',
+                          '孙旭提交的提测单', 'agent_run', 'general', 'failed', ?)
+                """,
+                (error,),
+            )
+
+    attempts = store.list_reply_attempts()
+
+    assert len(attempts) == 1
+    assert attempts[0].agent_run_id == 180
+    assert attempts[0].send_error == "second"
+    assert store.count_reply_attempts() == 1
+
+
 def test_channel_identity_migration_accepts_quoted_index_names(tmp_path: Path):
     db_path = tmp_path / "task.sqlite3"
     with sqlite3.connect(db_path) as db:

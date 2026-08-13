@@ -220,6 +220,33 @@ class ConfirmedFinalizationFailureRunner:
         raise RuntimeError("pi_process_failed")
 
 
+class PersistedBudgetFailureRunner:
+    def __init__(self, store: AutoReplyStore) -> None:
+        self.store = store
+        self.owner = "persisted-budget-failure"
+        self.calls = 0
+
+    def run(self, task, _context, **_kwargs):
+        self.calls += 1
+        claim = self.store.claim_agent_run(
+            task.id,
+            task.execution_generation,
+            owner=self.owner,
+        )
+        assert claim.claimed
+        self.store.fail_agent_run(
+            claim.run.id,
+            {
+                "code": "pi_tool_budget_exceeded",
+                "detail": "pi_tool_budget_exceeded:workspace_search:3",
+                "retryable": False,
+            },
+            owner=self.owner,
+            side_effect_state="none",
+        )
+        raise RuntimeError("pi_tool_budget_exceeded")
+
+
 def explicit_agent_result(
     outcome: AgentOutcome,
     summary: str,
@@ -5297,6 +5324,48 @@ def test_confirmed_external_effect_finalization_failure_is_not_retried(
     assert attempt.send_error == "pi_finalization_failed_after_confirmed_effect"
 
 
+def test_non_retryable_tool_budget_failure_records_one_terminal_attempt(
+    tmp_path: Path,
+    monkeypatch,
+):
+    trigger = message("[Ding]孙旭提醒您审批他的提测单")
+    dws = FakeDws([conversation()], {"cid-1": [trigger]})
+    worker = make_worker(tmp_path, dws, FakeCodex([]), monkeypatch)
+    runner = PersistedBudgetFailureRunner(worker.store)
+    worker.direct_agent_runner = runner
+    worker.store.enqueue_reply_task(
+        conversation_id="cid-1",
+        conversation_title="审批待办",
+        single_chat=True,
+        trigger_message_id=trigger.open_message_id,
+        trigger_create_time=trigger.create_time,
+        trigger_sender="Derek OA",
+        trigger_text="孙旭提交的提测单",
+        trigger_message_json=trigger.model_dump_json(),
+        oa_url=(
+            "https://aflow.dingtalk.com/detail?"
+            "procInstId=proc-1&taskId=task-1"
+        ),
+    )
+
+    assert worker.consume_once(max_tasks=1) == 0
+    assert worker.consume_once(max_tasks=1) == 0
+
+    task = worker.store.get_reply_task_for_message("cid-1", trigger.open_message_id)
+    assert task is not None
+    assert task.status == "failed"
+    assert task.attempts == 1
+    assert runner.calls == 1
+    assert worker.store.count_reply_attempts() == 1
+    attempt = worker.store.get_latest_reply_attempt_for_trigger(
+        "cid-1",
+        trigger.open_message_id,
+    )
+    assert attempt is not None
+    assert attempt.send_error == "pi_tool_budget_exceeded"
+    assert attempt.agent_run_id > 0
+
+
 def test_consume_once_codex_provider_auth_failure_waits_for_authorization(
     tmp_path: Path, monkeypatch
 ):
@@ -5348,6 +5417,10 @@ def test_consume_once_native_codex_missing_auth_header_waits_for_provider_recove
     tmp_path: Path, monkeypatch
 ):
     monkeypatch.setenv("CEO_PI_PROVIDER", "openai")
+    # Keep this provider classification test independent from the service's
+    # currently selected DeepSeek model, which is normalized to its own Pi
+    # provider even when the legacy provider env still says ``openai``.
+    monkeypatch.setenv("CEO_PI_MODEL", "gpt-5.6-sol")
 
     notifications = []
     trigger = message("@Alex Chen(明哥) 这个怎么处理？")
