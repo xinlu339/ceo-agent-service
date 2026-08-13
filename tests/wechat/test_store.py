@@ -68,6 +68,127 @@ def test_dingtalk_claim_does_not_claim_wechat_task(tmp_path):
     assert store.count_reply_tasks(channel="dingtalk") == 0
 
 
+def test_reply_task_peek_prioritizes_live_work_with_fifo_ties(tmp_path):
+    store = _store(tmp_path)
+    common = dict(
+        conversation_title="Friday",
+        single_chat=False,
+        trigger_create_time="2026-08-13 10:00:00",
+        trigger_sender="Sender",
+        trigger_text="hello",
+    )
+    assert store.enqueue_reply_task(
+        conversation_id="backlog",
+        trigger_message_id="backlog-1",
+        priority=0,
+        **common,
+    )
+    assert store.enqueue_reply_task(
+        conversation_id="group-live",
+        trigger_message_id="group-live-1",
+        priority=80,
+        **common,
+    )
+    assert store.enqueue_reply_task(
+        conversation_id="direct-live",
+        trigger_message_id="direct-live-1",
+        priority=100,
+        **common,
+    )
+    assert store.enqueue_reply_task(
+        conversation_id="direct-live-2",
+        trigger_message_id="direct-live-2",
+        priority=100,
+        **common,
+    )
+
+    queued = store.peek_reply_tasks(limit=10)
+    assert [(task.priority, task.conversation_id) for task in queued] == [
+        (100, "direct-live"),
+        (100, "direct-live-2"),
+        (80, "group-live"),
+        (0, "backlog"),
+    ]
+
+
+def test_hard_timeout_fences_running_agent_even_with_live_lease(tmp_path):
+    store = _store(tmp_path)
+    assert store.enqueue_reply_task(
+        conversation_id="cid-1",
+        conversation_title="Friday",
+        single_chat=False,
+        trigger_message_id="msg-1",
+        trigger_create_time="2026-08-13 10:00:00",
+        trigger_sender="Sender",
+        trigger_text="hello",
+    )
+    [task] = store.claim_reply_tasks(limit=1, now="2026-08-13 10:00:00")
+    claim = store.claim_agent_run(
+        task.id,
+        task.execution_generation,
+        owner="worker-1",
+        lease_seconds=3600,
+        now="2026-08-13 10:00:00",
+    )
+
+    expired = store.expire_agent_run_for_hard_timeout(
+        claim.run.id,
+        {"code": "pi_hard_timeout", "retryable": True},
+        expected_execution_generation=task.execution_generation,
+        max_age_seconds=60,
+        now="2026-08-13 12:00:00",
+    )
+
+    assert expired.status == "failed"
+    assert expired.side_effect_state == "none"
+    assert expired.lease_owner == ""
+    assert store.get_reply_task(task.id).status == "processing"
+
+
+def test_hard_timeout_is_recoverable_before_task_stale_window(tmp_path):
+    store = _store(tmp_path)
+    assert store.enqueue_reply_task(
+        conversation_id="cid-1",
+        conversation_title="Friday",
+        single_chat=False,
+        trigger_message_id="msg-1",
+        trigger_create_time="2026-08-13 10:00:00",
+        trigger_sender="Sender",
+        trigger_text="hello",
+    )
+    [task] = store.claim_reply_tasks(limit=1)
+    claim = store.claim_agent_run(
+        task.id,
+        task.execution_generation,
+        owner="worker-1",
+        lease_seconds=3600,
+    )
+    with store._connect() as db:
+        db.execute(
+            """
+            update reply_tasks
+            set locked_at=datetime('now', '-1 minute')
+            where id=?
+            """,
+            (task.id,),
+        )
+        db.execute(
+            """
+            update agent_runs
+            set started_at=datetime('now', '-2 hours'),
+                lease_expires_at=datetime('now', '+1 hour')
+            where id=?
+            """,
+            (claim.run.id,),
+        )
+
+    stale = store.list_stale_processing_reply_tasks(
+        30 * 60,
+        hard_timeout_seconds=60,
+    )
+    assert [item.id for item in stale] == [task.id]
+
+
 def test_read_state_ready_account_scopes(tmp_path):
     store = _store(tmp_path)
     store.upsert_wechat_read_state(

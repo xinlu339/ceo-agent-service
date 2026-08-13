@@ -497,7 +497,7 @@ CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1 \
 
 - `com.ceo-agent-service.main`：唯一的 launchd 主服务。
 - producer loop：按 `CEO_PRODUCER_INTERVAL_SECONDS` 间隔发现消息并入队，默认 15 秒。
-- consumer loop：按 `CEO_CONSUMER_POLL_INTERVAL_SECONDS` 间隔领取任务、调用 agent、执行发送或跳过，默认 3 秒。
+- consumer loop：按 `CEO_CONSUMER_POLL_INTERVAL_SECONDS` 间隔领取任务、调用 agent、执行发送或跳过，默认 3 秒。实时私聊和群内明确 @ 的消息具有更高队列优先级，不会被历史积压任务按 ID 长时间挡住；单个 Pi 运行达到总超时/无输出超时中较大值再加 5 分钟的硬上限后会被隔离并释放队列。无已确认副作用的运行可按原重试策略恢复，存在副作用的运行会保留为待核验状态，避免重复执行。
 - `FAST_PATH_UNREAD_BACKOFF`：首次发现未读消息后，给真人优先处理的等待窗口，默认 1 分钟；`CEO_PI_IDLE_TIMEOUT_SECONDS` 控制 Agent 连续无输出的最长等待，默认 180 秒，`CEO_PI_TIMEOUT_SECONDS` 控制单次 Agent 总超时，默认 600 秒。这些值可在 `Config → System Config` 手动调整，保存后需重启服务才会影响新任务。
 - meeting producer loop：读取 AI 听记与日历参会证据，只为 Derek 参会且明确结束至少 `CEO_MEETING_SETTLE_SECONDS` 的会议建队列；没有匹配日程的临时通话，仅在完整转写恰好证明 Derek 和另一位唯一员工时按 1:1 放行；没有触发条件的会议保持安静。
 - meeting consumer loop：独立分析并投递；多人会议由 Agent 使用 DWS 查找并选择有明确业务承接关系的团队群，议题相似、参会人重合或近期活跃本身不构成投递证据。多人会议默认发群；内容涉及个人隐私、个人薪酬绩效或对特定个人的严厉负面反馈、不适合群聊时改为私信。只有群发现完整成功且没有可发送群时，才默认私信日历中唯一的会议创建人；创建人身份由发送层通过 DWS 唯一验证。DWS 读取或网络失败、群元数据不完整、创建人缺失或不唯一时保持可恢复重试，不猜测收件人。发送正文固定以 `【会议跟进】会议标题（会议时间）` 开头，便于收件人识别来源会议；真实 @ 默认限于参会人，非参会人只有会议转写明确说到是他的任务、由他负责、交给他确认或跟进时才 @。确认发送成功后复用 reply agent 的本地/Chrome notification 和钉钉会话点击跳转。dry-run 只分析到 `ready_to_send`，不会 claim 发送。

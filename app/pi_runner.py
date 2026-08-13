@@ -39,6 +39,9 @@ PI_DINGTALK_IMAGE_BRIDGE_PATH_ENV = "CEO_PI_DINGTALK_IMAGE_BRIDGE_PATH"
 PI_WORK_PROFILE_PATH_ENV = "CEO_PI_WORK_PROFILE_PATH"
 PI_REPLY_AT_OPEN_DINGTALK_ID_ENV = "CEO_PI_REPLY_AT_OPEN_DINGTALK_ID"
 PI_REPLY_SINGLE_CHAT_ENV = "CEO_PI_REPLY_SINGLE_CHAT"
+PI_TODO_TRIGGER_SENDER_NAME_ENV = "CEO_PI_TODO_TRIGGER_SENDER_NAME"
+PI_TODO_TRIGGER_SENDER_USER_ID_ENV = "CEO_PI_TODO_TRIGGER_SENDER_USER_ID"
+PI_TODO_TRIGGER_TEXT_ENV = "CEO_PI_TODO_TRIGGER_TEXT"
 GRAPHIFY_BINARY_ENV = "CEO_GRAPHIFY_BINARY"
 
 DEFAULT_PI_PROVIDER = "deepseek"
@@ -82,6 +85,7 @@ READ_ONLY_PI_TOOLS = (
     "list_candidate_interviews",
 )
 EFFECTFUL_PI_TOOLS = (
+    "create_dingtalk_todo",
     "execute_reviewed_write",
     "execute_reviewed_lark_write",
     "memory_write",
@@ -837,6 +841,9 @@ class PiRunner:
         # only to enforce the original trigger @ on a group native reply.
         env.pop(PI_REPLY_AT_OPEN_DINGTALK_ID_ENV, None)
         env.pop(PI_REPLY_SINGLE_CHAT_ENV, None)
+        env.pop(PI_TODO_TRIGGER_SENDER_NAME_ENV, None)
+        env.pop(PI_TODO_TRIGGER_SENDER_USER_ID_ENV, None)
+        env.pop(PI_TODO_TRIGGER_TEXT_ENV, None)
         env.update(pi_memory_connector_env())
         env["PI_CODING_AGENT_DIR"] = str(pi_agent_dir())
         env["PI_CODING_AGENT_SESSION_DIR"] = str(pi_session_dir())

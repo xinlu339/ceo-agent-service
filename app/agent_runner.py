@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.agent_context import AgentTaskContext
 from app.agent_result import (
+    AgentError,
     AgentOutcome,
     AgentResult,
     EffectKind,
@@ -32,12 +33,16 @@ from app.pi_history import count_pi_session_lines, find_pi_session_path
 from app.pi_runner import (
     PI_REPLY_AT_OPEN_DINGTALK_ID_ENV,
     PI_REPLY_SINGLE_CHAT_ENV,
+    PI_TODO_TRIGGER_SENDER_NAME_ENV,
+    PI_TODO_TRIGGER_SENDER_USER_ID_ENV,
+    PI_TODO_TRIGGER_TEXT_ENV,
     PiRunner,
     pi_process_failure_reason,
     selected_pi_routine_thinking_level,
     selected_pi_thinking_level,
 )
 from app.store import AgentRun, AgentRunLeaseLostError, AutoReplyStore, ReplyTask
+from app.todo_routing import is_dingtalk_todo_create_intent, todo_create_tool_names
 
 
 logger = logging.getLogger(__name__)
@@ -147,6 +152,7 @@ _PI_READ_ONLY_TOOL_NAMES = frozenset(
 )
 _PI_EFFECTFUL_TOOL_NAMES = frozenset(
     {
+        "create_dingtalk_todo",
         "execute_reviewed_write",
         "execute_reviewed_lark_write",
         "memory_write",
@@ -367,6 +373,17 @@ class DirectAgentRunner:
                 context.trigger_sender_open_dingtalk_id.strip()
             )
             env[PI_REPLY_SINGLE_CHAT_ENV] = "0"
+        # The Todo capability resolves `trigger_sender` without asking the
+        # model to guess a DingTalk user id.  These values are invocation-scoped
+        # and are never inherited by the reviewed DWS child process.
+        env[PI_TODO_TRIGGER_SENDER_NAME_ENV] = context.trigger_sender.strip()
+        env[PI_TODO_TRIGGER_TEXT_ENV] = context.trigger_text.strip()
+        if context.trigger_sender_user_id.strip():
+            env[PI_TODO_TRIGGER_SENDER_USER_ID_ENV] = (
+                context.trigger_sender_user_id.strip()
+            )
+        else:
+            env.pop(PI_TODO_TRIGGER_SENDER_USER_ID_ENV, None)
         return env
 
     @staticmethod
@@ -476,8 +493,37 @@ class DirectAgentRunner:
             read_only=read_only,
         )
         public_live_info = is_public_live_info_context(context)
-        tool_names = None
-        if public_live_info:
+        todo_create_intent = (
+            context.channel == "dingtalk"
+            and is_dingtalk_todo_create_intent(context.trigger_text)
+        )
+        tool_names = todo_create_tool_names(
+            read_only=read_only,
+            is_todo_intent=todo_create_intent,
+        )
+        if todo_create_intent and not read_only:
+            # A Todo request is deliberately a capability-scoped invocation.
+            # The model may fill in natural-language fields, but it cannot
+            # choose Memory, workspace search, or an unrelated DWS write.
+            tool_names = ("create_dingtalk_todo",)
+            developer_instructions += (
+                "\n\nThis is an explicit DingTalk Todo creation request. "
+                "The only available action is create_dingtalk_todo. Call it "
+                "once with a concise title, executor_names as separate names "
+                "(use `self` for the authenticated service user and "
+                "`trigger_sender` for the original sender), an ISO-8601 due "
+                "time when a deadline is stated, and priority 10/20/30/40. "
+                "The tool resolves people, creates the Todo, and reads it back. "
+                "If a required field is genuinely ambiguous, return "
+                "needs_human; do not search the workspace or write Memory."
+            )
+        elif todo_create_intent:
+            developer_instructions += (
+                "\n\nThis is a DingTalk Todo request in read-only mode. "
+                "Do not claim that a Todo was created; explain that live write "
+                "execution is disabled in the current dry-run invocation."
+            )
+        elif public_live_info:
             tool_names = (
                 PUBLIC_INFO_READ_ONLY_PI_TOOLS
                 if read_only
@@ -780,6 +826,23 @@ class DirectAgentRunner:
                         "pi_result_invalid", run.id
                     ) from exc
                 raise RuntimeError("pi_result_invalid") from exc
+
+        if todo_create_intent and result.outcome is AgentOutcome.COMPLETED:
+            if not _has_confirmed_todo_creation(run_result_events := tuple(
+                self.store.get_agent_run(run.id).tool_events
+            )):
+                result = AgentResult(
+                    outcome=AgentOutcome.NEEDS_HUMAN,
+                    summary=(
+                        "待办请求尚未执行钉钉待办创建，也没有可核验的创建回执；"
+                        "未把它写入长期记忆。"
+                    ),
+                    error=AgentError(
+                        code="todo_creation_not_executed",
+                        retryable=False,
+                        authorization_required=False,
+                    ),
+                )
 
         persisted_session_id = self.store.get_agent_run(run.id).agent_session_id
         transcript_end_line = max(
@@ -1338,7 +1401,12 @@ def _pi_tool_evidence_event(
         metadata["effect"] = EffectKind.UNREVIEWED.value
         metadata["uncertain_after_error"] = True
     elif metadata.get("effect") == EffectKind.EFFECTFUL.value:
-        if tool_name == "execute_reviewed_write":
+        if tool_name == "create_dingtalk_todo":
+            confirmation, issue = _pi_todo_write_confirmation(
+                payload.get("result"),
+                metadata=metadata,
+            )
+        elif tool_name == "execute_reviewed_write":
             confirmation, issue = _pi_reviewed_write_confirmation(
                 payload.get("result"),
                 metadata=metadata,
@@ -1366,6 +1434,14 @@ def _pi_tool_evidence_event(
             metadata["uncertain_after_unverified_result"] = True
             metadata["confirmation_issue"] = issue
         else:
+            # The dedicated Todo adapter resolves people and builds the final
+            # DWS argv internally. Persist its authoritative digest from the
+            # completed receipt instead of the model's natural-language args.
+            if tool_name == "create_dingtalk_todo":
+                metadata["command_digest"] = confirmation["operation_digest"]
+                metadata["reviewed_execution_digest"] = confirmation[
+                    "operation_digest"
+                ]
             metadata["reviewed_confirmation"] = confirmation
     return {
         "type": "item.failed" if is_error else "item.completed",
@@ -1451,6 +1527,22 @@ def _pi_tool_effect_metadata(
     tool_name: str,
     arguments: object,
 ) -> dict[str, object]:
+    if tool_name == "create_dingtalk_todo":
+        normalized = _pi_nested_tool_arguments(arguments)
+        canonical = json.dumps(
+            {"tool": tool_name, "arguments": normalized},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return {
+            "effect": EffectKind.EFFECTFUL.value,
+            "native_cli": "dws",
+            "operation": "todo task create",
+            "command_digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "target_identifiers": {},
+        }
     if tool_name == "graphify_read":
         operation = ""
         if isinstance(arguments, dict):
@@ -1579,6 +1671,28 @@ def _pi_tool_effect_metadata(
         "command_digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         "target_identifiers": structured_target_identifiers(arguments),
     }
+
+
+def _has_confirmed_todo_creation(events: tuple[dict[str, object], ...]) -> bool:
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        confirmation = metadata.get("reviewed_confirmation")
+        if (
+            metadata.get("operation") == "todo task create"
+            and metadata.get("native_cli") == "dws"
+            and isinstance(confirmation, dict)
+            and confirmation.get("completed") is True
+            and confirmation.get("safe_to_confirm") is True
+        ):
+            return True
+    return False
 
 
 def _pi_nested_tool_arguments(arguments: object) -> object:
@@ -1811,6 +1925,58 @@ def _pi_reviewed_read_confirmation(
     ):
         return None, "reconciliation_query_receipt_invalid"
     return {"result_digest": result_digest}, ""
+
+
+def _pi_todo_write_confirmation(
+    result: object,
+    *,
+    metadata: dict[str, object],
+) -> tuple[dict[str, object] | None, str]:
+    """Validate the receipt emitted by the dedicated Todo adapter."""
+
+    details = result.get("details") if isinstance(result, dict) else None
+    if not isinstance(details, dict):
+        return None, "pi_todo_receipt_missing"
+    if (
+        details.get("protocolVersion") != 1
+        or details.get("cli") != "dws"
+        or details.get("effect") != "write"
+        or details.get("operation") != "todo task create"
+    ):
+        return None, "pi_todo_receipt_operation_invalid"
+    if details.get("exitCode") != 0 or details.get("completed") is not True:
+        return None, "pi_todo_receipt_incomplete"
+    if details.get("safeToConfirm") is not True:
+        return None, "pi_todo_receipt_not_confirmable"
+    digest = details.get("operationDigest")
+    if not isinstance(digest, str) or len(digest) != 64:
+        return None, "pi_todo_receipt_digest_invalid"
+    targets = details.get("targetIdentifiers")
+    expected_targets = metadata.get("target_identifiers")
+    if not isinstance(targets, dict) or not isinstance(expected_targets, dict):
+        return None, "pi_todo_receipt_targets_invalid"
+    if expected_targets and targets != expected_targets:
+        return None, "pi_todo_receipt_targets_mismatch"
+    if not isinstance(targets.get("taskId"), str) or not targets["taskId"].strip():
+        return None, "pi_todo_receipt_task_id_missing"
+    receipt = details.get("receipt")
+    if not isinstance(receipt, dict) or receipt.get("readbackVerified") is not True:
+        return None, "pi_todo_receipt_readback_missing"
+    task_id = receipt.get("taskId")
+    if not isinstance(task_id, str) or not task_id.strip():
+        return None, "pi_todo_receipt_task_id_missing"
+    return (
+        {
+            "protocol_version": 1,
+            "operation": "todo task create",
+            "operation_digest": digest,
+            "target_identifiers": targets,
+            "completed": True,
+            "safe_to_confirm": True,
+            "receipt": {"task_id": task_id, "readback_verified": True},
+        },
+        "",
+    )
 
 
 def _pi_memory_write_confirmation(

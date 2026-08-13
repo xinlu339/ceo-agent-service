@@ -25,6 +25,7 @@ const XIAOQING_BRIDGE_TIMEOUT_MS = 150_000;
 const MAX_DINGTALK_IMAGE_REQUEST_BYTES = 16 * 1024;
 const MAX_DINGTALK_IMAGE_RESPONSE_BYTES = 15 * 1024 * 1024;
 const DINGTALK_IMAGE_BRIDGE_TIMEOUT_MS = 150_000;
+const DINGTALK_TODO_TIMEOUT_MS = 120_000;
 const MAX_GRAPHIFY_VALUE_BYTES = 16 * 1024;
 const MAX_REVIEWED_IMAGE_BYTES = 10 * 1024 * 1024;
 const BLOCKED_COMMAND_SEGMENTS = new Set([
@@ -75,6 +76,14 @@ function safeChildEnvironment(): NodeJS.ProcessEnv {
 			delete env[key];
 		}
 	}
+	for (const key of [
+		"CEO_PI_TODO_TRIGGER_SENDER_NAME",
+		"CEO_PI_TODO_TRIGGER_SENDER_USER_ID",
+		"CEO_PI_TODO_TRIGGER_TEXT",
+	]) {
+		const value = process.env[key];
+		if (value) env[key] = value;
+	}
 	return env;
 }
 
@@ -118,6 +127,165 @@ function boundedText(value: string, maximum = MAX_OUTPUT_BYTES): string {
 	const encoded = Buffer.from(value, "utf8");
 	if (encoded.length <= maximum) return value;
 	return `${encoded.subarray(0, maximum).toString("utf8")}\n[output truncated]`;
+}
+
+function parseDwsJson(stdout: string, stderr: string): unknown {
+	const text = (stdout || stderr || "{}").trim();
+	try {
+		return JSON.parse(text);
+	} catch {
+		throw new Error("dingtalk_todo_response_invalid");
+	}
+}
+
+function findStringByKey(value: unknown, keys: Set<string>): string {
+	const stack: unknown[] = [value];
+	while (stack.length > 0) {
+		const current = stack.pop();
+		if (Array.isArray(current)) {
+			stack.push(...current);
+			continue;
+		}
+		if (!current || typeof current !== "object") continue;
+		for (const [key, item] of Object.entries(current as Record<string, unknown>)) {
+			if (keys.has(key.replaceAll("_", "").replaceAll("-", "").toLowerCase()) && typeof item === "string" && item.trim()) {
+				return item.trim();
+			}
+			if (item && typeof item === "object") stack.push(item);
+		}
+	}
+	return "";
+}
+
+function findPersonIds(value: unknown): string[] {
+	const ids = new Set<string>();
+	const stack: unknown[] = [value];
+	while (stack.length > 0) {
+		const current = stack.pop();
+		if (Array.isArray(current)) {
+			stack.push(...current);
+			continue;
+		}
+		if (!current || typeof current !== "object") continue;
+		for (const [key, item] of Object.entries(current as Record<string, unknown>)) {
+			const normalized = key.replaceAll("_", "").replaceAll("-", "").toLowerCase();
+			if ((normalized === "userid" || normalized === "staffid") && typeof item === "string" && item.trim()) {
+				ids.add(item.trim());
+			}
+			if (item && typeof item === "object") stack.push(item);
+		}
+	}
+	return [...ids];
+}
+
+async function runReviewedDwsJson(
+	argv: string[],
+	signal: AbortSignal,
+	effect: "read" | "write" = "read",
+): Promise<{ payload: unknown; result: any }> {
+	const result = await executeReviewedDws(argv, effect, signal);
+	const text = result.content?.find((item: any) => item.type === "text")?.text ?? "";
+	return { payload: parseDwsJson(text, ""), result };
+}
+
+async function resolveTodoExecutor(name: string, signal: AbortSignal): Promise<string> {
+	const normalized = name.trim();
+	if (!normalized) throw new Error("dingtalk_todo_executor_missing");
+	const folded = normalized.toLowerCase();
+	if (folded === "self" || normalized === "我" || normalized === "本人") {
+		const { payload } = await runReviewedDwsJson(["dws", "contact", "user", "get-self", "--format", "json"], signal);
+		const userId = findStringByKey(payload, new Set(["userid", "staffid"]));
+		if (!userId) throw new Error("dingtalk_todo_self_not_found");
+		return userId;
+	}
+	if (folded === "trigger_sender" || normalized === "发起人") {
+		const userId = (process.env.CEO_PI_TODO_TRIGGER_SENDER_USER_ID ?? "").trim();
+		if (userId) return userId;
+	}
+	const keyword = folded === "trigger_sender"
+		? (process.env.CEO_PI_TODO_TRIGGER_SENDER_NAME ?? "").trim()
+		: normalized;
+	if (!keyword) throw new Error("dingtalk_todo_trigger_sender_not_found");
+	const { payload } = await runReviewedDwsJson([
+		"dws", "aisearch", "person", "--keyword", keyword,
+		"--dimension", "name", "--format", "json",
+	], signal);
+	const userIds = findPersonIds(payload);
+	if (userIds.length === 0) throw new Error(`dingtalk_todo_executor_not_found:${keyword}`);
+	if (userIds.length > 1) throw new Error(`dingtalk_todo_executor_ambiguous:${keyword}`);
+	return userIds[0];
+}
+
+function expandTodoExecutorNames(names: string[]): string[] {
+	const expanded: string[] = [];
+	for (const raw of names) {
+		const normalized = raw.trim();
+		if (["咱俩", "我们俩", "我们两个", "双方"].includes(normalized)) {
+			expanded.push("self", "trigger_sender");
+		} else {
+			expanded.push(normalized);
+		}
+	}
+	return [...new Set(expanded.filter(Boolean))];
+}
+
+function todoTriggerRequiresDue(): boolean {
+	const text = (process.env.CEO_PI_TODO_TRIGGER_TEXT ?? "").trim();
+	return /(?:截止|到期|之前|前完成|完成于|明天|今天|后天|本周|周[一二三四五六日天]|下周|\d{1,2}[月\-/]\d{1,2}日?)/i.test(text);
+}
+
+function todoTaskId(value: unknown): string {
+	// Prefer taskId/todoTaskId over generic nested ids (for example an
+	// executor's userId) when the upstream response contains both.
+	const preferred = findStringByKey(value, new Set(["taskid", "todotaskid"]));
+	return preferred || findStringByKey(value, new Set(["id"]));
+}
+
+async function createDingtalkTodo(
+	params: { title: string; executor_names: string[]; due?: string; priority?: number },
+	signal: AbortSignal,
+) {
+	const title = params.title.trim();
+	if (!title) throw new Error("dingtalk_todo_title_missing");
+	const names = expandTodoExecutorNames(params.executor_names);
+	if (names.length === 0 || names.length > 20) throw new Error("dingtalk_todo_executors_invalid");
+	const priority = params.priority ?? 20;
+	if (![10, 20, 30, 40].includes(priority)) throw new Error("dingtalk_todo_priority_invalid");
+	const due = (params.due ?? "").trim();
+	if (!due && todoTriggerRequiresDue()) throw new Error("dingtalk_todo_due_missing");
+	if (due && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/.test(due)) {
+		throw new Error("dingtalk_todo_due_must_be_iso8601");
+	}
+	const executorIds: string[] = [];
+	for (const name of names) executorIds.push(await resolveTodoExecutor(name, signal));
+	const argv = ["dws", "todo", "task", "create", "--title", title, "--executors", [...new Set(executorIds)].join(","), "--priority", String(priority), "--format", "json", "--yes"];
+	if (due) argv.splice(argv.length - 2, 0, "--due", due);
+	const createResult = await runReviewedDwsJson(argv, signal, "write");
+	const createPayload = createResult.payload;
+	const taskId = todoTaskId(createPayload);
+	if (!taskId) throw new Error("dingtalk_todo_create_receipt_missing_task_id");
+	const readbackResult = await runReviewedDwsJson(["dws", "todo", "task", "get", "--task-id", taskId, "--format", "json"], signal);
+	const readback = readbackResult.payload;
+	const readbackId = todoTaskId(readback);
+	if (!readbackId || readbackId !== taskId) throw new Error("dingtalk_todo_readback_failed");
+	const operationDigest = createResult.result.details.operationDigest;
+	const responseText = JSON.stringify({ taskId, title, executorIds, due, priority, readback });
+	return {
+		content: [{ type: "text" as const, text: responseText }],
+		details: {
+			protocolVersion: RECEIPT_PROTOCOL_VERSION,
+			cli: "dws",
+			effect: "write",
+			operation: "todo task create",
+			operationDigest,
+			targetIdentifiers: { taskId },
+			resultDigest: createHash("sha256").update(responseText).digest("hex"),
+			exitCode: 0,
+			completed: true,
+			safeToConfirm: true,
+			receipt: { taskId, readbackVerified: true },
+		},
+	};
 }
 
 function validateArgv(argv: string[]): void {
@@ -1222,6 +1390,21 @@ export default function ceoAgentTools(pi: ExtensionAPI) {
 					receipt: { artifact: "work_profile", sha256: digest },
 				},
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "create_dingtalk_todo",
+		label: "Create DingTalk Todo",
+		description: "Create one DingTalk Todo, resolving executor names, then read the created Todo back to verify it. Use only for an explicit Todo creation request.",
+		parameters: Type.Object({
+			title: Type.String({ minLength: 1, maxLength: 500 }),
+				executor_names: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 20 }),
+				due: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+			priority: Type.Optional(Type.Union([Type.Literal(10), Type.Literal(20), Type.Literal(30), Type.Literal(40)])),
+		}),
+		async execute(_toolCallId, params, signal) {
+			return createDingtalkTodo(params, signal);
 		},
 	});
 

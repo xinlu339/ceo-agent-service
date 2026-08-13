@@ -24,6 +24,7 @@ from app.agent_runner import (
 )
 from app.process_runner import ProcessRunResult
 from app.store import AutoReplyStore
+from app.todo_routing import is_dingtalk_todo_create_intent
 
 
 def _task(store: AutoReplyStore):
@@ -1353,6 +1354,59 @@ def test_direct_runner_hides_memory_write_tools_for_reply_tasks(
     assert "execute_reviewed_write" in tools
     assert "memory_write" not in tools
     assert "document_upload" not in tools
+
+
+def test_direct_runner_scopes_explicit_todo_to_dedicated_capability(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(
+        _context(task.id),
+        trigger_text="咱俩有个测试任务，周五之前完成，你记一个待办",
+    )
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+    )
+
+    tools = executor.commands[0][executor.commands[0].index("--tools") + 1].split(",")
+    assert tools == ["create_dingtalk_todo"]
+
+
+def test_direct_runner_dry_run_does_not_expose_todo_write(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(_context(task.id), trigger_text="请创建一个待办，明天完成")
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+        read_only=True,
+    )
+
+    command = executor.commands[0]
+    assert "--no-tools" in command
+    assert "create_dingtalk_todo" not in command
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("记一个待办：周五发布", True),
+        ("咱俩有个测试任务，周五之前完成，你记一个待办", True),
+        ("创建待办那个是不是还是不行，我再改改", False),
+        ("查一下我的待办", False),
+        ("把待办标记完成", False),
+    ],
+)
+def test_todo_create_intent_detection(text: str, expected: bool):
+    assert is_dingtalk_todo_create_intent(text) is expected
 
 
 def test_direct_runner_stops_repeated_workspace_searches_at_budget(

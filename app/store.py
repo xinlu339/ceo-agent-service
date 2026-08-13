@@ -299,6 +299,8 @@ class ReplyTask(BaseModel):
     trigger_sender: str
     trigger_text: str
     trigger_message_json: str = "{}"
+    # Higher values are consumed first; FIFO is preserved within a priority.
+    priority: int = 0
     available_at: str = ""
     force_new_decision: bool = False
     oa_url: str = ""
@@ -874,6 +876,7 @@ class AutoReplyStore:
                     trigger_sender text not null,
                     trigger_text text not null,
                     trigger_message_json text not null default '{}',
+                    priority integer not null default 0,
                     available_at text not null default '',
                     force_new_decision integer not null default 0,
                     oa_url text not null default '',
@@ -1369,6 +1372,7 @@ class AutoReplyStore:
             }
             for column, definition in (
                 ("trigger_message_json", "text not null default '{}'"),
+                ("priority", "integer not null default 0"),
                 ("available_at", "text not null default ''"),
                 ("force_new_decision", "integer not null default 0"),
                 ("oa_url", "text not null default ''"),
@@ -1426,6 +1430,18 @@ class AutoReplyStore:
                 """
                 create index if not exists idx_reply_tasks_channel_status_id
                     on reply_tasks(channel, status, id)
+                """
+            )
+            db.execute(
+                """
+                create index if not exists idx_reply_tasks_priority
+                    on reply_tasks(status, priority desc, id)
+                """
+            )
+            db.execute(
+                """
+                create index if not exists idx_reply_tasks_channel_status_priority
+                    on reply_tasks(channel, status, priority desc, id)
                 """
             )
             sent_reply_columns = {
@@ -2045,6 +2061,7 @@ class AutoReplyStore:
                     trigger_sender text not null,
                     trigger_text text not null,
                     trigger_message_json text not null default '{{}}',
+                    priority integer not null default 0,
                     available_at text not null default '',
                     force_new_decision integer not null default 0,
                     oa_url text not null default '',
@@ -2062,7 +2079,7 @@ class AutoReplyStore:
                 insert into reply_tasks_channel_migration (
                     id, channel, conversation_id, conversation_title, single_chat,
                     trigger_message_id, trigger_create_time, trigger_sender,
-                    trigger_text, trigger_message_json, available_at,
+                    trigger_text, trigger_message_json, priority, available_at,
                     force_new_decision, oa_url, manual_rerun_attempt_id,
                     manual_rerun_revision_key, execution_generation, status,
                     attempts, locked_at, error, created_at, updated_at
@@ -2070,7 +2087,8 @@ class AutoReplyStore:
                 select
                     id, channel, conversation_id, conversation_title, single_chat,
                     trigger_message_id, trigger_create_time, trigger_sender,
-                    trigger_text, trigger_message_json, available_at,
+                    trigger_text, trigger_message_json,
+                    {"priority" if "priority" in columns else "0"}, available_at,
                     force_new_decision, oa_url, manual_rerun_attempt_id,
                     manual_rerun_revision_key, {generation_select}, status,
                     attempts, locked_at, error, created_at, updated_at
@@ -2078,6 +2096,8 @@ class AutoReplyStore:
                 drop table reply_tasks;
                 alter table reply_tasks_channel_migration rename to reply_tasks;
                 create index idx_reply_tasks_status on reply_tasks(status, id);
+                create index idx_reply_tasks_priority
+                    on reply_tasks(status, priority desc, id);
                 commit;
                 """
             )
@@ -2104,6 +2124,7 @@ class AutoReplyStore:
             trigger_sender=row["trigger_sender"],
             trigger_text=row["trigger_text"],
             trigger_message_json=row["trigger_message_json"],
+            priority=int(row["priority"] or 0) if "priority" in row.keys() else 0,
             available_at=row["available_at"],
             force_new_decision=bool(row["force_new_decision"]),
             oa_url=row["oa_url"],
@@ -2168,6 +2189,7 @@ class AutoReplyStore:
         trigger_sender: str,
         trigger_text: str,
         trigger_message_json: str = "{}",
+        priority: int = 0,
         available_at: str = "",
         force_new_decision: bool = False,
         oa_url: str = "",
@@ -2194,6 +2216,7 @@ class AutoReplyStore:
                     trigger_sender,
                     trigger_text,
                     trigger_message_json,
+                    priority,
                     available_at,
                     force_new_decision,
                     oa_url,
@@ -2201,7 +2224,7 @@ class AutoReplyStore:
                     execution_generation,
                     error
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     channel,
@@ -2213,6 +2236,7 @@ class AutoReplyStore:
                     trigger_sender,
                     trigger_text,
                     trigger_message_json,
+                    priority,
                     available_at,
                     int(force_new_decision),
                     oa_url,
@@ -2234,6 +2258,7 @@ class AutoReplyStore:
         trigger_sender: str,
         trigger_text: str,
         trigger_message_json: str,
+        priority: int = 120,
         oa_url: str = "",
         attempt_id: int = 0,
         channel: str = "dingtalk",
@@ -2253,6 +2278,7 @@ class AutoReplyStore:
                 trigger_sender=trigger_sender,
                 trigger_text=trigger_text,
                 trigger_message_json=trigger_message_json,
+                priority=priority,
                 oa_url=oa_url,
                 attempt_id=attempt_id,
                 revision_key=revision_key,
@@ -2312,6 +2338,7 @@ class AutoReplyStore:
         trigger_text: str,
         trigger_message_json: str,
         oa_url: str,
+        priority: int = 120,
         attempt_id: int,
         revision_key: str,
         channel: str,
@@ -2371,10 +2398,11 @@ class AutoReplyStore:
                 channel, conversation_id, conversation_title, single_chat,
                 trigger_message_id, trigger_create_time, trigger_sender,
                 trigger_text, trigger_message_json, available_at,
+                priority,
                 force_new_decision, oa_url, manual_rerun_attempt_id,
                 manual_rerun_revision_key, execution_generation, status,
                 locked_at, error
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, ?, ?, ?, ?,
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, 1, ?, ?, ?, ?,
                       'pending', null, ?)
             on conflict(channel, conversation_id, trigger_message_id) do update set
                 conversation_title=excluded.conversation_title,
@@ -2384,6 +2412,7 @@ class AutoReplyStore:
                 trigger_text=excluded.trigger_text,
                 trigger_message_json=excluded.trigger_message_json,
                 available_at='',
+                priority=excluded.priority,
                 force_new_decision=1,
                 oa_url=excluded.oa_url,
                 manual_rerun_attempt_id=excluded.manual_rerun_attempt_id,
@@ -2404,6 +2433,7 @@ class AutoReplyStore:
                 trigger_sender,
                 trigger_text,
                 trigger_message_json,
+                priority,
                 oa_url,
                 attempt_id,
                 revision_key,
@@ -4050,6 +4080,7 @@ class AutoReplyStore:
         now: str | None = None,
         *,
         channel: str | None = None,
+        after_priority: int | None = None,
         after_id: int | None = None,
         max_id: int | None = None,
     ) -> list[ReplyTask]:
@@ -4067,19 +4098,29 @@ class AutoReplyStore:
             if channel is not None:
                 clauses.append("channel=?")
                 args.append(channel)
-            if after_id is not None:
+            if after_priority is not None:
+                if after_id is None:
+                    raise ValueError("after_id is required with after_priority")
+                clauses.append("(priority < ? or (priority = ? and id > ?))")
+                args.extend([after_priority, after_priority, after_id])
+            elif after_id is not None:
                 clauses.append("id>?")
                 args.append(after_id)
             if max_id is not None:
                 clauses.append("id<=?")
                 args.append(max_id)
             args.append(limit)
+            order_by = (
+                "priority desc, id"
+                if after_priority is not None or after_id is None
+                else "id"
+            )
             rows = db.execute(
                 f"""
                 select *
                 from reply_tasks
                 where {' and '.join(clauses)}
-                order by id
+                order by {order_by}
                 limit ?
                 """,
                 args,
@@ -4205,31 +4246,146 @@ class AutoReplyStore:
             return [self._reply_task_from_row(row) for row in claimed_rows]
 
     def list_stale_processing_reply_tasks(
-        self, max_age_seconds: int
+        self,
+        max_age_seconds: int,
+        *,
+        hard_timeout_seconds: int | None = None,
     ) -> list[ReplyTask]:
         if max_age_seconds <= 0:
             return []
         with self._connect() as db:
-            rows = db.execute(
+            active_run_clause = ""
+            stale_task_clause = (
+                "datetime(tasks.locked_at) <= datetime('now', ?)"
+            )
+            query_args: list[str] = [f"-{int(max_age_seconds)} seconds"]
+            if hard_timeout_seconds is None or hard_timeout_seconds <= 0:
+                active_run_clause = """
+                        and runs.status='running'
+                        and runs.lease_expires_at>current_timestamp
                 """
+            else:
+                hard_cutoff = f"-{int(hard_timeout_seconds)} seconds"
+                stale_task_clause = """
+                    (
+                        datetime(tasks.locked_at) <= datetime('now', ?)
+                        or exists (
+                            select 1
+                            from agent_runs as overdue_runs
+                            where overdue_runs.reply_task_id=tasks.id
+                              and overdue_runs.execution_generation=tasks.execution_generation
+                              and overdue_runs.status='running'
+                              and overdue_runs.started_at!=''
+                              and datetime(overdue_runs.started_at) <= datetime('now', ?)
+                        )
+                    )
+                """
+                query_args.extend([hard_cutoff])
+                active_run_clause = """
+                        and runs.status='running'
+                        and runs.lease_expires_at>current_timestamp
+                        and (
+                            runs.started_at=''
+                            or datetime(runs.started_at) > datetime('now', ?)
+                        )
+                """
+                query_args.append(hard_cutoff)
+            rows = db.execute(
+                f"""
                 select *
                 from reply_tasks as tasks
                 where tasks.status='processing'
                   and tasks.locked_at is not null
-                  and datetime(tasks.locked_at) <= datetime('now', ?)
+                  and {stale_task_clause}
                   and not exists (
                       select 1
                       from agent_runs as runs
                       where runs.reply_task_id=tasks.id
                         and runs.execution_generation=tasks.execution_generation
-                        and runs.status='running'
-                        and runs.lease_expires_at>current_timestamp
+                        {active_run_clause}
                   )
                 order by tasks.locked_at, tasks.id
                 """,
-                (f"-{int(max_age_seconds)} seconds",),
+                query_args,
             ).fetchall()
             return [self._reply_task_from_row(row) for row in rows]
+
+    def expire_agent_run_for_hard_timeout(
+        self,
+        run_id: int,
+        structured_error: dict[str, object],
+        *,
+        expected_execution_generation: str,
+        max_age_seconds: int,
+        now: str | datetime | None = None,
+    ) -> AgentRun:
+        """Fence a wall-clock overdue run even when lease renewal kept it alive.
+
+        The worker never retries a run that has an observed side effect. Such a
+        run is moved to ``unknown`` for reconciliation; runs with no effect are
+        marked ``failed`` and can use the normal retry policy.
+        """
+        if not expected_execution_generation.strip():
+            raise ValueError("expected_execution_generation must be non-empty")
+        if max_age_seconds <= 0:
+            raise ValueError("max_age_seconds must be positive")
+        error_json = _json_object_text(structured_error, field="structured_error")
+        with self._agent_run_write_transaction(now) as (db, (_, now_text)):
+            row = db.execute(
+                """
+                select agent_runs.*
+                from agent_runs
+                join reply_tasks on reply_tasks.id=agent_runs.reply_task_id
+                where agent_runs.id=?
+                  and agent_runs.status='running'
+                  and agent_runs.execution_generation=?
+                  and reply_tasks.status='processing'
+                  and reply_tasks.execution_generation=?
+                  and agent_runs.started_at!=''
+                  and datetime(agent_runs.started_at) <= datetime(?, ?)
+                """,
+                (
+                    run_id,
+                    expected_execution_generation,
+                    expected_execution_generation,
+                    now_text,
+                    f"-{int(max_age_seconds)} seconds",
+                ),
+            ).fetchone()
+            if row is None:
+                raise ValueError("agent run is not overdue for hard timeout")
+            target_status = (
+                "failed" if row["side_effect_state"] == "none" else "unknown"
+            )
+            side_effect_state = (
+                "none" if target_status == "failed" else "unknown"
+            )
+            cursor = db.execute(
+                """
+                update agent_runs
+                set status=?, structured_error_json=?, side_effect_state=?,
+                    lease_owner='', lease_expires_at='',
+                    completed_at=case when ?='failed' then ? else completed_at end,
+                    updated_at=?
+                where id=? and status='running' and execution_generation=?
+                """,
+                (
+                    target_status,
+                    error_json,
+                    side_effect_state,
+                    target_status,
+                    now_text,
+                    now_text,
+                    run_id,
+                    expected_execution_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise AgentRunLeaseLostError(f"agent run lease lost: {run_id}")
+            updated = db.execute(
+                "select * from agent_runs where id=?", (run_id,)
+            ).fetchone()
+            return self._agent_run_from_row(updated, db=db)
 
     def recover_orphaned_processing_reply_tasks(
         self,
@@ -6496,6 +6652,7 @@ class AutoReplyStore:
         *,
         trigger_text: str,
         trigger_message_json: str,
+        priority: int | None = None,
         channel: str = "dingtalk",
     ) -> int:
         with self._connect() as db:
@@ -6504,6 +6661,7 @@ class AutoReplyStore:
                 update reply_tasks
                 set trigger_text=?,
                     trigger_message_json=?,
+                    priority=coalesce(?, priority),
                     updated_at=current_timestamp
                 where channel=?
                   and conversation_id=?
@@ -6513,16 +6671,20 @@ class AutoReplyStore:
                   and (
                     trigger_text != ?
                     or trigger_message_json != ?
+                    or (? is not null and priority != ?)
                   )
                 """,
                 (
                     trigger_text,
                     trigger_message_json,
+                    priority,
                     channel,
                     conversation_id,
                     trigger_message_id,
                     trigger_text,
                     trigger_message_json,
+                    priority,
+                    priority,
                 ),
             )
             return cursor.rowcount
@@ -6536,6 +6698,7 @@ class AutoReplyStore:
         trigger_sender: str,
         trigger_text: str,
         trigger_message_json: str,
+        priority: int = 0,
         available_at: str = "",
         error: str = "",
         channel: str = "dingtalk",
@@ -6568,6 +6731,7 @@ class AutoReplyStore:
                     trigger_sender=?,
                     trigger_text=?,
                     trigger_message_json=?,
+                    priority=?,
                     execution_generation=?,
                     available_at=?,
                     error=?,
@@ -6579,6 +6743,7 @@ class AutoReplyStore:
                     or trigger_sender != ?
                     or trigger_text != ?
                     or trigger_message_json != ?
+                    or priority != ?
                     or available_at != ?
                     or error != ?
                   )
@@ -6589,6 +6754,7 @@ class AutoReplyStore:
                     trigger_sender,
                     trigger_text,
                     trigger_message_json,
+                    priority,
                     execution_generation,
                     available_at,
                     error,
@@ -6598,6 +6764,7 @@ class AutoReplyStore:
                     trigger_sender,
                     trigger_text,
                     trigger_message_json,
+                    priority,
                     available_at,
                     error,
                 ),

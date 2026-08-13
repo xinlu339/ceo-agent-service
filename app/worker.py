@@ -113,6 +113,14 @@ XIAOQING_CRITICAL_INFO_UNAVAILABLE_MARKER = (
 DEFAULT_TEXT_EMOTION_BACKGROUND_ID = "im_bg_5"
 SPLIT_PERSON_SIGNATURE = assistant_signature()
 STALE_PROCESSING_TASK_SECONDS = 30 * 60
+# Queue priorities: live human messages must not wait behind recovery/backlog
+# work.  Manual reruns are deliberately highest because a user explicitly
+# requested them from the UI.
+REPLY_TASK_PRIORITY_BACKLOG = 0
+REPLY_TASK_PRIORITY_GROUP_MENTION = 80
+REPLY_TASK_PRIORITY_SINGLE_CHAT = 100
+REPLY_TASK_PRIORITY_MANUAL_RERUN = 120
+AGENT_RUN_HARD_TIMEOUT_GRACE_SECONDS = 5 * 60
 MAX_REPLY_TASK_ATTEMPTS = 3
 REPLY_TASK_RETRY_BASE_DELAY_SECONDS = 60
 REPLY_TASK_RETRY_MAX_DELAY_SECONDS = 15 * 60
@@ -1668,7 +1676,8 @@ class DingTalkAutoReplyWorker:
 
     def _recover_stale_agent_reply_tasks(self) -> None:
         stale_tasks = self.store.list_stale_processing_reply_tasks(
-            STALE_PROCESSING_TASK_SECONDS
+            STALE_PROCESSING_TASK_SECONDS,
+            hard_timeout_seconds=self._agent_run_hard_timeout_seconds(),
         )
         if not stale_tasks:
             return
@@ -1692,6 +1701,34 @@ class DingTalkAutoReplyWorker:
                 )
                 recovered += 1
                 continue
+            if (
+                run.status == "running"
+                and self._agent_run_lease_active(run)
+                and self._agent_run_hard_timeout_reached(run)
+            ):
+                try:
+                    run = self.store.expire_agent_run_for_hard_timeout(
+                        run.id,
+                        {
+                            "code": "pi_hard_timeout",
+                            "retryable": run.side_effect_state == "none",
+                            "started_at": run.started_at,
+                        },
+                        expected_execution_generation=task.execution_generation,
+                        max_age_seconds=self._agent_run_hard_timeout_seconds(),
+                        now=self._sqlite_timestamp(self._now()),
+                    )
+                except (ValueError, AgentRunLeaseLostError):
+                    continue
+                self.store.record_error(
+                    task.conversation_id,
+                    task.trigger_message_id,
+                    "agent_run_hard_timeout",
+                    (
+                        "hard timeout released a long-running Pi task: "
+                        f"task={task.id} run={run.id}"
+                    ),
+                )
             if run.status == "unknown":
                 self.store.fail_reply_task(
                     task.id,
@@ -1801,6 +1838,39 @@ class DingTalkAutoReplyWorker:
                 title="CEO task retrying stale tasks",
                 message=f"requeued {recovered} stale task(s)",
             )
+
+    def _agent_run_hard_timeout_seconds(self) -> int:
+        total = self.pi_timeout_seconds or 1200
+        idle = self.pi_idle_timeout_seconds or 900
+        return max(int(total), int(idle)) + AGENT_RUN_HARD_TIMEOUT_GRACE_SECONDS
+
+    def _agent_run_hard_timeout_reached(self, run) -> bool:
+        if not run.started_at:
+            return False
+        try:
+            started = datetime.fromisoformat(run.started_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        now = self._now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return (now.astimezone(timezone.utc) - started.astimezone(timezone.utc)).total_seconds() >= self._agent_run_hard_timeout_seconds()
+
+    def _agent_run_lease_active(self, run) -> bool:
+        if not run.lease_expires_at:
+            return False
+        try:
+            expires = datetime.fromisoformat(run.lease_expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        now = self._now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return expires.astimezone(timezone.utc) > now.astimezone(timezone.utc)
 
     def reconcile_unknown_agent_runs(self, *, limit: int = 50) -> int:
         resolved = 0
@@ -2142,18 +2212,21 @@ class DingTalkAutoReplyWorker:
     ) -> Iterator[ReplyTask]:
         if max_id is None:
             return
+        after_priority: int | None = None
         after_id: int | None = None
         while True:
             page = self.store.peek_reply_tasks(
                 page_size,
                 now=now,
                 channel="dingtalk",
+                after_priority=after_priority,
                 after_id=after_id,
                 max_id=max_id,
             )
             if not page:
                 return
             yield from page
+            after_priority = page[-1].priority
             after_id = page[-1].id
 
     def _reply_task_retry_available_at(self, attempts: int) -> str:
@@ -2867,6 +2940,17 @@ class DingTalkAutoReplyWorker:
     def _is_oa_pending_scan_trigger(trigger: DingTalkMessage) -> bool:
         return str(trigger.raw_payload.get("source") or "") == "oa_pending_scan"
 
+    @staticmethod
+    def _reply_task_priority(
+        conversation: DingTalkConversation,
+        trigger: DingTalkMessage,
+    ) -> int:
+        if conversation.single_chat or trigger.single_chat:
+            return REPLY_TASK_PRIORITY_SINGLE_CHAT
+        if trigger.addresses_principal():
+            return REPLY_TASK_PRIORITY_GROUP_MENTION
+        return REPLY_TASK_PRIORITY_BACKLOG
+
     def _enqueue_reply_task(
         self,
         conversation: DingTalkConversation,
@@ -2877,6 +2961,7 @@ class DingTalkAutoReplyWorker:
         error: str = "",
         replace_pending_single_chat: bool = True,
     ) -> bool:
+        priority = self._reply_task_priority(conversation, trigger)
         if conversation.single_chat and replace_pending_single_chat:
             updated = self.store.replace_pending_single_chat_reply_task_trigger(
                 conversation_id=conversation.open_conversation_id,
@@ -2885,6 +2970,7 @@ class DingTalkAutoReplyWorker:
                 trigger_sender=trigger.sender_name,
                 trigger_text=trigger.content,
                 trigger_message_json=trigger.model_dump_json(),
+                priority=priority,
                 available_at=available_at,
                 error=error,
                 channel="dingtalk",
@@ -2900,6 +2986,7 @@ class DingTalkAutoReplyWorker:
             trigger_sender=trigger.sender_name,
             trigger_text=trigger.content,
             trigger_message_json=trigger.model_dump_json(),
+            priority=priority,
             available_at=available_at,
             error=error,
             channel="dingtalk",
@@ -2911,6 +2998,7 @@ class DingTalkAutoReplyWorker:
             trigger.open_message_id,
             trigger_text=trigger.content,
             trigger_message_json=trigger.model_dump_json(),
+            priority=priority,
             channel="dingtalk",
         )
         return updated > 0
@@ -3242,6 +3330,7 @@ class DingTalkAutoReplyWorker:
                 trigger_sender=trigger.sender_name,
                 trigger_text=trigger.content,
                 trigger_message_json=trigger.model_dump_json(),
+                priority=self._reply_task_priority(conversation, trigger),
                 oa_url=oa_url,
                 force_rotation=True,
             )

@@ -16,7 +16,13 @@ from app.pi_runner import pi_cli_path, pi_extension_path, pi_node_binary
 HARNESS = Path(__file__).parent / "fixtures" / "pi_extension_harness.mjs"
 
 
-def _fake_dws(tmp_path: Path, *, tools: list[dict], stdout: str = "{}") -> tuple[Path, Path]:
+def _fake_dws(
+    tmp_path: Path,
+    *,
+    tools: list[dict],
+    stdout: str = "{}",
+    stdout_by_command: dict[str, str] | None = None,
+) -> tuple[Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary_dir = tmp_path / "bin"
     binary_dir.mkdir()
@@ -27,6 +33,7 @@ def _fake_dws(tmp_path: Path, *, tools: list[dict], stdout: str = "{}") -> tuple
             {
                 "tools": tools,
                 "stdout": stdout,
+                "stdout_by_command": stdout_by_command or {},
                 "log_path": str(log_path),
             }
         ),
@@ -71,6 +78,10 @@ if image_base64:
         "localPath": output_path,
         "downloadUrl": "https://signed.example/private-image",
     }))
+    raise SystemExit(0)
+command = " ".join(args[:3])
+if command in config.get("stdout_by_command", {}):
+    sys.stdout.write(config["stdout_by_command"][command])
     raise SystemExit(0)
 sys.stdout.write(config["stdout"])
 """,
@@ -187,8 +198,14 @@ def _run_tool(
     lark_tools: list[dict] | None = None,
     lark_shortcuts: dict[str, str] | None = None,
     lark_stdout: str = "{}",
+    stdout_by_command: dict[str, str] | None = None,
 ) -> tuple[dict, Path]:
-    binary_dir, log_path = _fake_dws(tmp_path, tools=tools or [], stdout=stdout)
+    binary_dir, log_path = _fake_dws(
+        tmp_path,
+        tools=tools or [],
+        stdout=stdout,
+        stdout_by_command=stdout_by_command,
+    )
     lark_binary, _lark_log_path = _fake_lark(
         tmp_path,
         binary_dir,
@@ -276,7 +293,8 @@ def _lark_metadata(name: str, risk: str, *, danger: bool = False) -> dict:
 def test_extension_registers_all_reviewed_capabilities_together(tmp_path: Path):
     assert _registered_tools(tmp_path) == sorted(
         [
-            "document_upload",
+                "document_upload",
+                "create_dingtalk_todo",
             "download_attachment",
             "download_dingtalk_image",
             "execute_reviewed_lark_read",
@@ -637,6 +655,49 @@ def test_reviewed_dingtalk_reply_does_not_mention_single_chat_sender(
     assert result["ok"] is True
     record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
     assert "--at-open-dingtalk-ids" not in record["argv"]
+
+
+def test_dingtalk_todo_tool_resolves_people_creates_and_reads_back(
+    tmp_path: Path,
+):
+    stdout_by_command = {
+        "contact user get-self": json.dumps({"result": [{"orgEmployeeModel": {"userId": "self-1"}}]}),
+        "aisearch person": json.dumps({"result": [{"userId": "sender-1"}]}),
+        "todo task create": json.dumps({"result": {"taskId": "todo-1"}}),
+        "todo task get": json.dumps({"result": {"taskId": "todo-1", "title": "测试"}}),
+    }
+    env = {
+        "CEO_PI_TODO_TRIGGER_SENDER_NAME": "陈凯",
+        "CEO_PI_TODO_TRIGGER_SENDER_USER_ID": "sender-1",
+    }
+    stdout_by_command = {
+        "contact user get-self": json.dumps({"result": [{"orgEmployeeModel": {"userId": "self-1"}}]}),
+        "todo task create": json.dumps({"result": {"taskId": "todo-1"}}),
+        "todo task get": json.dumps({"result": {"taskId": "todo-1", "title": "测试"}}),
+    }
+    result, log_path = _run_tool(
+        tmp_path,
+        tool_name="create_dingtalk_todo",
+        params={"title": "测试", "executor_names": ["咱俩"], "priority": 20},
+        extra_env=env,
+        stdout_by_command=stdout_by_command,
+        tools=[
+            _metadata("contact user get-self", "read"),
+            _metadata("todo task create", "write"),
+            _metadata("todo task get", "read"),
+        ],
+    )
+    assert result["ok"] is True
+    assert result["result"]["details"]["receipt"] == {
+        "taskId": "todo-1",
+        "readbackVerified": True,
+    }
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [" ".join(record["argv"][1:4]) for record in records] == [
+        "contact user get-self",
+        "todo task create",
+        "todo task get",
+    ]
 
 
 def test_reviewed_dws_image_download_returns_pixels_and_deletes_temp_file(

@@ -158,7 +158,7 @@ def test_pi_runner_effectful_command_exposes_only_reviewed_extension_tools(
         "user_get,memory_recall,memory_get,timeline_get,web_search_exa,web_fetch_exa,"
         "search_candidates,get_dashboard_stats,get_interview_context,"
         "download_attachment,list_candidate_interviews,"
-        "execute_reviewed_write,execute_reviewed_lark_write,"
+        "create_dingtalk_todo,execute_reviewed_write,execute_reviewed_lark_write,"
         "memory_write,document_upload,upload_interview_result"
     )
     assert "bash" not in command[command.index("--tools") + 1].split(",")
