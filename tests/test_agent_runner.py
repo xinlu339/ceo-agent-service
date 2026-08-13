@@ -14,6 +14,7 @@ from app.agent_runner import (
     AgentRunUnknownError,
     AgentRunUnavailableError,
     DirectAgentRunner,
+    PI_TOOL_BUDGET_EXCEEDED,
     ReconciliationProof,
     _pi_tool_effect_metadata,
     direct_agent_developer_instructions,
@@ -1190,6 +1191,48 @@ def test_direct_runner_hides_memory_write_tools_for_reply_tasks(
     assert "execute_reviewed_write" in tools
     assert "memory_write" not in tools
     assert "document_upload" not in tools
+
+
+def test_direct_runner_stops_repeated_workspace_searches_at_budget(
+    tmp_path: Path,
+    store: AutoReplyStore,
+    monkeypatch,
+):
+    task = _task(store)
+    monkeypatch.setenv("CEO_PI_MAX_WORKSPACE_SEARCH_CALLS", "1")
+    executor = RecordingExecutor(
+        "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "session-budget"}),
+                json.dumps(
+                    {
+                        "type": "tool_execution_start",
+                        "toolName": "workspace_search",
+                        "toolCallId": "search-1",
+                        "args": {"query": "one"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "tool_execution_start",
+                        "toolName": "workspace_search",
+                        "toolCallId": "search-2",
+                        "args": {"query": "two"},
+                    }
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(RuntimeError, match=PI_TOOL_BUDGET_EXCEEDED):
+        DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+            task, _context(task.id)
+        )
+
+    run = store.get_agent_run_for_task_generation(task.id, task.execution_generation)
+    assert run is not None
+    assert run.status == "failed"
+    assert PI_TOOL_BUDGET_EXCEEDED in run.structured_error_json
 
 
 def test_pi_reconciliation_uses_only_reviewed_read_and_binds_live_proof(

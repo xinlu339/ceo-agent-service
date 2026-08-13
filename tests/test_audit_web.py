@@ -73,6 +73,13 @@ def test_reply_task_error_text_explains_unreviewed_agent_write():
     assert "核对钉钉实际状态" in message
 
 
+def test_reply_task_error_text_explains_tool_budget():
+    message = _reply_task_error_text("pi_tool_budget_exceeded")
+
+    assert "检索次数超过" in message
+    assert "缩小问题范围" in message
+
+
 def seed_attempt(store: AutoReplyStore) -> int:
     store.upsert_conversation(
         "cid-1",
@@ -2971,6 +2978,10 @@ def test_render_config_page_shows_system_config_tab_with_descriptions():
     assert "普通钉钉回复 Agent 连续没有输出时的超时" in html
     assert "CEO_TASK_PI_TIMEOUT_SECONDS" in html
     assert "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS" in html
+    assert "CEO_PI_MAX_TOOL_CALLS" in html
+    assert "CEO_PI_MAX_MEMORY_RECALL_CALLS" in html
+    assert "CEO_PI_MAX_WORKSPACE_SEARCH_CALLS" in html
+    assert "CEO_PI_MAX_WORKSPACE_READ_CALLS" in html
     assert "CEO_MEETING_PRODUCER_INTERVAL_SECONDS" in html
     assert "meeting producer 扫描 dws minutes 的间隔秒数" in html
     assert "CEO_MEETING_CONSUMER_POLL_INTERVAL_SECONDS" in html
@@ -3220,6 +3231,14 @@ def test_handle_system_config_post_saves_runtime_params_to_env_file(
         "&system_value=600"
         "&system_key=CEO_TASK_PI_IDLE_TIMEOUT_SECONDS"
         "&system_value=180"
+        "&system_key=CEO_PI_MAX_TOOL_CALLS"
+        "&system_value=30"
+        "&system_key=CEO_PI_MAX_MEMORY_RECALL_CALLS"
+        "&system_value=2"
+        "&system_key=CEO_PI_MAX_WORKSPACE_SEARCH_CALLS"
+        "&system_value=3"
+        "&system_key=CEO_PI_MAX_WORKSPACE_READ_CALLS"
+        "&system_value=10"
         "&system_key=CEO_MEETING_PRODUCER_INTERVAL_SECONDS"
         "&system_value=60"
         "&system_key=CEO_MEETING_CONSUMER_POLL_INTERVAL_SECONDS"
@@ -3255,6 +3274,10 @@ def test_handle_system_config_post_saves_runtime_params_to_env_file(
     assert "CEO_PI_IDLE_TIMEOUT_SECONDS=180" in env_text
     assert "CEO_TASK_PI_TIMEOUT_SECONDS=600" in env_text
     assert "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS=180" in env_text
+    assert "CEO_PI_MAX_TOOL_CALLS=30" in env_text
+    assert "CEO_PI_MAX_MEMORY_RECALL_CALLS=2" in env_text
+    assert "CEO_PI_MAX_WORKSPACE_SEARCH_CALLS=3" in env_text
+    assert "CEO_PI_MAX_WORKSPACE_READ_CALLS=10" in env_text
     assert "CEO_MEETING_PRODUCER_INTERVAL_SECONDS=60" in env_text
     assert "CEO_MEETING_CONSUMER_POLL_INTERVAL_SECONDS=10" in env_text
     assert "CEO_MEETING_SETTLE_SECONDS=600" in env_text
@@ -3879,6 +3902,72 @@ def test_render_attempt_detail_shows_quality_warnings(tmp_path: Path):
         "No audit documents or tool events were attached; this answer was generated from conversation context only."
         in html
     )
+
+
+def test_attempt_detail_resolves_agent_session_from_trigger_run(tmp_path: Path):
+    store = AutoReplyStore(tmp_path / "worker.sqlite3")
+    task_id = store.enqueue_reply_task(
+        channel="dingtalk",
+        conversation_id="cid-fallback",
+        conversation_title="技术群",
+        single_chat=False,
+        trigger_message_id="msg-fallback",
+        trigger_create_time="2026-08-13 10:00:00",
+        trigger_sender="测试人",
+        trigger_text="测试执行记录关联",
+        trigger_message_json="{}",
+    )
+    assert task_id is True
+    task = store.list_reply_tasks(statuses=("pending",), limit=1)[0]
+    claimed = store.claim_reply_task(task.id, now="2026-08-13 10:00:01")
+    assert claimed is not None
+    run = store.claim_agent_run(
+        task.id,
+        task.execution_generation,
+        owner="test-owner",
+        now="2026-08-13 10:00:02",
+    )
+    assert run.claimed
+    store.set_agent_run_session(
+        run.run.id,
+        "session-fallback",
+        owner="test-owner",
+        now="2026-08-13 10:00:03",
+    )
+    store.fail_agent_run(
+        run.run.id,
+        {"code": "pi_process_timeout", "retryable": True},
+        owner="test-owner",
+        now="2026-08-13 10:00:04",
+    )
+    attempt_id = store.finalize_agent_reply_task(
+        task_id=task.id,
+        expected_execution_generation=task.execution_generation,
+        run_id=run.run.id,
+        task_status="failed",
+        task_error="pi_process_timeout",
+        available_at="",
+        conversation_id=task.conversation_id,
+        conversation_title=task.conversation_title,
+        trigger_message_id=task.trigger_message_id,
+        trigger_sender=task.trigger_sender,
+        trigger_text=task.trigger_text,
+        codex_reason="pi_process_timeout",
+        codex_session_id="",
+        codex_transcript_start_line=0,
+        codex_transcript_end_line=0,
+        audit_tool_events_json="[]",
+        audit_summary="pi_process_timeout",
+        send_status="failed",
+        send_error="pi_process_timeout",
+        channel="dingtalk",
+    )
+
+    status, html = render_attempt_detail(store, attempt_id)
+
+    assert status == 200
+    assert "session-fallback" in html
+    assert "No agent execution record" not in html
 
 
 def test_render_attempt_detail_suppresses_quality_warnings_for_skipped_attempts(

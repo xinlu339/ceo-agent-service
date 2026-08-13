@@ -2446,6 +2446,37 @@ class AutoReplyStore:
             ).fetchone()
             return self._agent_run_from_row(row, db=db) if row is not None else None
 
+    def get_latest_agent_run_for_reply_attempt(
+        self,
+        *,
+        channel: str,
+        conversation_id: str,
+        trigger_message_id: str,
+    ) -> AgentRun | None:
+        """Resolve the run behind an attempt when the attempt session column is empty.
+
+        Older rows were finalized without copying the Pi session ID.  The task
+        trigger is the stable durable link shared by reply_attempts,
+        reply_tasks, and agent_runs, so use it as a display-only fallback.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                """
+                select agent_runs.*
+                from agent_runs
+                join reply_tasks
+                  on reply_tasks.id=agent_runs.reply_task_id
+                 and reply_tasks.execution_generation=agent_runs.execution_generation
+                where reply_tasks.channel=?
+                  and reply_tasks.conversation_id=?
+                  and reply_tasks.trigger_message_id=?
+                order by agent_runs.id desc
+                limit 1
+                """,
+                (channel, conversation_id, trigger_message_id),
+            ).fetchone()
+            return self._agent_run_from_row(row, db=db) if row is not None else None
+
     def record_agent_execution_receipt(
         self,
         run_id: int,
@@ -2752,13 +2783,20 @@ class AutoReplyStore:
                 reclaimed = db.execute(
                     """
                     update agent_runs
-                    set lease_owner=?, lease_expires_at=?, updated_at=?
+                    set lease_owner=?, lease_expires_at=?, started_at=?, updated_at=?
                     where id=? and status='running'
                       and codex_session_id<>''
                       and side_effect_state<>'unknown'
                       and lease_expires_at<=?
                     """,
-                    (owner, lease_expires_at, now_text, row["id"], now_text),
+                    (
+                        owner,
+                        lease_expires_at,
+                        now_text,
+                        now_text,
+                        row["id"],
+                        now_text,
+                    ),
                 )
                 claimed = reclaimed.rowcount == 1
                 row = db.execute(
@@ -2782,11 +2820,11 @@ class AutoReplyStore:
                         set status='running', lease_owner=?, lease_expires_at=?,
                             transcript_start_line=transcript_end_line,
                             final_result_json='', structured_error_json='',
-                            completed_at='', updated_at=?
+                            completed_at='', started_at=?, updated_at=?
                         where id=? and status='failed'
                           and side_effect_state='none'
                         """,
-                        (owner, lease_expires_at, now_text, row["id"]),
+                        (owner, lease_expires_at, now_text, now_text, row["id"]),
                     )
                     claimed = reclaimed.rowcount == 1
                     row = db.execute(

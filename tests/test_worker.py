@@ -2526,6 +2526,12 @@ def test_produce_once_fast_path_task_is_claimable_after_backoff(
     assert claimed_after_backoff[0].available_at == ""
 
 
+def test_calendar_colon_prefix_is_recognized_as_calendar_message():
+    trigger = message("日程：新增标注工具：视频时间段选择 PRD评审")
+
+    assert DingTalkAutoReplyWorker._is_calendar_message(trigger) is True
+
+
 def test_calendar_card_task_is_enriched_with_matching_pending_invite(
     tmp_path: Path, monkeypatch
 ):

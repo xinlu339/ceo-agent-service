@@ -2651,6 +2651,26 @@ def _system_config_rows() -> list[tuple[str, str, str]]:
             "task-maintenance Agent 连续没有输出时的超时。",
         ),
         (
+            "CEO_PI_MAX_TOOL_CALLS",
+            env_values.get("CEO_PI_MAX_TOOL_CALLS", "30"),
+            "单个 Direct Agent 运行允许的全部工具调用上限；超过后停止检索并标记为不可重试。",
+        ),
+        (
+            "CEO_PI_MAX_MEMORY_RECALL_CALLS",
+            env_values.get("CEO_PI_MAX_MEMORY_RECALL_CALLS", "2"),
+            "单个 Direct Agent 运行允许的 memory_recall 次数上限。",
+        ),
+        (
+            "CEO_PI_MAX_WORKSPACE_SEARCH_CALLS",
+            env_values.get("CEO_PI_MAX_WORKSPACE_SEARCH_CALLS", "3"),
+            "单个 Direct Agent 运行允许的 workspace_search 次数上限。",
+        ),
+        (
+            "CEO_PI_MAX_WORKSPACE_READ_CALLS",
+            env_values.get("CEO_PI_MAX_WORKSPACE_READ_CALLS", "10"),
+            "单个 Direct Agent 运行允许的 workspace_read 次数上限。",
+        ),
+        (
             "CEO_MEETING_PRODUCER_INTERVAL_SECONDS",
             str(meeting_producer_interval_seconds()),
             "meeting producer 扫描 dws minutes 的间隔秒数。",
@@ -3371,6 +3391,10 @@ def _editable_system_config_keys() -> set[str]:
         "CEO_PI_IDLE_TIMEOUT_SECONDS",
         "CEO_TASK_PI_TIMEOUT_SECONDS",
         "CEO_TASK_PI_IDLE_TIMEOUT_SECONDS",
+        "CEO_PI_MAX_TOOL_CALLS",
+        "CEO_PI_MAX_MEMORY_RECALL_CALLS",
+        "CEO_PI_MAX_WORKSPACE_SEARCH_CALLS",
+        "CEO_PI_MAX_WORKSPACE_READ_CALLS",
         "CEO_MEETING_PRODUCER_INTERVAL_SECONDS",
         "CEO_MEETING_CONSUMER_POLL_INTERVAL_SECONDS",
         "CEO_MEETING_SETTLE_SECONDS",
@@ -6442,6 +6466,11 @@ def _reply_task_error_text(error: str) -> str:
             "分身调用了未通过审计确认的外部写入工具，服务已阻止本次任务；"
             "请先核对钉钉实际状态，再重试。"
         )
+    if normalized == "pi_tool_budget_exceeded":
+        return (
+            "分身检索次数超过单任务安全上限，服务已停止继续检索；"
+            "请缩小问题范围或补充具体时间、项目和文档线索后重试。"
+        )
     return normalized
 
 
@@ -6463,6 +6492,13 @@ def render_attempt_detail(store: AutoReplyStore, attempt_id: int) -> tuple[int, 
     agent_session_id = attempt.codex_session_id or store.get_agent_session_id(
         attempt.conversation_id
     )
+    if not agent_session_id:
+        fallback_run = store.get_latest_agent_run_for_reply_attempt(
+            channel=attempt.channel,
+            conversation_id=attempt.conversation_id,
+            trigger_message_id=attempt.trigger_message_id,
+        )
+        agent_session_id = fallback_run.agent_session_id if fallback_run else None
     later_attempt = _later_attempt_for_display(store, attempt)
     return 200, render_page(
         f"Attempt #{attempt.id}",

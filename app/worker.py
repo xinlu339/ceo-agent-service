@@ -3908,7 +3908,10 @@ class DingTalkAutoReplyWorker:
         return message_type in {
             "calendar",
             "schedule",
-        } or content.startswith("[日程]") or any(
+        } or content.startswith("[日程]") or re.match(
+            r"^日程\s*[:：]",
+            decoded_content,
+        ) is not None or any(
             marker in decoded_content
             for marker in (
                 "newCalendar=1",

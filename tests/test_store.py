@@ -1089,6 +1089,34 @@ def test_agent_run_fresh_lease_cannot_be_stolen_but_expired_lease_recovers(
     assert expired.run.codex_session_id == "session-1"
     assert expired.run.transcript_start_line == 8
     assert expired.run.lease_owner == "worker-2"
+    assert expired.run.started_at == "2026-07-29 00:30:01"
+
+
+def test_retryable_failed_agent_run_resets_execution_start_time(tmp_path: Path):
+    store = AutoReplyStore(tmp_path / "worker.sqlite3")
+    task_id = _enqueue_universal_reply_task(store)
+    first = store.claim_agent_run(
+        task_id,
+        "initial",
+        owner="worker-1",
+        now="2026-07-29 00:00:00",
+    )
+    store.fail_agent_run(
+        first.run.id,
+        {"code": "temporary_read_failure", "retryable": True},
+        owner="worker-1",
+        now="2026-07-29 00:05:00",
+    )
+
+    retried = store.claim_agent_run(
+        task_id,
+        "initial",
+        owner="worker-2",
+        now="2026-07-29 00:06:00",
+    )
+
+    assert retried.claimed is True
+    assert retried.run.started_at == "2026-07-29 00:06:00"
 
 
 def test_expired_sessionless_agent_run_cannot_be_reclaimed(tmp_path: Path):

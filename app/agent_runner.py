@@ -43,9 +43,14 @@ SHARED_AGENT_RULES_PATH = Path.home() / ".agents" / "AGENT.md"
 TOTAL_TIMEOUT_SECONDS = 1200
 IDLE_TIMEOUT_SECONDS = 900
 LEASE_SECONDS = TOTAL_TIMEOUT_SECONDS + IDLE_TIMEOUT_SECONDS + 300
+DEFAULT_MAX_TOOL_CALLS = 30
+DEFAULT_MAX_MEMORY_RECALL_CALLS = 2
+DEFAULT_MAX_WORKSPACE_SEARCH_CALLS = 3
+DEFAULT_MAX_WORKSPACE_READ_CALLS = 10
 PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT = (
     "pi_finalization_failed_after_confirmed_effect"
 )
+PI_TOOL_BUDGET_EXCEEDED = "pi_tool_budget_exceeded"
 DIRECT_AGENT_DEVELOPER_INSTRUCTIONS = """You are the Direct Agent for one queued task.
 
 - The Agent owns evidence reads, business judgment, direct execution and verification.
@@ -53,6 +58,8 @@ DIRECT_AGENT_DEVELOPER_INSTRUCTIONS = """You are the Direct Agent for one queued
 - Complete authorized work only through the installed reviewed Pi tools. Use workspace_read/workspace_search/workspace_list for local evidence, graphify_read for the installed read-only Graphify query/explain/path operations, download_dingtalk_image for DingTalk robot image download codes, execute_reviewed_read/execute_reviewed_write for reviewed DWS operations, execute_reviewed_lark_read/execute_reviewed_lark_write for reviewed Lark operations, the explicitly registered Memory tools for Friday Memory, Exa for public web reads, and Xiaoqing tools for reviewed interview operations when configured. Arbitrary bash, edit, write, authentication, package installation, destructive commands, and unregistered MCP capabilities are unavailable. Do not produce plans, action arrays, or requests for service execution.
 - DingTalk TODO intent has priority over Memory. Phrases such as “记一个待办”, “创建待办”, “TODO”, “截止日期”, “周五前完成”, or “帮我记一下任务” mean that the requested side effect is a DingTalk Todo. Read the installed dingtalk-todo skill when needed, then use execute_reviewed_write with the exact reviewed DWS command `dws todo task create` (including the resolved title, executor, due time, and priority). Do not call memory_write or document_upload for a Todo request. If the due time or executor cannot be resolved reliably, return needs_human and ask one focused clarification instead of writing Memory.
 - Ordinary DingTalk reply tasks must not write Friday Memory or upload documents to it. The Direct Agent does not expose memory_write/document_upload for these tasks; use Memory read tools only when historical evidence is actually needed. A Memory write is never a fallback for a failed or ambiguous business-tool action.
+- Retrieval must converge. For an open-ended status or history question, use one focused evidence path first, do not repeatedly search the same workspace, and stop with a factual partial answer when the available evidence is insufficient. The service enforces a per-run tool budget; never try to work around it by repeating equivalent searches.
+- If the original trigger is a DingTalk calendar/schedule notification and does not explicitly ask to accept, decline, reschedule, check conflicts, or perform another calendar action, return no_action after the supplied calendar evidence. Do not search Memory or the workspace for a passive calendar notification.
 - For a DingTalk group reply to the original trigger, use `dws chat message reply` with `--at-open-dingtalk-ids <sender_open_dingtalk_id>` on the reply. A native reference (`--ref-msg-id`/`--ref-sender`) alone does not render a visible @. Do not add this mention in a single chat, and use the exact ID from Original trigger rather than guessing from a name.
 - Return only one JSON result with outcome, summary, and error. The outcome is completed, no_action, needs_human, or failed; summary is a nonempty factual description; error is always an object with code, retryable, and authorization_required, using an empty code and false flags when there is no error.
 - Never run authentication login, reset, or logout commands. Authentication readiness belongs to the service gate.
@@ -136,6 +143,15 @@ class AgentConversationLockedError(RuntimeError):
 
 class AgentStreamError(RuntimeError):
     pass
+
+
+class AgentToolBudgetExceeded(RuntimeError):
+    """The model exceeded the bounded tool budget for one run."""
+
+    def __init__(self, tool_name: str, limit: int) -> None:
+        self.tool_name = tool_name
+        self.limit = limit
+        super().__init__(f"{PI_TOOL_BUDGET_EXCEEDED}:{tool_name}:{limit}")
 
 
 class AgentRunUnknownError(RuntimeError):
@@ -239,6 +255,29 @@ class DirectAgentRunner:
         )
         if self.total_timeout_seconds <= 0 or self.idle_timeout_seconds <= 0:
             raise ValueError("Pi timeouts must be positive")
+        self.max_tool_calls = env_int(
+            "CEO_PI_MAX_TOOL_CALLS", DEFAULT_MAX_TOOL_CALLS
+        )
+        self.max_memory_recall_calls = env_int(
+            "CEO_PI_MAX_MEMORY_RECALL_CALLS", DEFAULT_MAX_MEMORY_RECALL_CALLS
+        )
+        self.max_workspace_search_calls = env_int(
+            "CEO_PI_MAX_WORKSPACE_SEARCH_CALLS",
+            DEFAULT_MAX_WORKSPACE_SEARCH_CALLS,
+        )
+        self.max_workspace_read_calls = env_int(
+            "CEO_PI_MAX_WORKSPACE_READ_CALLS", DEFAULT_MAX_WORKSPACE_READ_CALLS
+        )
+        if any(
+            value <= 0
+            for value in (
+                self.max_tool_calls,
+                self.max_memory_recall_calls,
+                self.max_workspace_search_calls,
+                self.max_workspace_read_calls,
+            )
+        ):
+            raise ValueError("Pi tool budgets must be positive")
         self.lease_seconds = (
             self.total_timeout_seconds + self.idle_timeout_seconds + 300
         )
@@ -353,9 +392,15 @@ class DirectAgentRunner:
         saw_json = False
         stream_line_count = 0
         pi_tool_metadata: dict[str, dict[str, object]] = {}
+        tool_call_count = 0
+        memory_recall_count = 0
+        workspace_search_count = 0
+        workspace_read_count = 0
 
         def persist_line(line: str) -> None:
             nonlocal saw_json, stream_line_count
+            nonlocal tool_call_count, memory_recall_count
+            nonlocal workspace_search_count, workspace_read_count
             if not line.strip():
                 return
             try:
@@ -367,6 +412,29 @@ class DirectAgentRunner:
             saw_json = True
             if not isinstance(payload, dict):
                 raise AgentStreamError("pi_stream_invalid")
+            if payload.get("type") == "tool_execution_start":
+                tool_name = str(payload.get("toolName") or "tool").strip().casefold()
+                tool_call_count += 1
+                if tool_call_count > self.max_tool_calls:
+                    raise AgentToolBudgetExceeded("all", self.max_tool_calls)
+                if tool_name == "memory_recall":
+                    memory_recall_count += 1
+                    if memory_recall_count > self.max_memory_recall_calls:
+                        raise AgentToolBudgetExceeded(
+                            "memory_recall", self.max_memory_recall_calls
+                        )
+                elif tool_name == "workspace_search":
+                    workspace_search_count += 1
+                    if workspace_search_count > self.max_workspace_search_calls:
+                        raise AgentToolBudgetExceeded(
+                            "workspace_search", self.max_workspace_search_calls
+                        )
+                elif tool_name == "workspace_read":
+                    workspace_read_count += 1
+                    if workspace_read_count > self.max_workspace_read_calls:
+                        raise AgentToolBudgetExceeded(
+                            "workspace_read", self.max_workspace_read_calls
+                        )
             stream_line_count += 1
             self.store.renew_agent_run_lease(
                 run.id,
@@ -434,6 +502,17 @@ class DirectAgentRunner:
             if self.store.get_agent_run(run.id).status == "unknown":
                 raise AgentRunUnknownError("pi_stream_invalid", run.id) from exc
             raise RuntimeError("pi_stream_invalid") from exc
+        except AgentToolBudgetExceeded as exc:
+            self._record_failure(
+                run.id,
+                PI_TOOL_BUDGET_EXCEEDED,
+                detail=str(exc),
+                retryable=False,
+                now=now,
+            )
+            if self.store.get_agent_run(run.id).status == "unknown":
+                raise AgentRunUnknownError(PI_TOOL_BUDGET_EXCEEDED, run.id) from exc
+            raise RuntimeError(PI_TOOL_BUDGET_EXCEEDED) from exc
         except Exception as exc:
             self._record_failure(
                 run.id,
@@ -716,6 +795,7 @@ class DirectAgentRunner:
         code: str,
         *,
         detail: str = "",
+        retryable: bool = True,
         now: str | None,
     ) -> None:
         persisted = self.store.get_agent_run(run_id)
@@ -723,7 +803,7 @@ class DirectAgentRunner:
             raise RuntimeError("agent run was not persisted")
         if persisted.status != "running":
             return
-        error: dict[str, object] = {"code": code, "retryable": True}
+        error: dict[str, object] = {"code": code, "retryable": retryable}
         if detail:
             error["detail"] = safe_observability_error(detail)
         if persisted.side_effect_state not in {
