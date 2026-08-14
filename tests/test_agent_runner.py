@@ -33,6 +33,7 @@ from app.process_runner import ProcessRunResult
 from app.store import AutoReplyStore
 from app.todo_routing import is_dingtalk_todo_create_intent
 from app.dingtalk_action_routing import (
+    is_dingtalk_calendar_action_intent,
     is_dingtalk_calendar_create_intent,
     is_dingtalk_calendar_todo_composite_intent,
 )
@@ -1663,6 +1664,22 @@ def test_calendar_action_routing_is_conservative(
     assert is_dingtalk_calendar_todo_composite_intent(text) is composite
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("请接受这个日程邀请", True),
+        ("帮我拒绝这个会议", True),
+        ("查一下今天的会议", False),
+        ("日程：新增标注工具：视频时间段选择 PRD评审", False),
+    ],
+)
+def test_calendar_action_intent_does_not_promote_passive_cards(
+    text: str,
+    expected: bool,
+):
+    assert is_dingtalk_calendar_action_intent(text) is expected
+
+
 def test_direct_runner_scopes_calendar_todo_composite_to_business_tools(
     tmp_path: Path,
     store: AutoReplyStore,
@@ -1729,6 +1746,41 @@ def test_direct_runner_calendar_dry_run_exposes_only_read_tool(
     tools = tuple(command[command.index("--tools") + 1].split(","))
     assert tools == DINGTALK_CALENDAR_READ_ONLY_PI_TOOLS
     assert "execute_reviewed_write" not in tools
+
+
+def test_direct_runner_calendar_card_uses_read_only_tools_without_workspace(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(
+        _context(task.id),
+        trigger_text="日程：新增标注工具：视频时间段选择 PRD评审",
+        materials=(
+            MaterialReference(
+                kind="dingtalk_calendar",
+                reference='{"event_id":"event-1"}',
+                source_message_id="mid",
+                read_commands=(
+                    "dws calendar event get --id event-1 --format json",
+                ),
+            ),
+        ),
+    )
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+    )
+
+    command = executor.commands[0]
+    tools = tuple(command[command.index("--tools") + 1].split(","))
+    assert tools == DINGTALK_CALENDAR_READ_ONLY_PI_TOOLS
+    assert "execute_reviewed_write" not in tools
+    assert "workspace_search" not in tools
+    system_prompt = command[command.index("--system-prompt") + 1]
+    assert "calendar notification/card" in system_prompt
 
 
 @pytest.mark.parametrize(
