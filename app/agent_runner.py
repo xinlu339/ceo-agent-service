@@ -707,7 +707,8 @@ class DirectAgentRunner:
                     "business workflow. First resolve attendees and create the "
                     "calendar event with execute_reviewed_read/"
                     "execute_reviewed_write using the exact reviewed commands "
-                    "from dingtalk-calendar; verify the event. Then call "
+                    "from the preloaded dingtalk-calendar SOP; do not use "
+                    "workspace_read to locate that skill. Verify the event. Then call "
                     "create_dingtalk_todo once for the Todo and rely on its "
                     "readback receipt. Do not call workspace_read, "
                     "workspace_search, workspace_list, Memory, Graphify, web "
@@ -720,7 +721,7 @@ class DirectAgentRunner:
                 developer_instructions += (
                     "\n\nThis trigger explicitly requests a DingTalk "
                     "calendar action. Use only execute_reviewed_read and "
-                    "execute_reviewed_write with the exact dingtalk-calendar "
+                    "execute_reviewed_write with the preloaded dingtalk-calendar "
                     "SOP: resolve attendees, create the event, and perform a "
                     "focused read-back. Do not call workspace, Memory, "
                     "Graphify, web, or unrelated tools. If a required field is "
