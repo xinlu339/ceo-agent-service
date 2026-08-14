@@ -46,6 +46,7 @@ from app.pi_runner import (
 )
 from app.store import AgentRun, AgentRunLeaseLostError, AutoReplyStore, ReplyTask
 from app.dingtalk_action_routing import (
+    is_dingtalk_calendar_action_intent,
     is_dingtalk_calendar_create_intent,
     is_dingtalk_calendar_todo_composite_intent,
 )
@@ -633,6 +634,13 @@ class DirectAgentRunner:
             context.channel == "dingtalk"
             and is_dingtalk_calendar_create_intent(context.trigger_text)
         )
+        calendar_action_intent = (
+            context.channel == "dingtalk"
+            and is_dingtalk_calendar_action_intent(context.trigger_text)
+        )
+        calendar_material_context = context.channel == "dingtalk" and any(
+            material.kind == "dingtalk_calendar" for material in context.materials
+        )
         calendar_todo_composite_intent = (
             context.channel == "dingtalk"
             and is_dingtalk_calendar_todo_composite_intent(context.trigger_text)
@@ -681,7 +689,7 @@ class DirectAgentRunner:
                 + approval_rules
                 + "\n</oa_approval_rules>"
             )
-        elif calendar_create_intent:
+        elif calendar_action_intent:
             # Calendar creation is an explicit business action, not an
             # evidence-gathering question. Keep workspace and Memory tools out
             # of the invocation so a calendar+todo request cannot wander
@@ -727,6 +735,20 @@ class DirectAgentRunner:
                     "Graphify, web, or unrelated tools. If a required field is "
                     "ambiguous, return needs_human instead of searching."
                 )
+        elif calendar_material_context:
+            # A passive calendar card already carries a deterministic calendar
+            # read command in the supplied material. Keep this path read-only;
+            # otherwise Pi may mistake the card title for a project question
+            # and loop through workspace_search before returning no_action.
+            tool_names = DINGTALK_CALENDAR_READ_ONLY_PI_TOOLS
+            developer_instructions += (
+                "\n\nThis is a DingTalk calendar notification/card, not an "
+                "explicit calendar write request. Execute the supplied "
+                "dingtalk_calendar read command if needed, then return no_action "
+                "unless the original trigger explicitly asks to accept, decline, "
+                "reschedule, or otherwise mutate the event. Do not use any "
+                "workspace, Memory, Graphify, web, or write tool."
+            )
         elif todo_create_intent and not read_only:
             # A Todo request is deliberately a capability-scoped invocation.
             # The model may fill in natural-language fields, but it cannot
@@ -785,7 +807,8 @@ class DirectAgentRunner:
         logger.info(
             "pi_agent_run_started task_id=%s run_id=%s thinking=%s read_only=%s "
             "session_reused=%s public_live_info=%s oa_context=%s "
-            "calendar_create=%s calendar_todo_composite=%s",
+            "calendar_create=%s calendar_action=%s calendar_material=%s "
+            "calendar_todo_composite=%s",
             task.id,
             run.id,
             thinking_level,
@@ -794,6 +817,8 @@ class DirectAgentRunner:
             public_live_info,
             oa_context,
             calendar_create_intent,
+            calendar_action_intent,
+            calendar_material_context,
             calendar_todo_composite_intent,
         )
         saw_json = False

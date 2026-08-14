@@ -27,6 +27,14 @@ _CALENDAR_CREATE_ACTION_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+_CALENDAR_ACTION_PATTERN = re.compile(
+    r"(?:"
+    r"帮我|请|麻烦|给我|安排|约|预约|创建|新建|预订|订"
+    r"|加(?:入|个|一个)?|改期|取消|删除|接受|同意|拒绝|不参加|参加|回复"
+    r"|book|schedule|create|reschedule|cancel|delete|accept|decline|respond"
+    r")",
+    re.IGNORECASE,
+)
 _CALENDAR_READ_ACTION_PATTERN = re.compile(
     r"(?:查询|查一下|查看|看看|今天|明天|本周|本月|日程表|闲忙|空闲|"
     r"list|show|check|freebusy)",
@@ -79,6 +87,17 @@ def is_dingtalk_calendar_create_intent(text: str) -> bool:
     ):
         return False
     return True
+
+
+def is_dingtalk_calendar_action_intent(text: str) -> bool:
+    """Return whether *text* explicitly asks to mutate/respond to a calendar."""
+
+    normalized = _normalized(text)
+    if not normalized or not _CALENDAR_TERM_PATTERN.search(normalized):
+        return False
+    if not _CALENDAR_ACTION_PATTERN.search(normalized):
+        return False
+    return not _CALENDAR_META_PATTERN.search(normalized)
 
 
 def is_dingtalk_calendar_todo_composite_intent(text: str) -> bool:
