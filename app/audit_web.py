@@ -6475,8 +6475,8 @@ def _reply_task_error_text(error: str) -> str:
     normalized = (error or "").strip()
     if normalized in {"agent_run_unknown", "pi_unreviewed_tool_effect"}:
         return (
-            "分身的外部写入回执暂未完整回传，钉钉可能已经收到回复；"
-            "服务已暂停重复发送，正在等待只读核验。"
+            "分身的外部动作回执暂未完整回传，动作可能已经生效；"
+            "服务已暂停重复发送或执行，正在等待只读核验。"
         )
     if normalized == "pi_tool_budget_exceeded":
         return (
@@ -8626,6 +8626,11 @@ def _attempt_detail_reply_text(attempt: ReplyAttempt) -> str:
     reply_text = attempt.final_reply_text or attempt.draft_reply_text
     if reply_text.strip():
         return reply_text
+    if _attempt_waiting_for_agent_verification(attempt):
+        return (
+            "未记录到完整的最终回复回执。外部动作可能已经生效，"
+            "服务正在等待只读核验，期间不会重复执行。"
+        )
     return _reaction_display_text(attempt) or "No generated reply recorded."
 
 
