@@ -6463,8 +6463,8 @@ def _reply_task_error_text(error: str) -> str:
     normalized = (error or "").strip()
     if normalized in {"agent_run_unknown", "pi_unreviewed_tool_effect"}:
         return (
-            "分身调用了未通过审计确认的外部写入工具，服务已阻止本次任务；"
-            "请先核对钉钉实际状态，再重试。"
+            "分身的外部写入回执暂未完整回传，钉钉可能已经收到回复；"
+            "服务已暂停重复发送，正在等待只读核验。"
         )
     if normalized == "pi_tool_budget_exceeded":
         return (

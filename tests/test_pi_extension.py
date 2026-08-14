@@ -566,6 +566,8 @@ def test_reviewed_extension_uses_argv_without_shell_and_strips_provider_secrets(
 def test_reviewed_dingtalk_reply_auto_mentions_original_group_trigger_sender(
     tmp_path: Path,
 ):
+    receipt_dir = tmp_path / "receipts"
+    receipt_dir.mkdir()
     argv = [
         "dws",
         "chat",
@@ -589,7 +591,10 @@ def test_reviewed_dingtalk_reply_auto_mentions_original_group_trigger_sender(
         params={"argv": argv},
         tools=[_metadata("chat message reply", "write")],
         stdout=json.dumps({"messageId": "reply-1"}),
-        extra_env={"CEO_PI_REPLY_AT_OPEN_DINGTALK_ID": "open-lily"},
+        extra_env={
+            "CEO_PI_REPLY_AT_OPEN_DINGTALK_ID": "open-lily",
+            "CEO_PI_EXECUTION_RECEIPT_DIR": str(receipt_dir),
+        },
     )
 
     assert result["ok"] is True
@@ -597,7 +602,7 @@ def test_reviewed_dingtalk_reply_auto_mentions_original_group_trigger_sender(
         json.loads(line)
         for line in log_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert records[0]["argv"] == [
+    assert records[0]["argv"][:14] == [
         "dws",
         "chat",
         "message",
@@ -612,13 +617,23 @@ def test_reviewed_dingtalk_reply_auto_mentions_original_group_trigger_sender(
         "open-lily",
         "--text",
         "收到，我来处理。",
-        "--format",
-        "json",
-        "--yes",
     ]
+    assert records[0]["argv"][14] == "--uuid"
+    assert len(records[0]["argv"][15]) == 36
+    assert records[0]["argv"][16:] == ["--format", "json", "--yes"]
     # The receipt remains bound to the model-supplied argv; the adapter's
     # policy normalization is not a second, ambiguous operation.
     assert result["result"]["details"]["operationDigest"]
+    reply_receipt = result["result"]["details"]["receipt"]
+    assert reply_receipt == {
+        "resultIdentifiers": {"messageId": "reply-1"},
+        "processingStatus": "completed",
+        "deliveryStatus": "sent",
+        "idempotencyKey": reply_receipt["idempotencyKey"],
+        "deliveredText": "收到，我来处理。",
+    }
+    assert len(reply_receipt["idempotencyKey"]) == 36
+    assert len(list(receipt_dir.glob("*.json"))) == 1
 
 
 def test_reviewed_dingtalk_reply_does_not_mention_single_chat_sender(

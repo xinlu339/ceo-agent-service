@@ -69,8 +69,8 @@ def loopback_test_client(app) -> TestClient:
 def test_reply_task_error_text_explains_unreviewed_agent_write():
     message = _reply_task_error_text("agent_run_unknown")
 
-    assert "未通过审计确认" in message
-    assert "核对钉钉实际状态" in message
+    assert "回执暂未完整回传" in message
+    assert "暂停重复发送" in message
 
 
 def test_reply_task_error_text_explains_tool_budget():

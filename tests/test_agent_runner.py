@@ -14,9 +14,13 @@ from app.agent_runner import (
     AgentRunUnknownError,
     AgentRunUnavailableError,
     DirectAgentRunner,
+    DINGTALK_CALENDAR_PI_TOOLS,
+    DINGTALK_CALENDAR_READ_ONLY_PI_TOOLS,
+    DINGTALK_CALENDAR_TODO_PI_TOOLS,
     OA_PI_TOOLS,
     OA_READ_ONLY_PI_TOOLS,
     PI_TOOL_BUDGET_EXCEEDED,
+    PI_EXECUTION_RECEIPT_DIR_ENV,
     PUBLIC_INFO_PI_TOOLS,
     PUBLIC_INFO_READ_ONLY_PI_TOOLS,
     ReconciliationProof,
@@ -28,6 +32,10 @@ from app.agent_runner import (
 from app.process_runner import ProcessRunResult
 from app.store import AutoReplyStore
 from app.todo_routing import is_dingtalk_todo_create_intent
+from app.dingtalk_action_routing import (
+    is_dingtalk_calendar_create_intent,
+    is_dingtalk_calendar_todo_composite_intent,
+)
 
 
 def _task(store: AutoReplyStore):
@@ -682,6 +690,81 @@ class RecordingExecutor:
         )
 
 
+class InterruptedDingTalkReplyExecutor:
+    """Simulate DWS sending successfully before Pi loses its tool-end event."""
+
+    def __call__(self, command, *, prompt, on_stdout_line, **kwargs):
+        del command, prompt
+        argv = [
+            "dws",
+            "chat",
+            "message",
+            "reply",
+            "--conversation-id",
+            "cid",
+            "--ref-msg-id",
+            "mid",
+            "--ref-sender",
+            "sender-1",
+            "--text",
+            "收到，我来处理。",
+            "--format",
+            "json",
+            "--yes",
+        ]
+        digest = hashlib.sha256(
+            json.dumps(argv, ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest()
+        on_stdout_line(
+            json.dumps(
+                {
+                    "type": "tool_execution_start",
+                    "toolCallId": "reply-call-1",
+                    "toolName": "execute_reviewed_write",
+                    "args": {"argv": argv},
+                }
+            )
+        )
+        receipt_dir = Path(kwargs["env"][PI_EXECUTION_RECEIPT_DIR_ENV])
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        receipt_name = hashlib.sha256(b"reply-call-1").hexdigest() + ".json"
+        (receipt_dir / receipt_name).write_text(
+            json.dumps(
+                {
+                    "protocolVersion": 1,
+                    "toolCallId": "reply-call-1",
+                    "details": {
+                        "protocolVersion": 1,
+                        "cli": "dws",
+                        "effect": "write",
+                        "operation": "chat message reply",
+                        "operationDigest": digest,
+                        "targetIdentifiers": {
+                            "conversation-id": "cid",
+                            "ref-msg-id": "mid",
+                        },
+                        "exitCode": 0,
+                        "completed": True,
+                        "safeToConfirm": True,
+                        "receipt": {
+                            "resultIdentifiers": {"messageId": "reply-1"},
+                            "processingStatus": "completed",
+                            "deliveryStatus": "sent",
+                            "deliveredText": "收到，我来处理。",
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return ProcessRunResult(
+            returncode=1,
+            stdout="",
+            stderr="pi stream closed after DWS delivery",
+        )
+
+
 class SequenceExecutor:
     def __init__(self, outputs: list[str]) -> None:
         self.outputs = outputs
@@ -1098,6 +1181,33 @@ def test_confirmed_effect_does_not_become_unknown_when_pi_finalization_fails(
     error = json.loads(run.structured_error_json)
     assert error["code"] == "pi_finalization_failed_after_confirmed_effect"
     assert error["retryable"] is False
+
+
+def test_interrupted_dingtalk_reply_is_recovered_from_durable_receipt(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(
+        _context(task.id),
+        trigger_sender_open_dingtalk_id="sender-1",
+    )
+
+    result = DirectAgentRunner(
+        store=store,
+        workspace=tmp_path,
+        executor=InterruptedDingTalkReplyExecutor(),
+    ).run(task, context)
+
+    run = store.get_agent_run(result.run_id)
+    assert run is not None
+    assert run.status == "completed"
+    assert run.side_effect_state == "confirmed"
+    assert result.result.outcome is AgentOutcome.COMPLETED
+    assert "钉钉回复已送达" in result.result.summary
+    assert "收到，我来处理。" in result.result.summary
+    assert len(result.receipts) == 1
+    assert result.receipts[0].operation == "chat message reply"
 
 
 def test_direct_runner_persists_confirmed_pi_dws_write_and_receipt(
@@ -1532,6 +1642,93 @@ def test_direct_runner_does_not_claim_todo_created_without_receipt(
 
     assert result.result.outcome is AgentOutcome.NEEDS_HUMAN
     assert result.result.error.code == "todo_creation_not_executed"
+
+
+@pytest.mark.parametrize(
+    ("text", "calendar", "composite"),
+    [
+        ("帮我约一个会议，周五之前，并记一个待办", True, True),
+        ("创建日历+待办", True, True),
+        ("约日历会议 + 记待办", True, True),
+        ("日程：新增标注工具：视频时间段选择 PRD评审", False, False),
+        ("创建日历是不是还是不行", False, False),
+    ],
+)
+def test_calendar_action_routing_is_conservative(
+    text: str,
+    calendar: bool,
+    composite: bool,
+):
+    assert is_dingtalk_calendar_create_intent(text) is calendar
+    assert is_dingtalk_calendar_todo_composite_intent(text) is composite
+
+
+def test_direct_runner_scopes_calendar_todo_composite_to_business_tools(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(
+        _context(task.id),
+        trigger_text="帮我约一个会议，周五之前，并记一个待办",
+    )
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+    )
+
+    command = executor.commands[0]
+    tools = tuple(command[command.index("--tools") + 1].split(","))
+    assert tools == DINGTALK_CALENDAR_TODO_PI_TOOLS
+    assert "workspace_search" not in tools
+    assert "workspace_read" not in tools
+    assert "workspace_list" not in tools
+    assert "memory_recall" not in tools
+    system_prompt = command[command.index("--system-prompt") + 1]
+    assert "two explicit actions" in system_prompt
+    assert "Return completed only after both" in system_prompt
+
+
+def test_direct_runner_scopes_calendar_create_to_reviewed_dws_tools(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(_context(task.id), trigger_text="请帮我约一个产品评审会议")
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+    )
+
+    command = executor.commands[0]
+    tools = tuple(command[command.index("--tools") + 1].split(","))
+    assert tools == DINGTALK_CALENDAR_PI_TOOLS
+    assert "workspace_search" not in tools
+    assert "create_dingtalk_todo" not in tools
+
+
+def test_direct_runner_calendar_dry_run_exposes_only_read_tool(
+    tmp_path: Path,
+    store: AutoReplyStore,
+):
+    task = _task(store)
+    context = replace(_context(task.id), trigger_text="请帮我约一个产品评审会议")
+    executor = RecordingExecutor(_jsonl())
+
+    DirectAgentRunner(store=store, workspace=tmp_path, executor=executor).run(
+        task,
+        context,
+        read_only=True,
+    )
+
+    command = executor.commands[0]
+    tools = tuple(command[command.index("--tools") + 1].split(","))
+    assert tools == DINGTALK_CALENDAR_READ_ONLY_PI_TOOLS
+    assert "execute_reviewed_write" not in tools
 
 
 @pytest.mark.parametrize(

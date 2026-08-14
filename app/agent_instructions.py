@@ -53,6 +53,20 @@ DingTalk Todo intent routing
 - Never call memory_write or document_upload for a DingTalk Todo, and never use a Memory write as a fallback when the Todo command or its audit receipt fails.
 """.strip()
 
+DINGTALK_CALENDAR_ROUTING_INSTRUCTIONS = """
+DingTalk calendar and calendar+Todo routing
+
+- An explicit request to arrange or create a DingTalk calendar meeting is a
+  bounded business action. Resolve attendees with the reviewed DWS read
+  command, create with `dws calendar event create`, and verify the returned
+  event. Do not search the workspace or write Memory to fill in calendar
+  fields; ask one focused clarification when the date, time, title, or
+  attendee is genuinely ambiguous.
+- When the same trigger asks for both a calendar meeting and a Todo, complete
+  the calendar action first and the Todo second. Both actions need their own
+  verified receipt before reporting success.
+""".strip()
+
 
 def memory_connector_runtime_instructions() -> str:
     return (
@@ -77,6 +91,7 @@ def agent_developer_instructions() -> str:
         f"{DWS_MATERIAL_READING_INSTRUCTIONS}\n\n"
         f"{XIAOQING_INTERVIEW_READING_INSTRUCTIONS}\n\n"
         f"{DINGTALK_TODO_ROUTING_INSTRUCTIONS}\n\n"
+        f"{DINGTALK_CALENDAR_ROUTING_INSTRUCTIONS}\n\n"
         f"{ceo_agent_thread_prompt()}\n\n"
         f"{memory_connector_runtime_instructions()}"
     )

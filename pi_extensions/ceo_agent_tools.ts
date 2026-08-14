@@ -26,6 +26,7 @@ const MAX_DINGTALK_IMAGE_REQUEST_BYTES = 16 * 1024;
 const MAX_DINGTALK_IMAGE_RESPONSE_BYTES = 15 * 1024 * 1024;
 const DINGTALK_IMAGE_BRIDGE_TIMEOUT_MS = 150_000;
 const DINGTALK_TODO_TIMEOUT_MS = 120_000;
+const PI_EXECUTION_RECEIPT_DIR_ENV = "CEO_PI_EXECUTION_RECEIPT_DIR";
 const MAX_GRAPHIFY_VALUE_BYTES = 16 * 1024;
 const MAX_REVIEWED_IMAGE_BYTES = 10 * 1024 * 1024;
 const BLOCKED_COMMAND_SEGMENTS = new Set([
@@ -547,6 +548,118 @@ function withAutomaticReplyMention(argv: string[]): string[] {
 	const insertAt = textFlagIndex >= 0 ? textFlagIndex : rewritten.length;
 	rewritten.splice(insertAt, 0, "--at-open-dingtalk-ids", senderOpenDingTalkId);
 	return rewritten;
+}
+
+function argvFlagValue(argv: string[], flag: string): string {
+	const inlinePrefix = `${flag}=`;
+	for (let index = 1; index < argv.length; index += 1) {
+		if (argv[index].startsWith(inlinePrefix)) return argv[index].slice(inlinePrefix.length);
+		if (argv[index] === flag && index + 1 < argv.length && !argv[index + 1].startsWith("-")) {
+			return argv[index + 1];
+		}
+	}
+	return "";
+}
+
+function deterministicReplyUuid(operationDigest: string): string {
+	const hexadecimal = createHash("sha256")
+		.update(`ceo-agent-dingtalk-reply:${operationDigest}`)
+		.digest("hex")
+		.slice(0, 32)
+		.split("");
+	hexadecimal[12] = "5";
+	hexadecimal[16] = ((Number.parseInt(hexadecimal[16], 16) & 0x3) | 0x8).toString(16);
+	const joined = hexadecimal.join("");
+	return `${joined.slice(0, 8)}-${joined.slice(8, 12)}-${joined.slice(12, 16)}-${joined.slice(16, 20)}-${joined.slice(20)}`;
+}
+
+function withAutomaticReplyIdempotency(argv: string[], operationDigest: string): string[] {
+	if (
+		argv.slice(1, 4).join(" ") !== "chat message reply" ||
+		argvFlagValue(argv, "--uuid")
+	) return argv;
+	const rewritten = [...argv];
+	const formatIndex = rewritten.findIndex((value) => value === "--format");
+	const insertAt = formatIndex >= 0 ? formatIndex : rewritten.length;
+	rewritten.splice(insertAt, 0, "--uuid", deterministicReplyUuid(operationDigest));
+	return rewritten;
+}
+
+function normalizedNestedString(value: unknown, keys: string[]): string {
+	return findStringByKey(value, new Set(keys.map((key) => key.replaceAll("_", "").replaceAll("-", "").toLowerCase())));
+}
+
+async function dingtalkReplyReceipt(
+	stdout: string,
+	executionArgv: string[],
+	signal: AbortSignal,
+): Promise<Record<string, unknown>> {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(stdout);
+	} catch {
+		return {};
+	}
+	if (payload && typeof payload === "object" && (payload as Record<string, unknown>).success === false) {
+		return {};
+	}
+	const resultIdentifiers = structuredTargetIdentifiers(payload);
+	const messageId = normalizedNestedString(payload, ["openMessageId", "messageId", "msgId"]);
+	const openTaskId = normalizedNestedString(payload, ["openTaskId"]);
+	let deliveryStatus = messageId ? "sent" : "";
+	if (!deliveryStatus && openTaskId) {
+		try {
+			const statusResult = await execFileAsync(
+				executionArgv[0],
+				["chat", "message", "query-send-status", "--open-task-id", openTaskId, "--format", "json"],
+				{
+					env: safeChildEnvironment(),
+					timeout: COMMAND_TIMEOUT_MS,
+					maxBuffer: MAX_OUTPUT_BYTES,
+					signal,
+				},
+			);
+			const statusPayload = JSON.parse(statusResult.stdout || "{}");
+			const status = normalizedNestedString(statusPayload, ["status", "sendStatus", "taskStatus"]).toLowerCase();
+			if (
+				!(statusPayload && typeof statusPayload === "object" && (statusPayload as Record<string, unknown>).success === false) &&
+				new Set(["success", "succeeded", "sent", "finished"]).has(status)
+			) deliveryStatus = "sent";
+		} catch {
+			deliveryStatus = "";
+		}
+	}
+	if (!deliveryStatus || Object.keys(resultIdentifiers).length === 0) return {};
+	return {
+		resultIdentifiers,
+		processingStatus: "completed",
+		deliveryStatus,
+		idempotencyKey: argvFlagValue(executionArgv, "--uuid"),
+	};
+}
+
+async function persistReviewedWriteReceipt(
+	toolCallId: string,
+	details: Record<string, unknown>,
+): Promise<boolean> {
+	const configured = (process.env[PI_EXECUTION_RECEIPT_DIR_ENV] ?? "").trim();
+	if (!configured || !toolCallId || !path.isAbsolute(configured)) return false;
+	try {
+		const resolved = path.resolve(configured);
+		const real = await fs.realpath(resolved);
+		if (real !== resolved) return false;
+		const stat = await fs.lstat(real);
+		if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+		const filename = `${createHash("sha256").update(toolCallId).digest("hex")}.json`;
+		const target = path.join(real, filename);
+		const temporary = path.join(real, `.${filename}.${process.pid}.${Date.now()}.tmp`);
+		const encoded = JSON.stringify({ protocolVersion: RECEIPT_PROTOCOL_VERSION, toolCallId, details });
+		await fs.writeFile(temporary, encoded, { flag: "wx", mode: 0o600 });
+		await fs.rename(temporary, target);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function reviewedImageMimeType(data: Buffer): string | undefined {
@@ -1164,7 +1277,12 @@ function assertReviewedLarkCommand(
 	if (argv.includes("--dry-run")) throw new Error("reviewed_dry_run_is_not_execution_evidence");
 }
 
-async function executeReviewedDws(argv: string[], effect: "read" | "write", signal: AbortSignal) {
+async function executeReviewedDws(
+	argv: string[],
+	effect: "read" | "write",
+	signal: AbortSignal,
+	toolCallId = "",
+) {
 	validateArgv(argv);
 	const tools = await loadDwsMetadata();
 	const metadata = commandMetadata(argv, tools);
@@ -1178,6 +1296,10 @@ async function executeReviewedDws(argv: string[], effect: "read" | "write", sign
 		effect === "write" && metadata.cli_path === "chat message reply"
 			? withAutomaticReplyMention(originalArgv)
 			: originalArgv;
+	const operationDigest = commandDigest(originalArgv);
+	if (effect === "write" && metadata.cli_path === "chat message reply") {
+		executionArgv = withAutomaticReplyIdempotency(executionArgv, operationDigest);
+	}
 	if (imageDownload) {
 		imageTempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ceo-agent-pi-image-"));
 		imagePath = path.join(imageTempDir, "downloaded-image");
@@ -1214,22 +1336,45 @@ async function executeReviewedDws(argv: string[], effect: "read" | "write", sign
 				imageByteLength: image.byteLength,
 			};
 		}
+		let receipt: Record<string, unknown> = {};
+		let safeToConfirm = effect === "write";
+		if (effect === "write" && metadata.cli_path === "chat message reply") {
+			receipt = await dingtalkReplyReceipt(stdout, executionArgv, signal);
+			if (Object.keys(receipt).length > 0) {
+				receipt.deliveredText = argvFlagValue(originalArgv, "--text");
+			}
+			safeToConfirm = Object.keys(receipt).length > 0;
+		} else if (effect === "write" && stdout) {
+			try {
+				const resultIdentifiers = structuredTargetIdentifiers(JSON.parse(stdout));
+				if (Object.keys(resultIdentifiers).length > 0) {
+					receipt = { resultIdentifiers, processingStatus: "completed" };
+				}
+			} catch {
+				receipt = {};
+			}
+		}
+		const details: Record<string, unknown> = {
+			protocolVersion: RECEIPT_PROTOCOL_VERSION,
+			cli: "dws",
+			effect,
+			operation: metadata.cli_path,
+			operationDigest,
+			targetIdentifiers: targetIdentifiers(originalArgv),
+			resultDigest,
+			exitCode: 0,
+			completed: true,
+			safeToConfirm,
+			receipt,
+			stderr: stderr || undefined,
+			...imageDetails,
+		};
+		if (effect === "write" && safeToConfirm) {
+			await persistReviewedWriteReceipt(toolCallId, details);
+		}
 		return {
 			content,
-			details: {
-				protocolVersion: RECEIPT_PROTOCOL_VERSION,
-				cli: "dws",
-				effect,
-				operation: metadata.cli_path,
-				operationDigest: commandDigest(originalArgv),
-				targetIdentifiers: targetIdentifiers(originalArgv),
-				resultDigest,
-				exitCode: 0,
-				completed: true,
-				safeToConfirm: effect === "write",
-				stderr: stderr || undefined,
-				...imageDetails,
-			},
+			details,
 		};
 	} finally {
 		if (imageTempDir) await fs.rm(imageTempDir, { recursive: true, force: true });
@@ -1522,8 +1667,8 @@ export default function ceoAgentTools(pi: ExtensionAPI) {
 		label: "Reviewed DWS Write",
 		description: "Execute one non-destructive DWS write whose installed schema metadata explicitly marks it as write. Destructive and authentication commands are rejected.",
 		parameters: Type.Object({ argv: Type.Array(Type.String(), { minItems: 2, maxItems: MAX_ARG_COUNT }) }),
-		async execute(_toolCallId, params, signal) {
-			return executeReviewedDws(params.argv, "write", signal);
+		async execute(toolCallId, params, signal) {
+			return executeReviewedDws(params.argv, "write", signal, toolCallId);
 		},
 	});
 

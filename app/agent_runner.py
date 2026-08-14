@@ -45,6 +45,10 @@ from app.pi_runner import (
     selected_pi_thinking_level,
 )
 from app.store import AgentRun, AgentRunLeaseLostError, AutoReplyStore, ReplyTask
+from app.dingtalk_action_routing import (
+    is_dingtalk_calendar_create_intent,
+    is_dingtalk_calendar_todo_composite_intent,
+)
 from app.todo_routing import is_dingtalk_todo_create_intent, todo_create_tool_names
 
 
@@ -67,6 +71,7 @@ PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT = (
     "pi_finalization_failed_after_confirmed_effect"
 )
 PI_TOOL_BUDGET_EXCEEDED = "pi_tool_budget_exceeded"
+PI_EXECUTION_RECEIPT_DIR_ENV = "CEO_PI_EXECUTION_RECEIPT_DIR"
 
 # Public, time-sensitive questions should use the public web bridge directly.
 # They are deliberately kept out of the local-workspace retrieval path: the
@@ -109,6 +114,18 @@ OA_READ_ONLY_PI_TOOLS = (
     "download_dingtalk_image",
     "execute_reviewed_read",
 )
+DINGTALK_CALENDAR_PI_TOOLS = (
+    "execute_reviewed_read",
+    "execute_reviewed_write",
+)
+DINGTALK_CALENDAR_READ_ONLY_PI_TOOLS = (
+    "execute_reviewed_read",
+)
+DINGTALK_CALENDAR_TODO_PI_TOOLS = (
+    "execute_reviewed_read",
+    "execute_reviewed_write",
+    "create_dingtalk_todo",
+)
 DEFAULT_OA_APPROVAL_RULES_PATH = (
     SERVICE_ROOT / "app" / "defaults" / "oa_approval_rules.md"
 )
@@ -126,6 +143,8 @@ DIRECT_AGENT_DEVELOPER_INSTRUCTIONS = """You are the Direct Agent for one queued
 - Use raw identifiers, references, exact read commands, and live tool results. Do not rely on service-side target assumptions.
 - Complete authorized work only through the installed reviewed Pi tools. Use workspace_read/workspace_search/workspace_list for local evidence, graphify_read for the installed read-only Graphify query/explain/path operations, download_dingtalk_image for DingTalk robot image download codes, execute_reviewed_read/execute_reviewed_write for reviewed DWS operations, execute_reviewed_lark_read/execute_reviewed_lark_write for reviewed Lark operations, the explicitly registered Memory tools for Friday Memory, Exa for public web reads, and Xiaoqing tools for reviewed interview operations when configured. Arbitrary bash, edit, write, authentication, package installation, destructive commands, and unregistered MCP capabilities are unavailable. Do not produce plans, action arrays, or requests for service execution.
 - DingTalk TODO intent has priority over Memory. Phrases such as “记一个待办”, “创建待办”, “TODO”, “截止日期”, “周五前完成”, or “帮我记一下任务” mean that the requested side effect is a DingTalk Todo. Read the installed dingtalk-todo skill when needed, then use execute_reviewed_write with the exact reviewed DWS command `dws todo task create` (including the resolved title, executor, due time, and priority). Do not call memory_write or document_upload for a Todo request. If the due time or executor cannot be resolved reliably, return needs_human and ask one focused clarification instead of writing Memory.
+- An explicit request to arrange/create a DingTalk calendar meeting is a short business-action workflow. When the service exposes the calendar action tools, read the dingtalk-calendar skill, resolve each named attendee with `execute_reviewed_read` and `dws aisearch person`, create with `execute_reviewed_write` and `dws calendar event create`, then verify the returned event with a focused calendar read. Never use workspace_read, workspace_search, workspace_list, Memory, Graphify, or web search for this workflow. If the date, time, title, or attendee is genuinely ambiguous, return needs_human instead of searching for unrelated context.
+- When one trigger asks for both a calendar meeting and a DingTalk Todo, complete the two explicit actions in order (calendar first, Todo second), using only the exposed calendar/read/write and create_dingtalk_todo tools. Do not replace either action with a Memory write, do not repeat equivalent searches, and do not report completed until both actions have a confirmed receipt.
 - Ordinary DingTalk reply tasks must not write Friday Memory or upload documents to it. The Direct Agent does not expose memory_write/document_upload for these tasks; use Memory read tools only when historical evidence is actually needed. A Memory write is never a fallback for a failed or ambiguous business-tool action.
 - Retrieval must converge. For an open-ended status or history question, use one focused evidence path first, do not repeatedly search the same workspace, and stop with a factual partial answer when the available evidence is insufficient. The service enforces a per-run tool budget; never try to work around it by repeating equivalent searches.
 - If the original trigger is a DingTalk calendar/schedule notification and does not explicitly ask to accept, decline, reschedule, check conflicts, or perform another calendar action, return no_action after the supplied calendar evidence. Do not search Memory or the workspace for a passive calendar notification.
@@ -413,6 +432,7 @@ class DirectAgentRunner:
         context: AgentTaskContext,
         *,
         allow_group_reply_mention: bool,
+        execution_receipt_dir: Path | None = None,
     ) -> dict[str, str]:
         env = self.pi.build_env(preserve_local_cli_auth=True)
         if (
@@ -436,7 +456,67 @@ class DirectAgentRunner:
             )
         else:
             env.pop(PI_TODO_TRIGGER_SENDER_USER_ID_ENV, None)
+        if execution_receipt_dir is not None:
+            env[PI_EXECUTION_RECEIPT_DIR_ENV] = str(execution_receipt_dir)
+        else:
+            env.pop(PI_EXECUTION_RECEIPT_DIR_ENV, None)
         return env
+
+    def _execution_receipt_dir(self, run_id: int) -> Path:
+        root = (self.store.path.parent / "pi-execution-receipts").resolve()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        run_dir = root / f"run-{run_id}"
+        if run_dir.exists() and run_dir.is_symlink():
+            raise RuntimeError("pi_execution_receipt_dir_symlink")
+        run_dir.mkdir(exist_ok=True, mode=0o700)
+        return run_dir
+
+    @staticmethod
+    def _cleanup_execution_receipt_dir(receipt_dir: Path) -> None:
+        try:
+            for entry in receipt_dir.iterdir():
+                if entry.is_file() and not entry.is_symlink():
+                    entry.unlink()
+            receipt_dir.rmdir()
+        except (FileNotFoundError, OSError):
+            # A missing or concurrently cleaned runtime receipt is harmless.
+            return
+
+    def _completed_after_confirmed_dingtalk_reply(
+        self,
+        run: AgentRun,
+    ) -> AgentResult | None:
+        effectful: list[dict[str, object]] = []
+        for event in run.tool_events:
+            if event.get("type") != "item.completed":
+                continue
+            item = event.get("item")
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if (
+                metadata.get("effect") == EffectKind.EFFECTFUL.value
+                and metadata.get("operation") == "chat message reply"
+            ):
+                effectful.append(metadata)
+        if len(effectful) != 1:
+            return None
+        confirmation = effectful[0].get("reviewed_confirmation")
+        if not isinstance(confirmation, dict) or confirmation.get("safe_to_confirm") is not True:
+            return None
+        receipt = confirmation.get("receipt")
+        if not isinstance(receipt, dict):
+            return None
+        delivered_text = receipt.get("delivered_text")
+        if not isinstance(delivered_text, str) or not delivered_text.strip():
+            return None
+        return AgentResult(
+            outcome=AgentOutcome.COMPLETED,
+            summary=f"钉钉回复已送达：{delivered_text.strip()}",
+            error=AgentError(),
+        )
 
     @staticmethod
     def _thinking_level_for_context(
@@ -519,6 +599,9 @@ class DirectAgentRunner:
                 f"agent run is not available for task generation: {task.id}"
             )
         run = claim.run
+        execution_receipt_dir = (
+            self._execution_receipt_dir(run.id) if not read_only else None
+        )
         run_started_monotonic = time.monotonic()
         session_id = (
             run.agent_session_id
@@ -546,9 +629,20 @@ class DirectAgentRunner:
         )
         oa_context = is_dingtalk_oa_context(context)
         public_live_info = is_public_live_info_context(context)
+        calendar_create_intent = (
+            context.channel == "dingtalk"
+            and is_dingtalk_calendar_create_intent(context.trigger_text)
+        )
+        calendar_todo_composite_intent = (
+            context.channel == "dingtalk"
+            and is_dingtalk_calendar_todo_composite_intent(context.trigger_text)
+        )
         todo_create_intent = (
             context.channel == "dingtalk"
-            and is_dingtalk_todo_create_intent(context.trigger_text)
+            and (
+                is_dingtalk_todo_create_intent(context.trigger_text)
+                or calendar_todo_composite_intent
+            )
         )
         tool_names = todo_create_tool_names(
             read_only=read_only,
@@ -587,6 +681,51 @@ class DirectAgentRunner:
                 + approval_rules
                 + "\n</oa_approval_rules>"
             )
+        elif calendar_create_intent:
+            # Calendar creation is an explicit business action, not an
+            # evidence-gathering question. Keep workspace and Memory tools out
+            # of the invocation so a calendar+todo request cannot wander
+            # through workspace_search until the global budget is exhausted.
+            if read_only:
+                tool_names = DINGTALK_CALENDAR_READ_ONLY_PI_TOOLS
+            elif calendar_todo_composite_intent:
+                tool_names = DINGTALK_CALENDAR_TODO_PI_TOOLS
+            else:
+                tool_names = DINGTALK_CALENDAR_PI_TOOLS
+            if read_only:
+                developer_instructions += (
+                    "\n\nThis is an explicit DingTalk calendar action in a "
+                    "read-only dry-run. Do not create or modify a calendar or "
+                    "Todo, and do not claim that either action was completed. "
+                    "Use only focused calendar reads if needed to validate the "
+                    "request; do not search the workspace or Memory."
+                )
+            elif calendar_todo_composite_intent:
+                developer_instructions += (
+                    "\n\nThis trigger explicitly requests both a DingTalk "
+                    "calendar meeting and a Todo. This is a bounded two-step "
+                    "business workflow. First resolve attendees and create the "
+                    "calendar event with execute_reviewed_read/"
+                    "execute_reviewed_write using the exact reviewed commands "
+                    "from dingtalk-calendar; verify the event. Then call "
+                    "create_dingtalk_todo once for the Todo and rely on its "
+                    "readback receipt. Do not call workspace_read, "
+                    "workspace_search, workspace_list, Memory, Graphify, web "
+                    "search, or any other tool. If a required date, time, title, "
+                    "or attendee is ambiguous, return needs_human before any "
+                    "write rather than broadening retrieval. Return completed "
+                    "only after both the calendar and Todo receipts are present."
+                )
+            else:
+                developer_instructions += (
+                    "\n\nThis trigger explicitly requests a DingTalk "
+                    "calendar action. Use only execute_reviewed_read and "
+                    "execute_reviewed_write with the exact dingtalk-calendar "
+                    "SOP: resolve attendees, create the event, and perform a "
+                    "focused read-back. Do not call workspace, Memory, "
+                    "Graphify, web, or unrelated tools. If a required field is "
+                    "ambiguous, return needs_human instead of searching."
+                )
         elif todo_create_intent and not read_only:
             # A Todo request is deliberately a capability-scoped invocation.
             # The model may fill in natural-language fields, but it cannot
@@ -644,7 +783,8 @@ class DirectAgentRunner:
         )
         logger.info(
             "pi_agent_run_started task_id=%s run_id=%s thinking=%s read_only=%s "
-            "session_reused=%s public_live_info=%s oa_context=%s",
+            "session_reused=%s public_live_info=%s oa_context=%s "
+            "calendar_create=%s calendar_todo_composite=%s",
             task.id,
             run.id,
             thinking_level,
@@ -652,6 +792,8 @@ class DirectAgentRunner:
             bool(session_id),
             public_live_info,
             oa_context,
+            calendar_create_intent,
+            calendar_todo_composite_intent,
         )
         saw_json = False
         stream_line_count = 0
@@ -776,6 +918,7 @@ class DirectAgentRunner:
                     env=self._build_agent_environment(
                         context,
                         allow_group_reply_mention=False,
+                        execution_receipt_dir=execution_receipt_dir,
                     ),
                     total_timeout_seconds=min(self.total_timeout_seconds, 120),
                     idle_timeout_seconds=min(self.idle_timeout_seconds, 60),
@@ -797,6 +940,27 @@ class DirectAgentRunner:
             except (ResultParseError, ValueError):
                 return None
 
+        def recovered_run_result() -> DirectAgentRunResult | None:
+            persisted_run = self.store.get_agent_run(run.id)
+            if persisted_run is None or persisted_run.status != "completed":
+                return None
+            if not persisted_run.final_result_json:
+                return None
+            try:
+                recovered = AgentResult.model_validate_json(
+                    persisted_run.final_result_json
+                )
+            except (ValidationError, ValueError):
+                return None
+            return DirectAgentRunResult(
+                run_id=run.id,
+                result=recovered,
+                transcript_start_line=transcript_start_line,
+                transcript_end_line=persisted_run.transcript_end_line,
+                events=tuple(persisted_run.tool_events),
+                receipts=_execution_receipts_for_run(self.store, run.id),
+            )
+
         try:
             process = self.executor(
                 command,
@@ -804,43 +968,60 @@ class DirectAgentRunner:
                 env=self._build_agent_environment(
                     context,
                     allow_group_reply_mention=not read_only,
+                    execution_receipt_dir=execution_receipt_dir,
                 ),
                 total_timeout_seconds=self.total_timeout_seconds,
                 idle_timeout_seconds=self.idle_timeout_seconds,
                 on_stdout_line=persist_line,
             )
         except AgentReadOnlyViolationError as exc:
-            self._record_failure(run.id, str(exc), now=now)
+            recovered = self._record_failure(run.id, str(exc), now=now)
+            if recovered is not None:
+                completed = recovered_run_result()
+                if completed is not None:
+                    return completed
             raise
         except AgentRunLeaseLostError:
             raise
         except AgentStreamError as exc:
-            self._record_failure(
+            recovered = self._record_failure(
                 run.id,
                 "pi_stream_invalid",
                 now=now,
             )
+            if recovered is not None:
+                completed = recovered_run_result()
+                if completed is not None:
+                    return completed
             if self.store.get_agent_run(run.id).status == "unknown":
                 raise AgentRunUnknownError("pi_stream_invalid", run.id) from exc
             raise RuntimeError("pi_stream_invalid") from exc
         except AgentToolBudgetExceeded as exc:
-            self._record_failure(
+            recovered = self._record_failure(
                 run.id,
                 PI_TOOL_BUDGET_EXCEEDED,
                 detail=str(exc),
                 retryable=False,
                 now=now,
             )
+            if recovered is not None:
+                completed = recovered_run_result()
+                if completed is not None:
+                    return completed
             if self.store.get_agent_run(run.id).status == "unknown":
                 raise AgentRunUnknownError(PI_TOOL_BUDGET_EXCEEDED, run.id) from exc
             raise RuntimeError(PI_TOOL_BUDGET_EXCEEDED) from exc
         except Exception as exc:
-            self._record_failure(
+            recovered = self._record_failure(
                 run.id,
                 "pi_process_failed",
                 detail=safe_observability_error(str(exc)),
                 now=now,
             )
+            if recovered is not None:
+                completed = recovered_run_result()
+                if completed is not None:
+                    return completed
             if self.store.get_agent_run(run.id).status == "unknown":
                 raise AgentRunUnknownError("pi_process_failed", run.id) from exc
             raise RuntimeError("pi_process_failed") from exc
@@ -857,33 +1038,45 @@ class DirectAgentRunner:
         )
 
         if process.timed_out:
-            self._record_failure(
+            recovered = self._record_failure(
                 run.id,
                 "pi_process_timeout",
                 now=now,
             )
+            if recovered is not None:
+                completed = recovered_run_result()
+                if completed is not None:
+                    return completed
             if self.store.get_agent_run(run.id).status == "unknown":
                 raise AgentRunUnknownError("pi_process_timeout", run.id)
             raise RuntimeError("pi_process_timeout")
         if process.returncode != 0:
-            self._record_failure(
+            recovered = self._record_failure(
                 run.id,
                 "pi_process_failed",
                 detail=_process_failure_detail(process.stderr),
                 now=now,
             )
+            if recovered is not None:
+                completed = recovered_run_result()
+                if completed is not None:
+                    return completed
             if self.store.get_agent_run(run.id).status == "unknown":
                 raise AgentRunUnknownError("pi_process_failed", run.id)
             raise RuntimeError("pi_process_failed")
         pi_failure = pi_process_failure_reason(process.stdout, process.stderr)
         if pi_failure:
             code = pi_failure.partition(":")[0]
-            self._record_failure(
+            recovered = self._record_failure(
                 run.id,
                 code,
                 detail=pi_failure,
                 now=now,
             )
+            if recovered is not None:
+                completed = recovered_run_result()
+                if completed is not None:
+                    return completed
             if self.store.get_agent_run(run.id).status == "unknown":
                 raise AgentRunUnknownError(code, run.id)
             raise RuntimeError(code)
@@ -903,29 +1096,56 @@ class DirectAgentRunner:
                 result is not None,
             )
             if result is None:
-                self._record_failure(
+                recovered = self._record_failure(
                     run.id,
                     "pi_result_invalid",
                     now=now,
                 )
+                if recovered is not None:
+                    completed = recovered_run_result()
+                    if completed is not None:
+                        return completed
                 if self.store.get_agent_run(run.id).status == "unknown":
                     raise AgentRunUnknownError(
                         "pi_result_invalid", run.id
                     ) from exc
                 raise RuntimeError("pi_result_invalid") from exc
 
-        if todo_create_intent and result.outcome is AgentOutcome.COMPLETED:
-            if not _has_confirmed_todo_creation(run_result_events := tuple(
-                self.store.get_agent_run(run.id).tool_events
-            )):
-                result = AgentResult(
-                    outcome=AgentOutcome.NEEDS_HUMAN,
-                    summary=(
+        run_result_events = tuple(self.store.get_agent_run(run.id).tool_events)
+        if result.outcome is AgentOutcome.COMPLETED:
+            missing_actions: list[str] = []
+            if todo_create_intent and not _has_confirmed_todo_creation(
+                run_result_events
+            ):
+                missing_actions.append("todo")
+            if calendar_create_intent and not _has_confirmed_calendar_creation(
+                run_result_events
+            ):
+                missing_actions.append("calendar")
+            if missing_actions:
+                if missing_actions == ["todo"]:
+                    code = "todo_creation_not_executed"
+                    summary = (
                         "待办请求尚未执行钉钉待办创建，也没有可核验的创建回执；"
                         "未把它写入长期记忆。"
-                    ),
+                    )
+                elif missing_actions == ["calendar"]:
+                    code = "calendar_creation_not_executed"
+                    summary = (
+                        "日历请求尚未执行钉钉日历创建，或没有可核验的日历回执；"
+                        "未把它当作普通 workspace 任务继续检索。"
+                    )
+                else:
+                    code = "calendar_todo_creation_incomplete"
+                    summary = (
+                        "日历和待办是两个独立动作，但至少一个没有可核验的创建回执；"
+                        "未把缺失动作改写成 Memory 或其他副作用。"
+                    )
+                result = AgentResult(
+                    outcome=AgentOutcome.NEEDS_HUMAN,
+                    summary=summary,
                     error=AgentError(
-                        code="todo_creation_not_executed",
+                        code=code,
                         retryable=False,
                         authorization_required=False,
                     ),
@@ -941,6 +1161,11 @@ class DirectAgentRunner:
         persisted = self.store.get_agent_run(run.id)
         if persisted is None:
             raise RuntimeError("agent run was not persisted")
+        if not read_only:
+            self._recover_pi_execution_receipts(run.id, now=now)
+            persisted = self.store.get_agent_run(run.id)
+            if persisted is None:
+                raise RuntimeError("agent run was not persisted")
         if persisted.side_effect_state not in {
             SideEffectState.NONE.value,
             SideEffectState.CONFIRMED.value,
@@ -957,19 +1182,23 @@ class DirectAgentRunner:
             result.outcome is AgentOutcome.FAILED
             and persisted.side_effect_state == SideEffectState.CONFIRMED.value
         ):
-            self.store.fail_agent_run(
-                run.id,
-                {
-                    "code": PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT,
-                    "retryable": False,
-                    "original_code": "pi_result_failed_after_effect",
-                },
-                owner=self.owner,
-                side_effect_state=SideEffectState.CONFIRMED.value,
-                transcript_end_line=transcript_end_line,
-                now=now,
-            )
-            raise RuntimeError(PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT)
+            recovered_result = self._completed_after_confirmed_dingtalk_reply(persisted)
+            if recovered_result is not None:
+                result = recovered_result
+            else:
+                self.store.fail_agent_run(
+                    run.id,
+                    {
+                        "code": PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT,
+                        "retryable": False,
+                        "original_code": "pi_result_failed_after_effect",
+                    },
+                    owner=self.owner,
+                    side_effect_state=SideEffectState.CONFIRMED.value,
+                    transcript_end_line=transcript_end_line,
+                    now=now,
+                )
+                raise RuntimeError(PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT)
         if result.outcome is AgentOutcome.FAILED:
             self.store.fail_agent_run(
                 run.id,
@@ -1001,6 +1230,8 @@ class DirectAgentRunner:
             tool_call_count,
             max(0, completed_run.transcript_end_line - transcript_start_line),
         )
+        if execution_receipt_dir is not None:
+            self._cleanup_execution_receipt_dir(execution_receipt_dir)
         return DirectAgentRunResult(
             run_id=run.id,
             result=result,
@@ -1166,12 +1397,29 @@ class DirectAgentRunner:
         detail: str = "",
         retryable: bool = True,
         now: str | None,
-    ) -> None:
+    ) -> AgentResult | None:
         persisted = self.store.get_agent_run(run_id)
         if persisted is None:
             raise RuntimeError("agent run was not persisted")
         if persisted.status != "running":
-            return
+            return None
+        self._recover_pi_execution_receipts(run_id, now=now)
+        persisted = self.store.get_agent_run(run_id)
+        if persisted is None:
+            raise RuntimeError("agent run was not persisted")
+        if persisted.side_effect_state == SideEffectState.CONFIRMED.value:
+            recovered_result = self._completed_after_confirmed_dingtalk_reply(persisted)
+            if recovered_result is not None:
+                self.store.complete_agent_run(
+                    run_id,
+                    recovered_result.model_dump(mode="json"),
+                    owner=self.owner,
+                    side_effect_state=SideEffectState.CONFIRMED.value,
+                    transcript_end_line=persisted.transcript_end_line,
+                    now=now,
+                )
+                self._cleanup_execution_receipt_dir(self._execution_receipt_dir(run_id))
+                return recovered_result
         error: dict[str, object] = {"code": code, "retryable": retryable}
         if detail:
             error["detail"] = safe_observability_error(detail)
@@ -1215,6 +1463,114 @@ class DirectAgentRunner:
                 side_effect_state=SideEffectState.NONE.value,
                 now=now,
             )
+        terminal = self.store.get_agent_run(run_id)
+        if terminal is not None and terminal.status != "unknown":
+            self._cleanup_execution_receipt_dir(self._execution_receipt_dir(run_id))
+        return None
+
+    def _recover_pi_execution_receipts(
+        self,
+        run_id: int,
+        *,
+        now: str | None,
+    ) -> int:
+        """Recover a DWS write that completed before Pi emitted tool_execution_end.
+
+        The Pi extension writes a small, per-run receipt before returning the
+        reviewed DWS result.  If the provider/stream dies immediately after the
+        external write, this side channel is the only durable evidence that the
+        service can use without replaying the operation.
+        """
+
+        persisted = self.store.get_agent_run(run_id)
+        if persisted is None or persisted.status != "running":
+            return 0
+        receipt_dir = self._execution_receipt_dir(run_id)
+        started: dict[str, dict[str, object]] = {}
+        closed: set[str] = set()
+        for event in persisted.tool_events:
+            item = event.get("item")
+            if not isinstance(item, dict):
+                continue
+            call_id = str(item.get("id") or "").strip()
+            if not call_id:
+                continue
+            if event.get("type") == "item.started":
+                metadata = item.get("metadata")
+                if isinstance(metadata, dict):
+                    started[call_id] = metadata
+            elif event.get("type") in {"item.completed", "item.failed"}:
+                metadata = item.get("metadata")
+                confirmation = metadata.get("reviewed_confirmation") if isinstance(metadata, dict) else None
+                if (
+                    isinstance(confirmation, dict)
+                    and confirmation.get("completed") is True
+                    and confirmation.get("safe_to_confirm") is True
+                ):
+                    closed.add(call_id)
+        recovered = 0
+        try:
+            entries = sorted(receipt_dir.iterdir(), key=lambda item: item.name)
+        except OSError:
+            return 0
+        for entry in entries[:64]:
+            if not entry.is_file() or entry.is_symlink() or entry.stat().st_size > 2 * 1024 * 1024:
+                continue
+            try:
+                payload = json.loads(entry.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("protocolVersion") != 1:
+                continue
+            call_id = str(payload.get("toolCallId") or "").strip()
+            details = payload.get("details")
+            metadata = started.get(call_id)
+            if not call_id or call_id in closed or not isinstance(details, dict) or not isinstance(metadata, dict):
+                continue
+            confirmation, issue = _pi_reviewed_write_confirmation(
+                {"details": details}, metadata=metadata
+            )
+            if confirmation is None:
+                logger.warning(
+                    "pi_execution_receipt_rejected run_id=%s call_id=%s issue=%s",
+                    run_id,
+                    call_id,
+                    issue,
+                )
+                continue
+            completed_metadata = dict(metadata)
+            completed_metadata["reviewed_confirmation"] = confirmation
+            completed_metadata["sidecar_recovered"] = True
+            event = {
+                "type": "item.completed",
+                "item": {
+                    "id": call_id,
+                    "type": "command_execution",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "metadata": completed_metadata,
+                },
+            }
+            self.store.append_agent_run_event(
+                run_id,
+                event,
+                owner=self.owner,
+                now=now,
+            )
+            _persist_pi_execution_receipt(
+                self.store,
+                run_id=run_id,
+                event=event,
+                owner=self.owner,
+                now=now,
+            )
+            closed.add(call_id)
+            recovered += 1
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+        return recovered
 
 def unknown_effect_reference(
     events: list[dict[str, object]] | tuple[dict[str, object], ...],
@@ -1783,6 +2139,32 @@ def _has_confirmed_todo_creation(events: tuple[dict[str, object], ...]) -> bool:
     return False
 
 
+def _has_confirmed_calendar_creation(
+    events: tuple[dict[str, object], ...],
+) -> bool:
+    """Return whether a reviewed calendar-event write has a safe receipt."""
+
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        confirmation = metadata.get("reviewed_confirmation")
+        if (
+            metadata.get("operation") == "calendar event create"
+            and metadata.get("native_cli") == "dws"
+            and isinstance(confirmation, dict)
+            and confirmation.get("completed") is True
+            and confirmation.get("safe_to_confirm") is True
+        ):
+            return True
+    return False
+
+
 def _pi_nested_tool_arguments(arguments: object) -> object:
     if isinstance(arguments, dict) and isinstance(
         arguments.get("arguments"), dict
@@ -1899,6 +2281,20 @@ def _pi_reviewed_write_confirmation(
         return None, "pi_write_receipt_incomplete"
     if details.get("safeToConfirm") is not True:
         return None, "pi_write_receipt_not_confirmable"
+    receipt = details.get("receipt")
+    if details.get("operation") == "chat message reply":
+        if not isinstance(receipt, dict):
+            return None, "pi_chat_reply_receipt_missing"
+        if receipt.get("processingStatus") != "completed":
+            return None, "pi_chat_reply_delivery_incomplete"
+        result_identifiers = receipt.get("resultIdentifiers")
+        if not isinstance(result_identifiers, dict) or not result_identifiers:
+            return None, "pi_chat_reply_message_id_missing"
+        if receipt.get("deliveryStatus") != "sent":
+            return None, "pi_chat_reply_delivery_unconfirmed"
+        delivered_text = receipt.get("deliveredText")
+        if not isinstance(delivered_text, str) or not delivered_text.strip():
+            return None, "pi_chat_reply_text_missing"
     return (
         {
             "protocol_version": 1,
@@ -1907,6 +2303,22 @@ def _pi_reviewed_write_confirmation(
             "target_identifiers": targets,
             "completed": True,
             "safe_to_confirm": True,
+            **(
+                {
+                    "receipt": {
+                        "processing_status": "completed",
+                        "delivery_status": "sent",
+                        "delivered_text": receipt["deliveredText"],
+                        "result_identifiers": {
+                            str(key): str(value)
+                            for key, value in receipt["resultIdentifiers"].items()
+                            if isinstance(key, str) and isinstance(value, str)
+                        },
+                    }
+                }
+                if details.get("operation") == "chat message reply"
+                else {}
+            ),
         },
         "",
     )

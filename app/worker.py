@@ -1518,6 +1518,13 @@ class DingTalkAutoReplyWorker:
         self._pass_channel_results = {}
         limit = max_tasks if max_tasks is not None else 50
         processed_tasks = 0
+        try:
+            # Keep an uncertain generation alive until a read-only check proves
+            # whether the external write happened; never turn it into a normal
+            # failed send that can be duplicated by retry.
+            self.reconcile_unknown_agent_runs(limit=min(limit, 50))
+        except Exception as exc:
+            self.store.record_error("", "", "agent_reconciliation_loop", str(exc))
         self._recover_stale_agent_reply_tasks()
         claimed_tasks = 0
         scan_now = self._sqlite_timestamp(self._now())
@@ -1570,6 +1577,15 @@ class DingTalkAutoReplyWorker:
                     task.id,
                     task.execution_generation,
                 )
+                if persisted_run is not None and persisted_run.status == "unknown":
+                    # Keep the generation alive for read-only reconciliation;
+                    # an interrupted Pi stream is not a failed DingTalk send.
+                    self._apply_unknown_agent_run(
+                        task,
+                        persisted_run,
+                        "agent_run_unknown",
+                    )
+                    continue
                 persisted_error: dict[str, object] = {}
                 if persisted_run is not None and persisted_run.status == "failed":
                     try:
@@ -1742,11 +1758,7 @@ class DingTalkAutoReplyWorker:
                     ),
                 )
             if run.status == "unknown":
-                self.store.fail_reply_task(
-                    task.id,
-                    "agent_run_unknown",
-                    expected_execution_generation=task.execution_generation,
-                )
+                self._apply_unknown_agent_run(task, run, "agent_run_unknown")
                 continue
             if run.status == "completed" and run.final_result_json:
                 payload = json.loads(run.final_result_json)
@@ -2319,10 +2331,10 @@ class DingTalkAutoReplyWorker:
                 except AgentRunLeaseLostError:
                     return False
             if existing_run.status == "unknown":
-                self._record_agent_runtime_failure_attempt(
+                self._apply_unknown_agent_run(
                     task,
+                    existing_run,
                     "agent_run_unknown",
-                    retryable=False,
                 )
                 return False
             if existing_run.status == "failed":
