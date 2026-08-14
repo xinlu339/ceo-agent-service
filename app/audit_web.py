@@ -178,6 +178,9 @@ from app.user_prompt_blocks import USER_PROMPT_BLOCKS, UserPromptBlock
 DISPLAY_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 AUDIT_WEB_SQLITE_BUSY_TIMEOUT_SECONDS = 2
 USER_FEEDBACK_SYNC_BATCH_LIMIT = 5
+AGENT_VERIFICATION_PENDING_ERRORS = frozenset(
+    {"agent_run_unknown", "pi_unreviewed_tool_effect"}
+)
 USER_FEEDBACK_SYNC_TIMEOUT_SECONDS = 0.5
 USER_FEEDBACK_SYNC_LIMIT_PER_TOKEN = 5
 DINGTALK_SERVICE_LABEL = "com.ceo-agent-service.main"
@@ -3676,7 +3679,16 @@ def _parse_utc_timestamp(value: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _attempt_waiting_for_agent_verification(attempt: ReplyAttempt) -> bool:
+    return (
+        attempt.send_status.strip().lower() in {"failed", "blocked"}
+        and attempt.send_error.strip().lower() in AGENT_VERIFICATION_PENDING_ERRORS
+    )
+
+
 def _history_event_label(attempt: ReplyAttempt) -> str:
+    if _attempt_waiting_for_agent_verification(attempt):
+        return "⏳ Awaiting verification"
     if (
         attempt.send_error.strip()
         == PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT
@@ -7028,6 +7040,13 @@ def _operation_log_field(label: str, value: str) -> str:
 
 
 def _operation_log_status(store: AutoReplyStore, log: OperationLog) -> str:
+    if (
+        log.source_table in {"reply_attempts", "reply_tasks"}
+        and log.detail.strip().lower() in AGENT_VERIFICATION_PENDING_ERRORS
+        and log.status.strip().lower()
+        in {"failed", "blocked", "processing", "pending"}
+    ):
+        return "awaiting verification"
     if log.source_table != "errors":
         return log.status
     error = ReplyError(
@@ -8527,12 +8546,17 @@ def _attempt_detail_body(
     feedback_events: list[FeedbackEvent],
     later_attempt: ReplyAttempt | None = None,
 ) -> str:
+    display_send_status = (
+        "awaiting verification"
+        if _attempt_waiting_for_agent_verification(attempt)
+        else attempt.send_status
+    )
     fields = [
         ("trigger message id", attempt.trigger_message_id),
         ("action", attempt.action),
         ("sensitivity", attempt.sensitivity_kind),
         ("permission", _permission_display(attempt)),
-        ("send status", attempt.send_status),
+        ("send status", display_send_status),
         ("send error", attempt.send_error),
         ("retry count", str(attempt.retry_count)),
         ("created", _format_local_time(attempt.created_at)),
@@ -9122,6 +9146,8 @@ def _display_action_state(value: str) -> str:
 
 def _send_status_action(attempt: ReplyAttempt) -> tuple[str, str]:
     send_status = attempt.send_status
+    if _attempt_waiting_for_agent_verification(attempt):
+        return "⏳ Awaiting verification", "awaiting_verification"
     if (
         attempt.send_error.strip()
         == PI_FINALIZATION_FAILED_AFTER_CONFIRMED_EFFECT

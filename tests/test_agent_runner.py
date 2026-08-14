@@ -28,6 +28,7 @@ from app.agent_runner import (
     direct_agent_developer_instructions,
     is_dingtalk_oa_context,
     is_public_live_info_context,
+    unknown_effect_reference,
 )
 from app.process_runner import ProcessRunResult
 from app.store import AutoReplyStore
@@ -1484,6 +1485,79 @@ def test_pi_reconciliation_accepts_reviewed_lark_live_read(
         observed_state="effect_present"
     )
     assert result.events[0]["item"]["metadata"]["native_cli"] == "lark-cli"
+
+
+def test_unknown_effect_reference_accepts_completed_reviewed_write_with_missing_receipt():
+    metadata = {
+        "effect": "unreviewed",
+        "native_cli": "dws",
+        "operation": "todo task done",
+        "command_digest": "a" * 64,
+        "target_identifiers": {"task-id": "todo-123"},
+    }
+    reference = unknown_effect_reference(
+        [
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "write-1",
+                    "type": "command_execution",
+                    "metadata": {
+                        **metadata,
+                        "effect": "effectful",
+                    },
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "write-1",
+                    "type": "command_execution",
+                    "metadata": metadata,
+                },
+            },
+        ]
+    )
+
+    assert reference.call_id == "write-1"
+    assert reference.operation == "todo task done"
+    assert reference.target_identifiers == {"task-id": "todo-123"}
+
+
+def test_unknown_effect_reference_keeps_failed_unreviewed_write_blocked():
+    with pytest.raises(ValueError, match="unknown_run_contains_unreviewed_effect"):
+        unknown_effect_reference(
+            [
+                {
+                    "type": "item.started",
+                    "item": {
+                        "id": "write-1",
+                        "type": "command_execution",
+                        "metadata": {
+                            "effect": "effectful",
+                            "native_cli": "dws",
+                            "operation": "todo task done",
+                            "command_digest": "a" * 64,
+                            "target_identifiers": {"task-id": "todo-123"},
+                        },
+                    },
+                },
+                {
+                    "type": "item.failed",
+                    "item": {
+                        "id": "write-1",
+                        "type": "command_execution",
+                        "metadata": {
+                            "effect": "unreviewed",
+                            "native_cli": "dws",
+                            "operation": "todo task done",
+                            "command_digest": "a" * 64,
+                            "target_identifiers": {"task-id": "todo-123"},
+                        },
+                    },
+                },
+            ]
+        )
 
 
 def test_direct_runner_marks_interrupted_pi_write_unknown_without_retrying(

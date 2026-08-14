@@ -1603,8 +1603,10 @@ def unknown_effect_reference(
 ) -> UnknownEffectReference:
     started: dict[str, dict[str, object]] = {}
     closed: set[str] = set()
+    completed_unreviewed: list[tuple[str, dict[str, object]]] = []
     saw_effectful = False
     saw_unreviewed = False
+    saw_unreconcilable_unreviewed = False
     for event in events:
         item = event.get("item")
         if not isinstance(item, dict):
@@ -1615,13 +1617,31 @@ def unknown_effect_reference(
             saw_effectful = True
         elif effect == EffectKind.UNREVIEWED.value:
             saw_unreviewed = True
+            if (
+                event.get("type") != "item.completed"
+                or not isinstance(metadata, dict)
+            ):
+                saw_unreconcilable_unreviewed = True
+            elif not _reconcilable_unreviewed_effect(metadata):
+                saw_unreconcilable_unreviewed = True
         call_id = item.get("call_id") or item.get("id")
         if not isinstance(call_id, str) or not call_id:
             continue
         if event.get("type") == "item.started" and isinstance(metadata, dict):
             if effect == EffectKind.EFFECTFUL.value:
                 started[call_id] = metadata
-        elif event.get("type") in {"item.completed", "item.failed"}:
+        elif event.get("type") == "item.completed":
+            # A reviewed DWS/Lark write can reach the external service and
+            # still be tagged ``unreviewed`` when Pi drops/mangles the return
+            # envelope.  Keep that identity for a read-only reconciliation if
+            # it has a stable target.  We deliberately do not accept
+            # ``item.failed`` here: a failed command is not evidence that the
+            # external write happened, even when the provider returned an
+            # ambiguous error.
+            if effect == EffectKind.UNREVIEWED.value and isinstance(metadata, dict):
+                completed_unreviewed.append((call_id, metadata))
+            closed.add(call_id)
+        elif event.get("type") == "item.failed":
             closed.add(call_id)
     incomplete = [
         (call_id, data) for call_id, data in started.items() if call_id not in closed
@@ -1630,13 +1650,18 @@ def unknown_effect_reference(
         raise AgentRunNoEffectEvidenceError(
             "unknown_run_has_no_incomplete_effect"
         )
-    if saw_unreviewed:
+    if saw_unreconcilable_unreviewed:
         raise ValueError("unknown_run_contains_unreviewed_effect")
-    if not incomplete:
+    candidates = incomplete + [
+        (call_id, metadata)
+        for call_id, metadata in completed_unreviewed
+        if _reconcilable_unreviewed_effect(metadata)
+    ]
+    if not candidates:
         raise ValueError("unknown_run_effect_identity_missing")
-    if len(incomplete) != 1:
+    if len(candidates) != 1:
         raise ValueError("unknown_run_effect_count_invalid")
-    call_id, metadata = incomplete[0]
+    call_id, metadata = candidates[0]
     digest = metadata.get("command_digest") or metadata.get("operation_digest")
     operation = metadata.get("operation")
     transport = metadata.get("native_cli") or metadata.get("mcp_server")
@@ -1660,6 +1685,33 @@ def unknown_effect_reference(
         operation=str(operation),
         operation_digest=str(digest),
         target_identifiers=target_identifiers,
+    )
+
+
+def _reconcilable_unreviewed_effect(metadata: dict[str, object]) -> bool:
+    """Whether an incomplete receipt has enough identity for a safe read.
+
+    This is intentionally narrower than the reviewed-write validator.  A
+    reconciliation may only inspect a live object that is bound to the exact
+    reviewed transport, operation, digest, and at least one stable target
+    identifier.  Generic Pi tools, Memory writes, and newly-created objects
+    without a returned ID remain blocked rather than being guessed at.
+    """
+
+    if metadata.get("native_cli") not in {"dws", "lark-cli"}:
+        return False
+    if not all(
+        isinstance(metadata.get(key), str) and str(metadata.get(key)).strip()
+        for key in ("operation", "command_digest")
+    ):
+        return False
+    targets = metadata.get("target_identifiers")
+    return isinstance(targets, dict) and any(
+        isinstance(key, str)
+        and key.strip()
+        and isinstance(value, str)
+        and value.strip()
+        for key, value in targets.items()
     )
 
 

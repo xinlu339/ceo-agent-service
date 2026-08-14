@@ -4218,6 +4218,29 @@ def test_render_attempt_list_uses_failed_action_pill_color(tmp_path: Path):
     assert 'class="pill status-action action-state-failed">💬 Failed</span>' in html
 
 
+def test_render_attempt_list_labels_unverified_agent_effect_as_waiting_for_verification(
+    tmp_path: Path,
+):
+    store = AutoReplyStore(tmp_path / "worker.sqlite3")
+    attempt_id = store.record_reply_attempt(
+        conversation_id="cid-1",
+        conversation_title="Mina",
+        trigger_message_id="msg-1",
+        trigger_sender="Mina",
+        trigger_text="@Alex Chen 请把待办标记完成",
+        action="agent_run",
+        sensitivity_kind="general",
+        codex_reason="外部动作可能已执行",
+        send_status="failed",
+    )
+    store.update_reply_attempt(attempt_id, send_error="pi_unreviewed_tool_effect")
+
+    html = render_attempt_list(store)
+
+    assert "⏳ Awaiting verification" in html
+    assert ">💬 Failed</span>" not in html
+
+
 def test_render_attempt_list_distinguishes_confirmed_effect_finalization_failure(
     tmp_path: Path,
 ):
