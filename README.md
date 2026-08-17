@@ -27,7 +27,7 @@ Pi 运行时要求 Node.js `22.19.0+`。Provider、Model、API protocol、Base U
 - **安全和质量检查**：服务校验严格结构化 result、队列 generation 和精确重复投递；业务判断、工具选择和动作核对由 Direct Agent 使用实时系统完成。
 - **人工接管**：对需要本人处理的消息发送 handoff，并暂停该会话的自动回复直到检测到真人回复。
 - **Task 总结**：从已处理对话、AI 听记和 `CEO_WORKSPACE` 新增文件里抽取公司管理事项、业务项目和重要 TODO，归档到 work project 并生成下一步和跟进草稿。
-- **会后对齐 Agent**：发现 Derek 参会且已结束至少十分钟的会议；仅在存在观点分歧或需要输出 Derek 观点解读时生成跟进。多人会议默认发到 Agent 核验过、明确承接该业务或后续行动的团队群；涉及个人隐私、薪酬绩效或不适合公开的个人负面反馈时，可以私信相关参会人。
+- **会后对齐 Agent**：发现配置的代理对象参会且已结束至少十分钟的会议；仅在存在观点分歧或需要输出代理对象观点解读时生成跟进。多人会议默认发到 Agent 核验过、明确承接该业务或后续行动的团队群；涉及个人隐私、薪酬绩效或不适合公开的个人负面反馈时，可以私信相关参会人。
 - **审计 Web UI**：本地 FastAPI 页面查看历史、attempt 详情、Pi session、错误、Prompt 模板、路由和 Pi Agent 配置。
 - **自动修复 heartbeat**：消费 fail-closed 质量巡检结果，覆盖必需队列、最新 trigger、陈旧处理、外部投递、反馈和近期错误；将须恢复的问题与仍在进行的工作分开呈现。未知写操作只做只读核对，不自动重放。
 - **管理者 OKR 周报**：每周日读取 CEO-2 管理群成员的实时叮当 OKR 和可访问证据，按 `dingtang-okr-review` 生成可审计评分、知识库报告和群内重点摘要。
@@ -62,7 +62,7 @@ DWS 可能同时返回通用错误码和更具体的服务端错误码；服务�
 
 `blocked` 只表示当前缺少权限、依赖、材料或安全条件。记录必须写明当前原因和恢复条件，始终保留在待处理 backlog；条件变化后通过原 trigger 的幂等 rerun 再次处理，不使用错误前缀把 blocked 永久排除。
 
-单个访问失败反馈只允许 Direct Agent 诊断和报告，不授权修改共享部署入口、域名、DNS、路由或基础设施配置。此类变更必须在上下文中已有至少 3 个相互独立的受影响案例，或 Derek 对该项具体变更给出当次明确授权；同一机器或网络上的重复探测只算一个案例。条件不足时保持配置不变并返回 `needs_human`。
+单个访问失败反馈只允许 Direct Agent 诊断和报告，不授权修改共享部署入口、域名、DNS、路由或基础设施配置。此类变更必须在上下文中已有至少 3 个相互独立的受影响案例，或配置的代理对象对该项具体变更给出当次明确授权；同一机器或网络上的重复探测只算一个案例。条件不足时保持配置不变并返回 `needs_human`。
 
 一次 reply task generation 对应一次 Direct Agent run，同一 `conversation_id` 的 run 复用兼容字段 `conversations.codex_session_id` 保存 Pi session ID。运行审计以 Pi session JSONL 为准，业务数据库只保存 session ID 和本次 transcript 行范围。Pi 没有 `--output-schema`；服务把实际 JSON Schema 放入 system prompt，并在进程返回后用 Pydantic 本地校验，失败时在同一 session 中要求修复。无错误时 Agent 仍返回空错误对象。精确重复发送继续由 trigger 和 `sent_replies` 幂等记录阻止。
 
@@ -406,7 +406,7 @@ recruiting, sales, finance, admin, HR, other
   对同一流程的后续扫描，服务会把已核验的审批动作作为幂等依据交给 Agent：先读取实时状态，
   不重复已确认的同一动作；只有新增证据要求不同动作时才可再次处理。
 
-钉钉 Todo 是 owner 执行层，不替代 `/tasks` 里的内部项目管理视图。只有明确 owner、due time、非敏感且未完成的高置信 TODO 会创建钉钉 Todo；Derek 默认不作为执行人加入。内部 `work_todos` 仍是主数据，钉钉 Todo 只同步创建、完成状态拉取和有强证据时的完成推送。发送 follow-up 前会先检查已关联的钉钉 Todo 状态：如果钉钉侧已经完成，系统会关闭内部 TODO 并跳过提醒，避免重复催办。
+钉钉 Todo 是 owner 执行层，不替代 `/tasks` 里的内部项目管理视图。只有明确 owner、due time、非敏感且未完成的高置信 TODO 会创建钉钉 Todo；配置的代理对象默认不作为执行人加入。内部 `work_todos` 仍是主数据，钉钉 Todo 只同步创建、完成状态拉取和有强证据时的完成推送。发送 follow-up 前会先检查已关联的钉钉 Todo 状态：如果钉钉侧已经完成，系统会关闭内部 TODO 并跳过提醒，避免重复催办。
 
 Follow-up 发送使用稳定的幂等键。若钉钉返回登录、权限或已识别的目标错误，服务保留明确原因；若发送命令仅返回无业务码的未知结果，服务将草稿延迟重试并复用同一幂等键，而不是标记为不可恢复的失败。重复请求会由钉钉幂等回执收敛，避免重复催办。
 
@@ -499,7 +499,7 @@ CEO_LIVE_SEND_BLOCKERS_ACCEPTED=1 \
 - producer loop：按 `CEO_PRODUCER_INTERVAL_SECONDS` 间隔发现消息并入队，默认 15 秒。
 - consumer loop：按 `CEO_CONSUMER_POLL_INTERVAL_SECONDS` 间隔领取任务、调用 agent、执行发送或跳过，默认 3 秒。实时私聊和群内明确 @ 的消息具有更高队列优先级，不会被历史积压任务按 ID 长时间挡住；单个 Pi 运行达到总超时/无输出超时中较大值再加 5 分钟的硬上限后会被隔离并释放队列。无已确认副作用的运行可按原重试策略恢复，存在副作用的运行会保留为待核验状态，避免重复执行。
 - `FAST_PATH_UNREAD_BACKOFF`：首次发现未读消息后，给真人优先处理的等待窗口，默认 1 分钟；`CEO_PI_IDLE_TIMEOUT_SECONDS` 控制 Agent 连续无输出的最长等待，默认 180 秒，`CEO_PI_TIMEOUT_SECONDS` 控制单次 Agent 总超时，默认 600 秒。这些值可在 `Config → System Config` 手动调整，保存后需重启服务才会影响新任务。
-- meeting producer loop：读取 AI 听记与日历参会证据，只为 Derek 参会且明确结束至少 `CEO_MEETING_SETTLE_SECONDS` 的会议建队列；没有匹配日程的临时通话，仅在完整转写恰好证明 Derek 和另一位唯一员工时按 1:1 放行；没有触发条件的会议保持安静。
+- meeting producer loop：读取 AI 听记与日历参会证据，只为配置的代理对象参会且明确结束至少 `CEO_MEETING_SETTLE_SECONDS` 的会议建队列；没有匹配日程的临时通话，仅在完整转写恰好证明代理对象和另一位唯一员工时按 1:1 放行；没有触发条件的会议保持安静。
 - meeting consumer loop：独立分析并投递；多人会议由 Agent 使用 DWS 查找并选择有明确业务承接关系的团队群，议题相似、参会人重合或近期活跃本身不构成投递证据。多人会议默认发群；内容涉及个人隐私、个人薪酬绩效或对特定个人的严厉负面反馈、不适合群聊时改为私信。只有群发现完整成功且没有可发送群时，才默认私信日历中唯一的会议创建人；创建人身份由发送层通过 DWS 唯一验证。DWS 读取或网络失败、群元数据不完整、创建人缺失或不唯一时保持可恢复重试，不猜测收件人。发送正文固定以 `【会议跟进】会议标题（会议时间）` 开头，便于收件人识别来源会议；真实 @ 默认限于参会人，非参会人只有会议转写明确说到是他的任务、由他负责、交给他确认或跟进时才 @。确认发送成功后复用 reply agent 的本地/Chrome notification 和钉钉会话点击跳转。dry-run 只分析到 `ready_to_send`，不会 claim 发送。
 - `replay-recent-meetings` 会重新读取日历和听记证据，并只重开没有任何发送回执的 `no_action` 或 `failed` 会议任务；已发送或存在发送回执的任务保持终态，避免重复外发。
 - task maintenance loop：按 `CEO_TASK_WORK_ITEM_INTERVAL_SECONDS` 处理 Work Item，并按 `CEO_TASK_DAILY_INTERVAL_SECONDS` 扫描 AI 听记、`CEO_WORKSPACE` 文件和到期 follow-up。

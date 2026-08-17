@@ -107,7 +107,7 @@
       "title": "DeliveryTarget",
       "type": "object"
     },
-    "DerekViewpoint": {
+    "PrincipalViewpoint": {
       "additionalProperties": false,
       "properties": {
         "expressed_view": {
@@ -154,7 +154,7 @@
         "example",
         "historical_sources"
       ],
-      "title": "DerekViewpoint",
+      "title": "PrincipalViewpoint",
       "type": "object"
     },
     "KeyQuestion": {
@@ -222,7 +222,7 @@
         "enum": [
           "aligned_disagreement",
           "unresolved_disagreement",
-          "derek_viewpoint"
+          "principal_viewpoint"
         ],
         "type": "string"
       },
@@ -236,10 +236,10 @@
       "title": "Topics",
       "type": "array"
     },
-    "derek_viewpoint": {
+    "principal_viewpoint": {
       "anyOf": [
         {
-          "$ref": "#/$defs/DerekViewpoint"
+          "$ref": "#/$defs/PrincipalViewpoint"
         },
         {
           "type": "null"
@@ -290,7 +290,7 @@
     "action",
     "trigger_reasons",
     "topics",
-    "derek_viewpoint",
+    "principal_viewpoint",
     "key_questions",
     "mention_names",
     "target",

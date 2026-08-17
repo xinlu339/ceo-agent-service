@@ -28,7 +28,7 @@ def valid_send_decision():
                 "alignment_reason": "",
             }
         ],
-        "derek_viewpoint": None,
+        "principal_viewpoint": None,
         "key_questions": [
             {
                 "question": "如果本周必须验证收入，最多接受多大故障面？",
@@ -81,7 +81,7 @@ def valid_job():
     }
 
 
-def valid_derek_viewpoint():
+def valid_principal_viewpoint():
     return {
         "expressed_view": "先控制风险，再逐步放量。",
         "meeting_evidence": ["Derek 提出先验证故障恢复能力。"],
@@ -147,7 +147,7 @@ def test_no_action_without_delivery_output_is_valid():
         action="no_action",
         trigger_reasons=[],
         topics=[],
-        derek_viewpoint=None,
+        principal_viewpoint=None,
         key_questions=[],
         mention_names=[],
         target=None,
@@ -179,7 +179,7 @@ def test_no_action_requires_empty_trigger_reasons():
                 }
             ],
         ),
-        ("derek_viewpoint", valid_derek_viewpoint()),
+        ("principal_viewpoint", valid_principal_viewpoint()),
         (
             "key_questions",
             [{"question": "是否上线？", "answer_owner_names": ["A"]}],
@@ -193,7 +193,7 @@ def test_no_action_rejects_analysis_payload(field, value):
         action="no_action",
         trigger_reasons=[],
         topics=[],
-        derek_viewpoint=None,
+        principal_viewpoint=None,
         key_questions=[],
         mention_names=[],
         target=None,
@@ -269,14 +269,14 @@ def test_aligned_topic_requires_conclusion_and_alignment_reason(field):
         MeetingAlignmentDecision.model_validate(payload)
 
 
-def test_derek_viewpoint_trigger_and_payload_require_each_other():
+def test_principal_viewpoint_trigger_and_payload_require_each_other():
     payload = valid_send_decision()
-    payload["trigger_reasons"] = ["derek_viewpoint"]
+    payload["trigger_reasons"] = ["principal_viewpoint"]
     with pytest.raises(ValidationError):
         MeetingAlignmentDecision.model_validate(payload)
 
     payload = valid_send_decision()
-    payload["derek_viewpoint"] = valid_derek_viewpoint()
+    payload["principal_viewpoint"] = valid_principal_viewpoint()
     with pytest.raises(ValidationError):
         MeetingAlignmentDecision.model_validate(payload)
 
@@ -286,7 +286,7 @@ def test_combined_triggers_accept_all_required_evidence():
     payload["trigger_reasons"] = [
         "aligned_disagreement",
         "unresolved_disagreement",
-        "derek_viewpoint",
+        "principal_viewpoint",
     ]
     payload["topics"].append(
         {
@@ -297,8 +297,30 @@ def test_combined_triggers_accept_all_required_evidence():
             "alignment_reason": "参会者已明确确认。",
         }
     )
-    payload["derek_viewpoint"] = valid_derek_viewpoint()
+    payload["principal_viewpoint"] = valid_principal_viewpoint()
     assert MeetingAlignmentDecision.model_validate(payload).action == "send"
+
+
+def test_legacy_derek_viewpoint_input_is_upgraded_to_neutral_fields():
+    payload = valid_send_decision()
+    payload["trigger_reasons"] = [
+        "unresolved_disagreement",
+        "derek_viewpoint",
+    ]
+    payload["derek_viewpoint"] = valid_principal_viewpoint()
+    payload.pop("principal_viewpoint")
+
+    decision = MeetingAlignmentDecision.model_validate(payload)
+
+    assert decision.trigger_reasons == [
+        "unresolved_disagreement",
+        "principal_viewpoint",
+    ]
+    assert decision.principal_viewpoint is not None
+    assert decision.derek_viewpoint is decision.principal_viewpoint
+    dumped = decision.model_dump(mode="json")
+    assert "principal_viewpoint" in dumped
+    assert "derek_viewpoint" not in dumped
 
 
 def test_direct_target_accepts_resolved_user_id_and_requires_no_group_fields():

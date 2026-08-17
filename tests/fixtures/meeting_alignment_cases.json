@@ -53,7 +53,7 @@
       ["Mina", "那我们讨论灰度比例，不用再看风险预算。"]
     ],
     "expected_action": "send",
-    "expected_trigger": "derek_viewpoint"
+    "expected_trigger": "principal_viewpoint"
   },
   {
     "id": "history-would-invent-position",
@@ -63,7 +63,7 @@
       ["Mina", "也许，但他今天没有表达意见，我们先不替他下结论。"]
     ],
     "expected_action": "no_action",
-    "forbidden_trigger": "derek_viewpoint"
+    "forbidden_trigger": "principal_viewpoint"
   },
   {
     "id": "aligned-plus-derek-explanation",
@@ -75,7 +75,7 @@
     ],
     "expected_action": "send",
     "expected_state": "aligned",
-    "expected_trigger": "derek_viewpoint"
+    "expected_trigger": "principal_viewpoint"
   },
   {
     "id": "candidate-interview-scope-skip",
