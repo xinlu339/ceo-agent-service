@@ -4,8 +4,9 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
-from app.config import work_profile_path
+from app.config import principal_display_name, work_profile_path
 from app.external_retry import ExternalDependencyError
+from app.history import safe_observability_error
 from app.meeting_alignment_models import (
     DeliveryTarget,
     MeetingAlignmentDecision,
@@ -24,6 +25,15 @@ MEETING_ALIGNMENT_DECISION_SCHEMA_PATH = (
     / "meeting_alignment_decision.schema.json"
 )
 MEETING_ALIGNMENT_AUDIT_EVENT_LIMIT = 200
+MEETING_ALIGNMENT_READ_TOOLS = (
+    "workspace_read",
+    "workspace_search",
+    "workspace_list",
+    "execute_reviewed_read",
+    "memory_recall",
+)
+MEETING_ALIGNMENT_REPAIR_TOTAL_TIMEOUT_SECONDS = 120
+MEETING_ALIGNMENT_REPAIR_IDLE_TIMEOUT_SECONDS = 60
 
 
 class MeetingAlignmentTargetError(ValueError):
@@ -110,7 +120,47 @@ class MeetingAlignmentPiRunner:
         self.last_transcript_end_line = 0
         self.last_audit_tool_events = []
         raw = self._execute(prompt=prompt)
-        self.last_session_id = self._extract_agent_session_id(raw)
+        self._remember_execution(raw)
+        try:
+            return self._parse_and_validate(raw)
+        except ValueError as first_error:
+            first_detail = _meeting_validation_error_detail(first_error)
+            first_cause = first_error
+        if not self.last_session_id:
+            raise RuntimeError(
+                "Pi did not return a valid MeetingAlignmentDecision: "
+                f"{first_detail}"
+            ) from first_cause
+
+        repair_prompt = _meeting_alignment_repair_prompt(first_detail)
+        repaired_raw = self._execute(
+            prompt=repair_prompt,
+            session_id=self.last_session_id,
+            repair=True,
+        )
+        self._remember_execution(repaired_raw)
+        try:
+            return self._parse_and_validate(repaired_raw)
+        except ValueError as second_error:
+            second_detail = _meeting_validation_error_detail(second_error)
+            raise RuntimeError(
+                "Pi did not return a valid MeetingAlignmentDecision after "
+                f"no-tool repair: {second_detail}"
+            ) from second_error
+
+    def _parse_and_validate(self, raw: str) -> MeetingAlignmentDecision:
+        decision = parse_meeting_alignment_decision(raw)
+        _validate_historical_sources(
+            decision,
+            audit_tool_events=self.last_audit_tool_events,
+            work_profile_source=self.work_profile_source,
+        )
+        return decision
+
+    def _remember_execution(self, raw: str) -> None:
+        parsed_session_id = self._extract_agent_session_id(raw)
+        if parsed_session_id:
+            self.last_session_id = parsed_session_id
         self.last_transcript_end_line = self._session_line_count(
             self.last_session_id
         )
@@ -122,45 +172,33 @@ class MeetingAlignmentPiRunner:
                 end_line=self.last_transcript_end_line,
                 limit=MEETING_ALIGNMENT_AUDIT_EVENT_LIMIT,
             )
-        self.last_audit_tool_events = (
+        observed_events = (
             session_events
             or self._extract_agent_audit_events(
                 raw,
                 limit=MEETING_ALIGNMENT_AUDIT_EVENT_LIMIT,
             )
         )
-        try:
-            decision = parse_meeting_alignment_decision(raw)
-            _validate_historical_sources(
-                decision,
-                audit_tool_events=self.last_audit_tool_events,
-                work_profile_source=self.work_profile_source,
-            )
-        except ValueError as exc:
-            raise RuntimeError(
-                "Pi did not return a valid MeetingAlignmentDecision"
-            ) from exc
-        return decision
+        if observed_events:
+            self.last_audit_tool_events = observed_events
 
-    def _execute(self, *, prompt: str) -> str:
+    def _execute(
+        self,
+        *,
+        prompt: str,
+        session_id: str | None = None,
+        repair: bool = False,
+    ) -> str:
         command = self.runner.build_command(
             prompt,
-            session_id=None,
+            session_id=session_id,
             image_paths=None,
-            output_schema_path=MEETING_ALIGNMENT_DECISION_SCHEMA_PATH,
             approval_policy="never",
-        )
-        from app.pi_safety import set_pi_tools
-
-        set_pi_tools(
-            command,
-            (
-                "workspace_read",
-                "workspace_search",
-                "workspace_list",
-                "execute_reviewed_read",
-                "memory_recall",
+            developer_instructions=_meeting_alignment_developer_instructions(
+                repair=repair
             ),
+            thinking_level="off" if repair else None,
+            tool_names=() if repair else MEETING_ALIGNMENT_READ_TOOLS,
         )
         if self.executor is not None:
             return self.executor(command, prompt)
@@ -168,8 +206,22 @@ class MeetingAlignmentPiRunner:
             command,
             prompt=prompt,
             env=self.runner.build_env(),
-            total_timeout_seconds=self.timeout_seconds,
-            idle_timeout_seconds=self.idle_timeout_seconds,
+            total_timeout_seconds=(
+                min(
+                    self.timeout_seconds,
+                    MEETING_ALIGNMENT_REPAIR_TOTAL_TIMEOUT_SECONDS,
+                )
+                if repair
+                else self.timeout_seconds
+            ),
+            idle_timeout_seconds=(
+                min(
+                    self.idle_timeout_seconds,
+                    MEETING_ALIGNMENT_REPAIR_IDLE_TIMEOUT_SECONDS,
+                )
+                if repair
+                else self.idle_timeout_seconds
+            ),
         )
         if completed.timed_out:
             raise ExternalDependencyError(
@@ -200,6 +252,91 @@ class MeetingAlignmentPiRunner:
         return completed.stdout
 
 
+def _meeting_alignment_schema_text() -> str:
+    return MEETING_ALIGNMENT_DECISION_SCHEMA_PATH.read_text(encoding="utf-8").strip()
+
+
+def _meeting_alignment_developer_instructions(*, repair: bool) -> str:
+    purpose = (
+        "This is a serialization repair in the existing meeting session. "
+        "Do not call tools, repeat evidence retrieval, or perform any external action."
+        if repair
+        else (
+            "Analyze the supplied meeting using only the explicitly enabled "
+            "read tools. Never send a message or perform another external write."
+        )
+    )
+    return f"""You are the Meeting Alignment Agent.
+
+{purpose}
+Return exactly one MeetingAlignmentDecision JSON object and no surrounding text.
+Every field marked required must be present, including null and empty fields.
+The neutral principal_viewpoint field refers to the configured principal identified
+by current_user_id in the supplied meeting source.
+
+# Required output JSON schema
+
+```json
+{_meeting_alignment_schema_text()}
+```"""
+
+
+def _meeting_alignment_no_action_example() -> str:
+    return json.dumps(
+        {
+            "action": "no_action",
+            "trigger_reasons": [],
+            "topics": [],
+            "principal_viewpoint": None,
+            "key_questions": [],
+            "mention_names": [],
+            "target": None,
+            "final_message": "",
+            "audit_summary": "没有需要发送的会议跟进。",
+            "confidence": 0.9,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _meeting_alignment_repair_prompt(validation_detail: str) -> str:
+    return f"""The previous meeting-analysis turn completed, but its final response
+was not valid MeetingAlignmentDecision JSON.
+
+Repair only the JSON serialization from the work already present in this same
+session. Do not call tools, reread evidence, change the business conclusion, send
+anything, or perform any external action. Return exactly one JSON object.
+
+Sanitized validation errors:
+{validation_detail}
+
+When the established action is no_action, use this complete shape and preserve the
+previous audit meaning/confidence:
+{_meeting_alignment_no_action_example()}"""
+
+
+def _meeting_validation_error_detail(exc: ValueError) -> str:
+    if isinstance(exc, ValidationError):
+        errors = [
+            {
+                "field": ".".join(str(part) for part in error.get("loc", ()))
+                or "decision",
+                "type": str(error.get("type") or "validation_error"),
+                "message": str(error.get("msg") or "invalid value"),
+            }
+            for error in exc.errors(
+                include_url=False,
+                include_context=False,
+                include_input=False,
+            )
+        ]
+        detail = json.dumps(errors, ensure_ascii=False, separators=(",", ":"))
+    else:
+        detail = str(exc)
+    return safe_observability_error(detail, limit=1600) or "invalid decision JSON"
+
+
 def build_meeting_alignment_prompt(
     source: MeetingSource,
     *,
@@ -211,6 +348,7 @@ def build_meeting_alignment_prompt(
         source.model_dump(mode="json"), ensure_ascii=False, indent=2
     )
     participants = source.participants
+    principal_name = _meeting_principal_name(source)
     if len(participants) == 2:
         other = next(
             participant
@@ -240,7 +378,7 @@ def build_meeting_alignment_prompt(
         creator = source.creator
         if creator is None or creator.user_id == source.current_user_id:
             creator_contract = (
-                "当前会议创建人缺失、不唯一或是 Derek，不能选择私信；"
+                f"当前会议创建人缺失、不唯一或是 {principal_name}，不能选择私信；"
                 "没有可发送群时返回 target=null，等待来源证据恢复。"
             )
             creator_name = "（当前不可用）"
@@ -277,7 +415,7 @@ def build_meeting_alignment_prompt(
 - 如果是实际候选人面试，立即返回 action=no_action，并在 audit_summary 说明“实际候选人面试，按范围规则跳过”。不要搜索群、解析 @ 或生成消息。
 
 触发边界：
-- 只有出现实质观点分歧，或 Derek 的观点在后续讨论中没有被完整还原、需要做“Derek 的观点输出解读”时，action=send；否则保持安静，action=no_action。
+- 只有出现实质观点分歧，或 {principal_name} 的观点在后续讨论中没有被完整还原、需要做“{principal_name} 的观点输出解读”时，action=send；否则保持安静，action=no_action。
 - 只要会议中曾经出现实质观点分歧，后来明确对齐也仍然触发发布；必须总结对齐过程和结论，不能因为最终已对齐而改成 no_action。
 - 措辞不同、补充信息、探索性讨论或已经自然顺畅推进，不算实质分歧。
 - 沉默不算对齐。只有相关各方明确同意、承诺或复述一致，才把议题标为 aligned；主持人单方面宣布结论不够。
@@ -289,8 +427,8 @@ def build_meeting_alignment_prompt(
 - unresolved 议题：简述各方观点和理由，提出完成对齐所需的最小集合。可以提出多个问题，但每个问题必须对应不同且不可合并的关键取舍；不要为了显得完整而堆问题。
 - 取舍问题应把“选择什么、牺牲什么、承担什么后果”压缩为可回答的问题；回答最小集合后应能直接导出结论或明确下一步。
 - key_questions.answer_owner_names 必须写真正能回答/拍板的人。mention_names 默认只覆盖参会 owner；如果 owner 不是参会人，只有会议中明确说到这是他的任务、由他负责、交给他确认或跟进时，才可以放进 mention_names 并在 final_message 中真实 @。否则可以在正文里写“需要后续同步某某确认”，但不要把这个非参会人放进 mention_names，也不要写成真实 @。
-- “Derek 的观点输出解读”只能解释 Derek 在会议中明确表达的观点，meeting_evidence 必须引用会议原话或可核验片段。
-- 可以结合服务端注入的工作人格和 reviewed memory_recall 找到的历史案例、信息来打比方、举例和补全解释，但不能用历史信息发明或替换 Derek 的立场，也不能让历史材料覆盖会议证据。Friday Memory 未配置或授权失败时继续使用会议证据和工作人格，不得声称已经查询。
+- “{principal_name} 的观点输出解读”只能解释 {principal_name} 在会议中明确表达的观点，meeting_evidence 必须引用会议原话或可核验片段。
+- 可以结合服务端注入的工作人格和 reviewed memory_recall 找到的历史案例、信息来打比方、举例和补全解释，但不能用历史信息发明或替换 {principal_name} 的立场，也不能让历史材料覆盖会议证据。Friday Memory 未配置或授权失败时继续使用会议证据和工作人格，不得声称已经查询。
 - 使用历史内容时，historical_sources 必须逐项记录来源。未经 memory_recall 核验时，唯一允许的历史来源是服务端注入的工作人格来源 `{work_profile_source}`；不使用历史内容则返回空列表。
 - 能只靠会议证据解释时，historical_sources 必须为空数组。只有实际引用了工作人格中的具体判断或案例时才记录工作人格来源。
 - 记录注入的工作人格来源时，historical_sources 的数组元素必须逐字填写 `{work_profile_source}`，不得改写、加标题或写成说明性文字。
@@ -301,7 +439,9 @@ def build_meeting_alignment_prompt(
 
 输出合同：
 - 只输出 MeetingAlignmentDecision JSON，严格遵守 schema，不添加字段。
-- no_action 时分析和发送字段必须为空，只保留 audit_summary 与 confidence。
+- no_action 时仍必须输出全部顶层字段；分析和发送字段使用下面模板中的空值，只保留有内容的 audit_summary 与 confidence。
+- no_action 完整模板：{_meeting_alignment_no_action_example()}
+- `principal_viewpoint` 字段和同名 trigger 都指当前代理对象 {principal_name}；两者必须同时出现或同时为空。
 - send 时 final_message 和 trigger_reasons 必须完整；target 通常必填，唯一例外是多人会议已经穷尽群发现却没有可发送群，此时 target=null 供发送层重试。1:1 会议始终必须返回另一位参会人的 direct target。
 - 最终只生成一条可直接发送或等待发送层重试的合并消息。
 
@@ -314,6 +454,13 @@ def build_meeting_alignment_prompt(
 完整会议来源 JSON：
 {source_json}
 """
+
+
+def _meeting_principal_name(source: MeetingSource) -> str:
+    for participant in source.participants:
+        if participant.user_id == source.current_user_id and participant.name.strip():
+            return participant.name.strip()
+    return principal_display_name().strip() or "代理对象"
 
 
 def _similar_sessions_prompt_block(
@@ -339,10 +486,11 @@ def _similar_sessions_prompt_block(
 
 def parse_meeting_alignment_decision(raw: str) -> MeetingAlignmentDecision:
     stripped = raw.strip()
+    validation_details: list[str] = []
     try:
         return MeetingAlignmentDecision.model_validate_json(stripped)
-    except (ValueError, ValidationError):
-        pass
+    except (ValueError, ValidationError) as exc:
+        validation_details.append(_meeting_validation_error_detail(exc))
 
     payloads: list[object] = []
     for line in stripped.splitlines():
@@ -351,18 +499,21 @@ def parse_meeting_alignment_decision(raw: str) -> MeetingAlignmentDecision:
         except (json.JSONDecodeError, TypeError):
             continue
     for payload in reversed(payloads):
-        try:
-            return MeetingAlignmentDecision.model_validate(payload)
-        except (ValueError, ValidationError):
-            pass
         if not isinstance(payload, dict):
             continue
+        if "action" in payload:
+            try:
+                return MeetingAlignmentDecision.model_validate(payload)
+            except (ValueError, ValidationError) as exc:
+                validation_details.append(_meeting_validation_error_detail(exc))
         for text in _decision_text_candidates(payload):
             try:
                 return MeetingAlignmentDecision.model_validate_json(text)
-            except (ValueError, ValidationError):
+            except (ValueError, ValidationError) as exc:
+                validation_details.append(_meeting_validation_error_detail(exc))
                 continue
-    raise ValueError("No MeetingAlignmentDecision JSON found")
+    detail = validation_details[-1] if validation_details else "no JSON candidate found"
+    raise ValueError(f"No MeetingAlignmentDecision JSON found: {detail}")
 
 
 def _decision_text_candidates(payload: dict[str, object]) -> list[str]:
@@ -388,7 +539,7 @@ def _validate_historical_sources(
     audit_tool_events: list[dict[str, str]],
     work_profile_source: str,
 ) -> None:
-    viewpoint = decision.derek_viewpoint
+    viewpoint = decision.principal_viewpoint
     if viewpoint is None or not viewpoint.historical_sources:
         return
     used_memory_recall = any(

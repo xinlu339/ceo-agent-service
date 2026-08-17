@@ -105,16 +105,29 @@ not hidden chain of thought.
 Meeting follow-up is an independent producer/consumer pipeline inside the same
 `com.ceo-agent-service.main` process. There is no separate cron job or launchd
 plist. The producer combines AI Minutes metadata with one uniquely matching
-calendar event, so a job is eligible only when Derek attended and the meeting
+calendar event, so a job is eligible only when the configured principal attended and the meeting
 has explicitly ended for at least ten minutes.
 
+The meeting source identifies the principal by `current_user_id`; prompts use that
+participant's live display name and only fall back to the configured display name.
+New decisions use the neutral `principal_viewpoint` field and trigger. Persisted
+`derek_viewpoint` decisions remain readable through a one-way compatibility
+migration, but new model output is never taught the legacy name.
+
+Pi does not provide a native output-schema flag, so the service injects the full
+`MeetingAlignmentDecision` schema into the meeting system prompt. If the first
+answer is structurally invalid, the service may perform one serialization-only
+turn in the same Pi session with thinking disabled and no tools. The repair cannot
+reread evidence, change external state, or send a message; sanitized field-level
+validation errors remain available for retry audit.
+
 The agent remains silent unless it finds a material viewpoint disagreement or a
-need for `Derek 的观点输出解读`. An aligned disagreement requires explicit
+need for interpretation of the configured principal's expressed viewpoint. An aligned disagreement requires explicit
 agreement, commitment, or consistent restatement by the relevant sides. For an
 unresolved disagreement the output includes the parties' views and reasons plus
 one or more minimum-sufficient tradeoff questions whose answers can directly
 produce alignment. A disagreement that becomes aligned still produces the one
-meeting follow-up; final alignment does not convert it to `no_action`. Derek's
+meeting follow-up; final alignment does not convert it to `no_action`. The principal's
 explanation may use historical cases and the work profile only to clarify a view
 that was actually expressed in the meeting. Work-profile source identifiers must
 remain exact so the service can audit them.
@@ -143,7 +156,7 @@ message is limited to what that recipient needs. A DWS read or network failure,
 incomplete group metadata, or a missing or ambiguous creator keeps the job
 retryable and cannot authorize direct delivery. A 1:1 meeting sends directly to the other participant. When an ad-hoc call has no matching
 calendar event, it is treated as 1:1 only when the complete transcript contains
-exactly Derek and one uniquely resolved employee; otherwise it remains
+exactly the configured principal and one uniquely resolved employee; otherwise it remains
 unqueued. No DING or reaction is added by this workflow.
 
 Real mentions default to meeting participants. Non-participants can be mentioned

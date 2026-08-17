@@ -549,9 +549,18 @@ def _meeting_session_index_text(
         for topic in decision.topics
     )
     questions = "；".join(question.question for question in decision.key_questions)
-    derek_view = (
-        decision.derek_viewpoint.expressed_view
-        if decision.derek_viewpoint is not None
+    principal_name = next(
+        (
+            participant.name.strip()
+            for participant in source.participants
+            if participant.user_id == source.current_user_id
+            and participant.name.strip()
+        ),
+        principal_display_name(),
+    )
+    principal_view = (
+        decision.principal_viewpoint.expressed_view
+        if decision.principal_viewpoint is not None
         else ""
     )
     participants = "、".join(
@@ -564,7 +573,7 @@ def _meeting_session_index_text(
             f"参会人：{participants}",
             f"摘要：{source.summary}",
             f"话题：{topics}",
-            f"Derek 观点：{derek_view}",
+            f"{principal_name} 观点：{principal_view}",
             f"关键问题：{questions}",
             f"结论/消息：{decision.final_message}",
             f"审计摘要：{decision.audit_summary}",

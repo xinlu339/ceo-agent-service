@@ -6,6 +6,7 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
+from app.config import principal_display_name
 from app.store import AutoReplyStore, RecentFollowUpCandidate
 from app.external_retry import ExternalDependencyError
 from app.pi_events import assistant_text_candidates
@@ -243,6 +244,7 @@ def build_task_agent_prompt(
     *,
     memory_issue: str = "",
 ) -> str:
+    principal = principal_display_name()
     work_item_json = json.dumps(
         work_item.model_dump(mode="json"),
         ensure_ascii=False,
@@ -261,10 +263,10 @@ def build_task_agent_prompt(
 - 你只更新工作项目和 TODO，不回复当前消息。
 - Work Item 是一个输入片段，不是已经抽取好的事实；必须判断其是否足够支撑稳定项目、TODO 或完成证据。
 - Task 只记录需要持续管理的公司重要事项；只跟踪重要事项，不跟踪普通流程步骤。
-- 重要事项是指失败会实质影响公司目标、OKR/KR、关键项目、收入、客户承诺、组织决策、关键招聘、合规、财务风险或 Derek 级决策的事项。
+- 重要事项是指失败会实质影响公司目标、OKR/KR、关键项目、收入、客户承诺、组织决策、关键招聘、合规、财务风险或 {principal} 级决策的事项。
 - 和公司目标、OKR/KR、关键项目或管理风险无关的事项不要进入 task；即使对话里出现“待办、跟进、确认”，如果只是个人协作、流程流转或一次性工具账号事项，action 应为 discard。
 - 流程性内容默认忽略：招聘、offer、面试、审批、报销、日程、行政等已知流程里的常规步骤，如果只是流程本来必须做的动作，不要创建 project、TODO、follow_up_draft 或 DingTalk Todo。
-- 流程性内容只有在暴露真实风险、系统故障、跨 owner 阻塞、明确 deadline 风险、关键岗位决策或 Derek 需要拍板时，才把其中的风险或决策抽成 task；不要跟踪流程步骤本身。
+- 流程性内容只有在暴露真实风险、系统故障、跨 owner 阻塞、明确 deadline 风险、关键岗位决策或 {principal} 需要拍板时，才把其中的风险或决策抽成 task；不要跟踪流程步骤本身。
 - 如果 Work Item 是对误建 TODO 或过细 follow-up 的反馈，例如“没必要创建待办”“不要催这种流程动作”“这类事情不办流程也走不下去”，不要简单 discard；应在能匹配已有 TODO/follow_up 时使用 todo_changes.cancel 和 follow_up_changes.suppress 清理噪声，并在 update_summary 写明原因。
 - 不要用关键词或固定业务词表做决定；结合 Work Item、候选项目、已有 TODO/follow-up、上下文和 failure_risk 判断是否重要。
 - 一次性工具、账号、权限、订阅或行政操作默认不创建 task，也不生成 follow-up，除非它明确影响已有项目、关键交付、成本风险或管理决策。

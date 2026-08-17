@@ -4,7 +4,7 @@
 
 ## 目标
 
-CEO Agent Service 是本地优先的企业消息处理服务。它发现需要 Derek 处理的消息和审批，将原始触发、可用上下文和工具入口交给基于 Pi 的 Direct Agent，并保存结构化终态和原生 Pi session 审计指针。
+CEO Agent Service 是本地优先的企业消息处理服务。它发现需要配置代理对象处理的消息和审批，将原始触发、可用上下文和工具入口交给基于 Pi 的 Direct Agent，并保存结构化终态和原生 Pi session 审计指针。
 
 核心原则：
 

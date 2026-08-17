@@ -1,6 +1,13 @@
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class StrictModel(BaseModel):
@@ -58,7 +65,7 @@ class AlignmentTopic(StrictModel):
         return self
 
 
-class DerekViewpoint(StrictModel):
+class PrincipalViewpoint(StrictModel):
     expressed_view: str
     meeting_evidence: list[str]
     omitted_layer: str
@@ -93,17 +100,45 @@ class MeetingAlignmentDecision(StrictModel):
         Literal[
             "aligned_disagreement",
             "unresolved_disagreement",
-            "derek_viewpoint",
+            "principal_viewpoint",
         ]
     ]
     topics: list[AlignmentTopic]
-    derek_viewpoint: DerekViewpoint | None
+    principal_viewpoint: PrincipalViewpoint | None = Field(
+        validation_alias=AliasChoices(
+            "principal_viewpoint",
+            "derek_viewpoint",
+        )
+    )
     key_questions: list[KeyQuestion]
     mention_names: list[str]
     target: DeliveryTarget | None
     final_message: str
     audit_summary: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
+
+    @field_validator("trigger_reasons", mode="before")
+    @classmethod
+    def upgrade_legacy_viewpoint_trigger(cls, value: object) -> object:
+        """Accept already-persisted decisions while emitting the neutral name.
+
+        Historical meeting decisions used ``derek_viewpoint``.  Keeping this
+        one-way input migration lets queued/sent audit records remain readable
+        without teaching new model invocations the old principal-specific key.
+        """
+
+        if not isinstance(value, list):
+            return value
+        return [
+            "principal_viewpoint" if item == "derek_viewpoint" else item
+            for item in value
+        ]
+
+    @property
+    def derek_viewpoint(self) -> PrincipalViewpoint | None:
+        """Deprecated accessor for callers reading historical field names."""
+
+        return self.principal_viewpoint
 
     @model_validator(mode="after")
     def validate_action_payload(self) -> Self:
@@ -137,18 +172,18 @@ class MeetingAlignmentDecision(StrictModel):
             raise ValueError(
                 "unresolved topic requires unresolved_disagreement trigger"
             )
-        has_derek_viewpoint_trigger = "derek_viewpoint" in trigger_reasons
-        has_derek_viewpoint = self.derek_viewpoint is not None
-        if has_derek_viewpoint_trigger != has_derek_viewpoint:
+        has_principal_viewpoint_trigger = "principal_viewpoint" in trigger_reasons
+        has_principal_viewpoint = self.principal_viewpoint is not None
+        if has_principal_viewpoint_trigger != has_principal_viewpoint:
             raise ValueError(
-                "derek_viewpoint trigger and payload must appear together"
+                "principal_viewpoint trigger and payload must appear together"
             )
 
         if self.action == "no_action":
             if (
                 self.trigger_reasons
                 or self.topics
-                or self.derek_viewpoint is not None
+                or self.principal_viewpoint is not None
                 or self.key_questions
                 or self.mention_names
                 or self.target is not None

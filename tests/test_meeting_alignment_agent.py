@@ -63,7 +63,7 @@ def no_action_payload() -> dict:
         "action": "no_action",
         "trigger_reasons": [],
         "topics": [],
-        "derek_viewpoint": None,
+        "principal_viewpoint": None,
         "key_questions": [],
         "mention_names": [],
         "target": None,
@@ -75,12 +75,12 @@ def no_action_payload() -> dict:
     }
 
 
-def derek_view_payload(*, historical_sources: list[str]) -> dict:
+def principal_view_payload(*, historical_sources: list[str]) -> dict:
     return {
         "action": "send",
-        "trigger_reasons": ["derek_viewpoint"],
+        "trigger_reasons": ["principal_viewpoint"],
         "topics": [],
-        "derek_viewpoint": {
+        "principal_viewpoint": {
             "expressed_view": "先定义可接受的故障面，再倒推范围。",
             "meeting_evidence": ["Derek 在会议中明确说出该句"],
             "omitted_layer": "风险预算决定发布范围",
@@ -132,7 +132,7 @@ class FakeMeetingCodex:
 
 
 def send_payload_with_target(target) -> dict:
-    payload = derek_view_payload(historical_sources=[])
+    payload = principal_view_payload(historical_sources=[])
     payload["target"] = target
     return payload
 
@@ -179,6 +179,25 @@ def test_prompt_contains_full_transcript_and_behavioral_contracts():
     assert "让队列重试原群发现" in prompt
     assert "不能改成 no_action" in prompt
     assert "真实 @" in prompt
+    assert '"principal_viewpoint":null' in prompt
+    assert "no_action 时仍必须输出全部顶层字段" in prompt
+
+
+def test_prompt_uses_principal_identity_from_meeting_source():
+    payload = source().model_dump(mode="json")
+    payload["participants"][0]["name"] = "Riley"
+    payload["transcript"][2]["speaker_name"] = "Riley"
+    adapted_source = MeetingSource.model_validate(payload)
+
+    prompt = build_meeting_alignment_prompt(
+        adapted_source,
+        work_profile="",
+        work_profile_source="profile",
+    )
+
+    assert "Riley 的观点输出解读" in prompt
+    assert "只能解释 Riley 在会议中明确表达的观点" in prompt
+    assert "Derek 的观点输出解读" not in prompt
 
 
 def test_one_to_one_prompt_requires_direct_other_participant():
@@ -397,11 +416,82 @@ def test_runner_always_starts_fresh_and_uses_schema(tmp_path: Path):
     assert "meeting_alignment_decision.schema.json" not in " ".join(
         captured["command"]
     )
+    system_prompt = captured["command"][
+        captured["command"].index("--system-prompt") + 1
+    ]
+    assert "# Required output JSON schema" in system_prompt
+    assert '"principal_viewpoint"' in system_prompt
+    assert '"required"' in system_prompt
     assert runner.last_transcript_start_line == 0
 
 
+def test_runner_repairs_invalid_decision_in_same_session_without_tools(
+    tmp_path: Path,
+):
+    responses = [
+        "\n".join(
+            [
+                json.dumps(
+                    {"type": "thread.started", "thread_id": "meeting-session-1"}
+                ),
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "audit_summary": "没有需要发送的会议跟进。",
+                        "confidence": 0.8,
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        ),
+        json.dumps(no_action_payload(), ensure_ascii=False),
+    ]
+    commands: list[list[str]] = []
+    prompts: list[str] = []
+
+    def executor(command, prompt):
+        commands.append(command)
+        prompts.append(prompt)
+        return responses[len(commands) - 1]
+
+    decision = MeetingAlignmentPiRunner(
+        workspace=tmp_path,
+        executor=executor,
+    ).decide(prompt="decide")
+
+    assert decision.action == "no_action"
+    assert len(commands) == 2
+    assert commands[1][commands[1].index("--session-id") + 1] == (
+        "meeting-session-1"
+    )
+    assert commands[1][commands[1].index("--thinking") + 1] == "off"
+    assert "--no-tools" in commands[1]
+    assert "trigger_reasons" in prompts[1]
+    assert '"principal_viewpoint":null' in prompts[1]
+
+
+def test_runner_preserves_sanitized_validation_fields_when_repair_is_unavailable(
+    tmp_path: Path,
+):
+    runner = MeetingAlignmentPiRunner(
+        workspace=tmp_path,
+        executor=lambda command, prompt: json.dumps(
+            {
+                "action": "no_action",
+                "audit_summary": "没有需要发送的会议跟进。",
+                "confidence": 0.8,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="trigger_reasons"):
+        runner.decide(prompt="decide")
+
+
 def test_runner_treats_invalid_model_decision_as_retryable(tmp_path: Path):
-    payload = derek_view_payload(historical_sources=[])
+    payload = principal_view_payload(historical_sources=[])
     payload["topics"] = [
         {
             "title": "发布范围",
@@ -467,7 +557,7 @@ def test_runner_clears_prior_audit_metadata_before_executor_failure(tmp_path: Pa
 
 
 def test_runner_accepts_historical_sources_with_memory_recall_audit(tmp_path: Path):
-    payload = derek_view_payload(historical_sources=["历史上线案例"])
+    payload = principal_view_payload(historical_sources=["历史上线案例"])
 
     def executor(command, prompt):
         return "\n".join(
@@ -500,7 +590,7 @@ def test_runner_accepts_configured_profile_as_unqueried_history(tmp_path: Path):
     runner = MeetingAlignmentPiRunner(
         workspace=tmp_path,
         executor=lambda command, prompt: json.dumps(
-            derek_view_payload(historical_sources=[configured]), ensure_ascii=False
+            principal_view_payload(historical_sources=[configured]), ensure_ascii=False
         ),
         work_profile_source=configured,
     )
@@ -511,7 +601,7 @@ def test_runner_retries_unaudited_historical_sources(tmp_path: Path):
     runner = MeetingAlignmentPiRunner(
         workspace=tmp_path,
         executor=lambda command, prompt: json.dumps(
-            derek_view_payload(historical_sources=["某个未核验案例"]),
+            principal_view_payload(historical_sources=["某个未核验案例"]),
             ensure_ascii=False,
         ),
         work_profile_source="/configured/work_profile.md",
@@ -547,9 +637,11 @@ def _deterministic_payload(case: dict) -> dict:
         "aligned_disagreement" if state == "aligned" else "unresolved_disagreement"
     ]
     viewpoint = None
-    if case.get("expected_trigger") == "derek_viewpoint":
-        triggers.append("derek_viewpoint")
-        viewpoint = derek_view_payload(historical_sources=[])["derek_viewpoint"]
+    if case.get("expected_trigger") == "principal_viewpoint":
+        triggers.append("principal_viewpoint")
+        viewpoint = principal_view_payload(historical_sources=[])[
+            "principal_viewpoint"
+        ]
     topic = {
         "title": "上线范围",
         "state": state,
@@ -579,7 +671,7 @@ def _deterministic_payload(case: dict) -> dict:
         "action": "send",
         "trigger_reasons": triggers,
         "topics": [topic],
-        "derek_viewpoint": viewpoint,
+        "principal_viewpoint": viewpoint,
         "key_questions": questions,
         "mention_names": ["Alex", "Mina"],
         "target": (

@@ -5776,7 +5776,7 @@ def render_task_project_detail(store: AutoReplyStore, project_id: int) -> tuple[
         f"{_task_detail_cell('Owner', project.owner_name or project.owner_user_id or '-')}"
         f"{_task_detail_cell('Next follow-up', _format_local_time(project.next_follow_up_at) or '-')}"
         f"{_task_detail_cell('Updated', _format_local_time(project.updated_at))}"
-        f"{_task_detail_cell('Derek attention', 'yes' if project.needs_derek_attention else 'no')}"
+        f"{_task_detail_cell(f'{principal_display_name()} attention', 'yes' if project.needs_derek_attention else 'no')}"
         "</div>"
         "</section>"
         "<section class=\"card\"><h2>Project details</h2>"

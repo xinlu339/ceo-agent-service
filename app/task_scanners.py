@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from app.config import principal_display_name
 from app.dingtalk_models import DingTalkMessage
 from app.store import AutoReplyStore
 from app.task_models import WorkItem
@@ -427,7 +428,7 @@ def scan_pending_oa_approvals(
             open_message_id=f"oa-pending:{process_instance_id}:{revision}",
             conversation_title="审批待办",
             single_chat=True,
-            sender_name="Derek OA",
+            sender_name=f"{principal_display_name()} OA",
             message_type="text",
             create_time=scan_timestamp,
             content=(
