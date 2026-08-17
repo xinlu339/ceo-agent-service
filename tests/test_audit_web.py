@@ -1645,32 +1645,67 @@ def test_top_nav_highlights_current_page_and_disables_current_link(
     tasks_html = render_tasks_page(store)
     workers_html = render_workers_page(store)
 
-    assert '<span class="nav-item active" aria-current="page">History</span>' in history_html
-    assert '<a class="nav-item" href="/">History</a>' not in history_html
-    assert '<a class="nav-item" href="/tutorial">Tutorial</a>' in history_html
-    assert '<a class="nav-item" href="/user-feedback">用户反馈</a>' in history_html
-    assert '<a class="nav-item" href="/config">Config</a>' in history_html
+    assert (
+        '<span class="nav-item active" data-nav-key="history" aria-current="page">'
+        in history_html
+    )
+    assert '<a class="nav-item" data-nav-key="history" href="/">' not in history_html
+    assert '<a class="nav-item" data-nav-key="tutorial" href="/tutorial">' in history_html
+    assert (
+        '<a class="nav-item" data-nav-key="user-feedback" href="/user-feedback">'
+        in history_html
+    )
+    assert '<a class="nav-item" data-nav-key="config" href="/config">' in history_html
+    assert history_html.count('class="nav-icon"') == 9
 
-    assert '<span class="nav-item active" aria-current="page">Tutorial</span>' in tutorial_html
-    assert '<a class="nav-item" href="/tutorial">Tutorial</a>' not in tutorial_html
+    assert (
+        '<span class="nav-item active" data-nav-key="tutorial" aria-current="page">'
+        in tutorial_html
+    )
+    assert (
+        '<a class="nav-item" data-nav-key="tutorial" href="/tutorial">'
+        not in tutorial_html
+    )
 
-    assert '<span class="nav-item active" aria-current="page">用户反馈</span>' in user_feedback_html
-    assert '<a class="nav-item" href="/user-feedback">用户反馈</a>' not in user_feedback_html
+    assert (
+        '<span class="nav-item active" data-nav-key="user-feedback" '
+        'aria-current="page">'
+        in user_feedback_html
+    )
+    assert (
+        '<a class="nav-item" data-nav-key="user-feedback" href="/user-feedback">'
+        not in user_feedback_html
+    )
 
-    assert '<span class="nav-item active" aria-current="page">Config</span>' in config_html
-    assert '<a class="nav-item" href="/config">Config</a>' not in config_html
+    assert (
+        '<span class="nav-item active" data-nav-key="config" aria-current="page">'
+        in config_html
+    )
+    assert '<a class="nav-item" data-nav-key="config" href="/config">' not in config_html
 
-    assert '<span class="nav-item active" aria-current="page">Pi Sessions</span>' in codex_html
-    assert '<a class="nav-item" href="/pi">Pi Sessions</a>' not in codex_html
+    assert (
+        '<span class="nav-item active" data-nav-key="pi" aria-current="page">'
+        in codex_html
+    )
+    assert '<a class="nav-item" data-nav-key="pi" href="/pi">' not in codex_html
 
-    assert '<span class="nav-item active" aria-current="page">Logs</span>' in errors_html
-    assert '<a class="nav-item" href="/logs">Logs</a>' not in errors_html
+    assert (
+        '<span class="nav-item active" data-nav-key="logs" aria-current="page">'
+        in errors_html
+    )
+    assert '<a class="nav-item" data-nav-key="logs" href="/logs">' not in errors_html
 
-    assert '<span class="nav-item active" aria-current="page">Tasks</span>' in tasks_html
-    assert '<a class="nav-item" href="/tasks">Tasks</a>' not in tasks_html
+    assert (
+        '<span class="nav-item active" data-nav-key="tasks" aria-current="page">'
+        in tasks_html
+    )
+    assert '<a class="nav-item" data-nav-key="tasks" href="/tasks">' not in tasks_html
 
-    assert '<span class="nav-item active" aria-current="page">Workers</span>' in workers_html
-    assert '<a class="nav-item" href="/workers">Workers</a>' not in workers_html
+    assert (
+        '<span class="nav-item active" data-nav-key="workers" aria-current="page">'
+        in workers_html
+    )
+    assert '<a class="nav-item" data-nav-key="workers" href="/workers">' not in workers_html
 
 
 def test_render_tutorial_page_shows_wizard_status(tmp_path: Path):
@@ -1825,7 +1860,10 @@ def test_tutorial_route_renders_first_time_setup(tmp_path: Path):
 
     assert response.status_code == 200
     assert "Initialization Wizard" in response.text
-    assert '<span class="nav-item active" aria-current="page">Tutorial</span>' in response.text
+    assert (
+        '<span class="nav-item active" data-nav-key="tutorial" aria-current="page">'
+        in response.text
+    )
 
 
 def test_tutorial_status_route_returns_json(tmp_path: Path):
@@ -2634,7 +2672,10 @@ def test_tasks_route_renders_page(tmp_path: Path):
 
     assert response.status_code == 200
     assert "售前知识库建设" in response.text
-    assert '<span class="nav-item active" aria-current="page">Tasks</span>' in response.text
+    assert (
+        '<span class="nav-item active" data-nav-key="tasks" aria-current="page">'
+        in response.text
+    )
 
 
 def test_tasks_route_applies_search_query(tmp_path: Path):
@@ -3566,7 +3607,10 @@ def test_config_route_is_available(tmp_path: Path):
 def test_render_page_brand_links_to_history():
     html = render_config_page()
 
-    assert '<a class="brand brand-home" href="/" aria-label="History home">' in html
+    assert (
+        '<a class="sidebar-brand brand-home" href="/" aria-label="History home">'
+        in html
+    )
 
 
 def test_render_developer_prompt_editor_shows_template_and_preview(
@@ -5986,7 +6030,10 @@ def test_render_workers_page_shows_service_and_queue_status(
     assert "Work items" in html
     assert "Follow-ups" in html
     assert "send failed" in html
-    assert '<span class="nav-item active" aria-current="page">Workers</span>' in html
+    assert (
+        '<span class="nav-item active" data-nav-key="workers" aria-current="page">'
+        in html
+    )
 
 
 def test_workers_routes_render_page_and_json(tmp_path: Path, monkeypatch):
@@ -6126,7 +6173,10 @@ def test_logs_route_renders_logs_and_errors_route_remains_compatible(tmp_path: P
     assert logs_response.status_code == 200
     assert "Logs" in logs_response.text
     assert "authorization required" in logs_response.text
-    assert '<span class="nav-item active" aria-current="page">Logs</span>' in logs_response.text
+    assert (
+        '<span class="nav-item active" data-nav-key="logs" aria-current="page">'
+        in logs_response.text
+    )
     assert errors_response.status_code == 200
     assert "Logs" in errors_response.text
     assert "authorization required" in errors_response.text
